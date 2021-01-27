@@ -47,6 +47,9 @@ set(MAXFLOW_SRC maxflow/graph.cpp  maxflow/maxflow.cpp)
 ## Simple example
 add_executable(simple_example example/simple.cpp ${MAXFLOW_SRC})
 
+## DIMACS maxflow format example
+add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
+
 #set(DDPD_SRC src)
 #set(SHARED ${DDPD_SRC}/util/timer.cpp ${DDPD_SRC}/maxflow/graph.cpp  ${DDPD_SRC}/maxflow/maxflow.cpp)
 #

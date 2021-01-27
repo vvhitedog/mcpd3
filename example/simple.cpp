@@ -35,52 +35,25 @@
 #include <iostream>
 
 int main(int argc, char *argv[]) {
-  {
   std::vector<int> arcs{0, 1};
   std::vector<int> arc_capacities{3, 4};
   std::vector<int> terminal_capacities{10, 5, 5, 10};
-
   mcpd3::PrimalDualMinCutSolver min_cut_solver(2, 1, std::move(arcs),
                                 std::move(arc_capacities),
                                 std::move(terminal_capacities));
+  std::cout << " ========= direct maxflow computation =========\n";
+  auto maxflow_value = min_cut_solver.maxflow();
+  std::cout << " maxflow value: " << maxflow_value << "\n";
+  std::cout << " ========= primal dual maxflow computation ====\n";
   min_cut_solver.solve();
   std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
   std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
+  std::cout << " ========= primal dual maxflow re-computation==\n";
   min_cut_solver.solve();
   std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
   std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
-  }
-
-  {
-  std::vector<int> arcs{0, 1,
-  0, 2,
-  2, 3,
-  1, 3
-  };
-  std::vector<int> arc_capacities{500, 0,
-  200, 0,
-  100, 0,
-  0, 800
-  };
-  std::vector<int> terminal_capacities{100, 0,
-    0, 70,
-    80, 0,
-    0, 100
-  };
-
-  mcpd3::PrimalDualMinCutSolver min_cut_solver(4, 4, std::move(arcs),
-                                std::move(arc_capacities),
-                                std::move(terminal_capacities));
-  min_cut_solver.solve();
-  std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
-  std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
-  min_cut_solver.terminal_capacities()[0] += 100;
-  min_cut_solver.terminal_capacities()[3] += 100;
-  min_cut_solver.terminal_capacities()[4] += 100;
-  min_cut_solver.terminal_capacities()[7] += 100;
-  min_cut_solver.solve();
-  std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
-  std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
-  }
+  std::cout << " ==============================================\n";
+  std::cout << " ========= all values above should match ======\n";
+  std::cout << " ==============================================\n";
   return EXIT_SUCCESS;
 }

@@ -21,15 +21,7 @@
 
 #include <maxflow/graph.h>
 
-#include <iostream>
-
 namespace mcpd3 {
-
-// TODO: erase me
-// ambig - forward
-// cost - backward
-// source - ambig
-// sink - cost
 
 class PrimalDualMinCutSolver {
 public:
@@ -43,8 +35,30 @@ public:
     initializeMaxflowGraph();
   }
 
+  long maxflow() {
+    MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
+    for (int i = 0; i < narc_; ++i) {
+      int s = arcs_[2 * i + 0];
+      int t = arcs_[2 * i + 1];
+      int forward_capacity = arc_capacities_[2 * i + 0];
+      int backward_capacity = arc_capacities_[2 * i + 1];
+      maxflow_graph_.set_rcap(a, forward_capacity);
+      a = maxflow_graph_.get_next_arc(a);
+      maxflow_graph_.set_rcap(a, backward_capacity);
+      a = maxflow_graph_.get_next_arc(a);
+    }
+    for (int i = 0; i < nnode_; ++i) {
+      int source_capacity = terminal_capacities_[2 * i + 0];
+      int sink_capacity = terminal_capacities_[2 * i + 1];
+      maxflow_graph_.add_tweights(i,source_capacity,sink_capacity);
+    }
+    auto maxflow = maxflow_graph_.maxflow();
+    maxflow_graph_.reset();
+    initializeMaxflowGraph();
+    return maxflow;
+  }
+
   void solve() {
-    resetSolver();
     initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                       // complementary slackness conditions
     auto nviolated =
@@ -56,8 +70,7 @@ public:
       return; // no violated node based lagrange multiplier complementary
               // slackness conditions; translation: solution is optimal already
     }
-    auto mfval = maxflow_graph_.maxflow();
-    std::cout << "computed internal mf val: " << mfval << "\n";
+    maxflow_graph_.maxflow();
     updateFlow();   // get updated flow
     updateMinCut(); // get updated min cut solution
   }
@@ -113,36 +126,6 @@ public:
   }
 
 private:
-  void resetSolver() {
-    //static int c = 0;
-    //std::srand(time(NULL) + c++);
-    //for (int i = 0; i < nnode_; ++i) {
-    //  x_[i] = std::rand() % 2;
-    //  //x_[i] = 1;
-    //  assert(x_[i] == 0 || x_[i] == 1);
-    //}
-
-    //std::fill(x_.begin(), x_.end(), 0);
-    //x_ = {1,0};
-
-    // XXX: interesting to comment out below to check to see if
-    // complementary slackness conditions can be used to find maxflow from
-    // mincut
-    //
-    //std::fill(v_flow_.begin(), v_flow_.end(), 0);
-    //std::fill(d_flow_.begin(), d_flow_.end(), 0);
-
-     for (int i = 0; i < nnode_; ++i) {
-      // NOTE: resetting terminal capacities to 0 is necessary as
-      // `add_tweights` is used below
-      maxflow_graph_.set_trcap(i, 0);
-    }
-
-    maxflow_graph_.reset();
-    initializeMaxflowGraph();
-
-  }
-
   void initializeMaxflowGraph() {
     maxflow_graph_.add_node(nnode_);
     for (int i = 0; i < narc_; ++i) {
@@ -152,38 +135,15 @@ private:
     }
   }
 
-  std::pair<int, int> arcGradients(int x_s, int x_t, int forward_capacity,
-                                   int backward_capacity, int flow) {
-    int pos = flow;
-    int neg = flow;
-    pos += forward_capacity *
-           (std::max(x_t - x_s + 1, 0) - std::max(x_t - x_s, 0));
-    neg += forward_capacity *
-           (std::max(x_t - x_s, 0) - std::max(x_t - x_s - 1, 0));
-    pos += backward_capacity *
-           (std::max(x_s - x_t - 1, 0) - std::max(x_s - x_t, 0));
-    neg += backward_capacity *
-           (std::max(x_s - x_t, 0) - std::max(x_s - x_t + 1, 0));
+  std::pair<int, int> arcGradients(int forward_capacity,
+                                   int backward_capacity, int flow) const {
+    int pos = flow + forward_capacity;
+    int neg = flow - backward_capacity;
     return {pos, neg};
   }
 
-  std::pair<int,int> nodeGradient(int x_s, int source_capacity, int sink_capacity, int flow) {
-    // NOTE: the negative gradient can be calculated as:
-    //
-    // int neg = flow;
-    // neg += source_capacity * (std::max(x_s,0) - std::max(x_s - 1,0));
-    // neg += sink_capacity * (std::max(1 - x_s,0) - std::max(1 - x_s + 1,0));
-    //
-    // but there is no point, it is not used.
-    int pos = flow;
-    pos += source_capacity * (std::max(x_s + 1, 0) - std::max(x_s, 0));
-    pos += sink_capacity * (std::max(1 - x_s - 1, 0) - std::max(1 - x_s, 0));
-    int neg = flow;
-    neg += sink_capacity * (std::max(x_s,0) - std::max(x_s - 1,0));
-    neg += source_capacity * ( std::max(1 - x_s,0) - std::max(1 - x_s + 1,0));
-    //neg += sink_capacity * (std::max(x_s,0) - std::max(x_s - 1,0));
-    //neg += source_capacity * (std::max(1 - x_s,0) - std::max(1 - x_s - 1,0));
-    return {pos,neg};
+  int nodeGradient( int source_capacity, int sink_capacity, int flow) const {
+    return flow + source_capacity - sink_capacity;
   }
 
   void initializeFlow() {
@@ -195,8 +155,7 @@ private:
       int backward_capacity = arc_capacities_[2 * i + 1];
       int flow = v_flow_[i];
       auto [pos, neg] =
-          arcGradients(x_[s], x_[t], forward_capacity, backward_capacity, flow);
-          //arcGradients(0, 0, forward_capacity, backward_capacity, flow);
+          arcGradients(forward_capacity, backward_capacity, flow);
       int new_flow = 0;
       int dfp, dfn;
       if (pos < 0 || neg > 0) {
@@ -213,10 +172,8 @@ private:
         d_flow_[s] += new_flow;
         d_flow_[t] -= new_flow;
       }
-      std::tie(pos, neg) = arcGradients(x_[s], x_[t], forward_capacity,
+      std::tie(pos, neg) = arcGradients(forward_capacity,
                                         backward_capacity, v_flow_[i]);
-      //std::tie(pos, neg) = arcGradients(0, 0, forward_capacity,
-      //                                  backward_capacity, v_flow_[i]);
       assert(pos >= 0 && neg <= 0);
       maxflow_graph_.set_rcap(a, pos);
       a = maxflow_graph_.get_next_arc(a);
@@ -230,41 +187,19 @@ private:
     for (int i = 0; i < nnode_; ++i) {
       int source_capacity = terminal_capacities_[2 * i + 0];
       int sink_capacity = terminal_capacities_[2 * i + 1];
-      auto [pos,neg] =
-          nodeGradient(x_[i], source_capacity, sink_capacity, d_flow_[i]);
-          //nodeGradient(0, source_capacity, sink_capacity, d_flow_[i]);
-
-      if ( x_[i] == 0 ) {
-        if ( pos < 0 ) {
-          nviolated++;
-        }
-        std::cout << "attaching pos: " << pos << " to node " << i << std::endl;
-        maxflow_graph_.set_trcap(i, pos);
-      } else if ( x_[i] == 1 ) {
-        if ( neg > 0 ) {
-          nviolated++;
-        }
-        maxflow_graph_.set_trcap(i, neg);
-        std::cout << "attaching neg: " << neg << " to node " << i << std::endl;
+      auto pos =
+          nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      if ( pos < 0 ) {
+        nviolated++;
       }
-
-      // if (pos > 0) {
-      //  maxflow_graph_.add_tweights(i, pos, 0);
-      //} else {
-      //  maxflow_graph_.add_tweights(i, 0, -pos);
-      //}
+      maxflow_graph_.set_trcap(i, pos);
     }
     return nviolated;
   }
 
   void updateMinCut() {
     for (int i = 0; i < nnode_; ++i) {
-      std::cout << " decoded : " << maxflow_graph_.what_segment(i) << " for node " << i << " which had init soln: " << x_[i] << "\n";
-      if ( x_[i] == 0 ) {
       x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
-      } else if (x_[i] == 1) {
-      x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 0 : 1;
-      }
     }
   }
 
@@ -277,9 +212,7 @@ private:
       int backward_capacity = arc_capacities_[2 * i + 1];
       int flow = v_flow_[i];
       auto [pos, neg] =
-          arcGradients(x_[s], x_[t], forward_capacity, backward_capacity, flow);
-          //arcGradients(0, 0, forward_capacity, backward_capacity, flow);
-      //int32_t new_flow = maxflow_graph_.get_rcap(a) - pos;
+          arcGradients(forward_capacity, backward_capacity, flow);
       int new_flow = maxflow_graph_.get_rcap(a) - pos;
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
