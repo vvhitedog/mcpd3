@@ -20,6 +20,8 @@
 #include <vector>
 
 #include <maxflow/graph.h>
+#include <graph/mcgraph.h>
+#include <decomp/constraint.h>
 
 namespace mcpd3 {
 
@@ -34,6 +36,11 @@ public:
         d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_) {
     initializeMaxflowGraph();
   }
+
+  PrimalDualMinCutSolver(MinCutGraph &min_cut_graph)
+      : PrimalDualMinCutSolver(min_cut_graph.nnode, min_cut_graph.narc,
+          std::move(min_cut_graph.arcs),
+          std::move(min_cut_graph.arc_capacities), std::move(min_cut_graph.terminal_capacities) )  {}
 
   long maxflow() {
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
@@ -73,10 +80,6 @@ public:
     maxflow_graph_.maxflow();
     updateFlow();   // get updated flow
     updateMinCut(); // get updated min cut solution
-  }
-
-  std::vector<int>& terminal_capacities() { 
-    return terminal_capacities_;
   }
 
   long getMaxFlowValue() const {
@@ -123,6 +126,11 @@ public:
       }
     }
     return min_cut_value;
+  }
+
+  void addDualDecompositionConstraint( DualDecompositionConstraintArcReference arc_reference,
+      bool is_source ) {
+    dual_decomposition_constraints_.emplace_back(is_source,arc_reference);
   }
 
 private:
@@ -223,7 +231,7 @@ private:
   }
 
   /**
-   * Data passed into solver.
+   * data passed into solver
    */
   int nnode_;
   int narc_;
@@ -232,7 +240,7 @@ private:
   std::vector<int> terminal_capacities_;
 
   /**
-   * Data structures needed for solving primal dual problem.
+   * data structures needed for solving primal dual problem
    */
   std::vector<int> v_flow_; // flow on the arcs
   std::vector<int> d_flow_; // flow on the nodes
@@ -240,6 +248,15 @@ private:
   using MaxflowGraph =
       Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
+
+  /**
+   * specific to dual decomposition
+   */
+  struct DualDecompositionConstraint {
+    bool is_source; // otherwise is_target
+    DualDecompositionConstraintArcReference dual_decomposition_constraint_arc_ref;
+  };
+  std::list<DualDecompositionConstraint> dual_decomposition_constraints_;
 };
 
 } // namespace mcpd3
