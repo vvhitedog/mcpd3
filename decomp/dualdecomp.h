@@ -110,7 +110,7 @@ private:
      * step 3: create solvers
      */
     for (auto &min_cut_sub_graph : min_cut_sub_graphs) {
-      solvers_.emplace_back(min_cut_sub_graph.graph);
+      solvers_.emplace_back(std::move(min_cut_sub_graph.graph));
     }
     /**
      * step 4: create a DualDecompositionConstraintArc for each constraint
@@ -130,10 +130,10 @@ private:
            partitions) { // iterates in sorted order due to std::set
         if (not_first_partition) {
           int local_index_source =
-              min_cut_sub_graphs[previous_partition].getOrInsertNode(
+              min_cut_sub_graphs[previous_partition].getNode(
                   global_index);
           int local_index_target =
-              min_cut_sub_graphs[partition].getOrInsertNode(global_index);
+              min_cut_sub_graphs[partition].getNode(global_index);
           constraint_arcs.emplace_back(
               /*alpha=*/0,
               /*partition_index_source=*/previous_partition,
@@ -216,6 +216,14 @@ private:
         auto [insert_iter, exists] =
             global_to_local_map.insert({global_index, graph.nnode++});
         return insert_iter->second;
+      }
+      return find_iter->second;
+    }
+
+    int getNode(int global_index) const {
+      auto find_iter = global_to_local_map.find(global_index);
+      if (find_iter == global_to_local_map.end()) {
+        throw std::runtime_error("Node not found");
       }
       return find_iter->second;
     }
