@@ -17,6 +17,9 @@
 #pragma once
 
 #include <vector>
+#include <string>
+#include <cstdio>
+#include <stdexcept>
 
 namespace mcpd3 {
 
@@ -26,5 +29,27 @@ struct MinCutGraph {
   std::vector<int> arc_capacities;
   std::vector<int> terminal_capacities;
 };
+
+void to_file(const std::string &filename, const MinCutGraph &min_cut_graph) {
+  FILE *stream = fopen(filename.c_str(),"w");
+  if ( !stream ) {
+    throw std::runtime_error("Failed to open filename '" + filename + "' for writing.");
+  }
+  fprintf(stream,"n %d\n",min_cut_graph.nnode);
+  fprintf(stream,"m %d\n",min_cut_graph.narc);
+  for ( int i = 0; i < min_cut_graph.narc; ++i ) {
+    int s = min_cut_graph.arcs[2*i+0];
+    int t = min_cut_graph.arcs[2*i+1];
+    int forward_capacity = min_cut_graph.arc_capacities[2*i+0];
+    int backward_capacity = min_cut_graph.arc_capacities[2*i+1];
+    fprintf(stream,"a %8d %8d %8d %8d\n",s,t,forward_capacity,backward_capacity);
+  }
+  for ( int i = 0; i < min_cut_graph.nnode; ++i ) {
+    int source_capacity = min_cut_graph.terminal_capacities[2*i+0];
+    int sink_capacity = min_cut_graph.terminal_capacities[2*i+1];
+    fprintf(stream,"t %8d %8d %8d\n",i,source_capacity,sink_capacity);
+  }
+  fclose(stream);
+}
 
 }
