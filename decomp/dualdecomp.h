@@ -29,17 +29,17 @@ namespace mcpd3 {
 class DualDecomposition {
 public:
   DualDecomposition(int npartition, int nnode, int narc,
-                    std::vector<int> &&partitions, std::vector<int> &&arcs,
-                    std::vector<int> &&arc_capacities,
-                    std::vector<int> &&terminal_capacities)
+                    std::vector<int> partitions, std::vector<int> arcs,
+                    std::vector<int> arc_capacities,
+                    std::vector<int> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)) {
     initializeDecomposition();
   }
 
-  DualDecomposition(int npartition, std::vector<int> &&partitions,
-                    MinCutGraph &min_cut_graph)
+  DualDecomposition(int npartition, std::vector<int> partitions,
+                    MinCutGraph min_cut_graph)
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
                           std::move(partitions), std::move(min_cut_graph.arcs),
                           std::move(min_cut_graph.arc_capacities),
@@ -51,7 +51,6 @@ public:
     for ( auto &solver : solvers_ ) {
       solver.solve();
       auto adjusted_min_cut_value = solver.getMinCutValue();
-    //std::cout << "\rstep_size: " << step_size << " adjusted_min_cut_value : " << adjusted_min_cut_value << "";
       lower_bound += adjusted_min_cut_value;
     }
     std::cout << "\rstep_size: " << step_size <<  " lower_bound : " << lower_bound << "";

@@ -45,7 +45,6 @@ int main(int argc, char *argv[]) {
   }
 
   auto min_cut_graph_data = mcpd3::read_dimacs(argv[1]);
-  mcpd3::to_file("/tmp/dimacs_graph.dat",min_cut_graph_data);
   const int scale = 1000;
   for ( auto &cap  :min_cut_graph_data.arc_capacities ) {
     cap *= scale;
@@ -55,7 +54,7 @@ int main(int argc, char *argv[]) {
   }
   auto partitions = basic_graph_partition(npartition, min_cut_graph_data);
   mcpd3::DualDecomposition dual_decomp(npartition, std::move(partitions),
-                                       min_cut_graph_data);
+                                       std::move(min_cut_graph_data));
   dual_decomp.runOptimizationStep(50,1000);
   dual_decomp.runOptimizationStep(550,100);
   dual_decomp.runOptimizationStep(250,10);

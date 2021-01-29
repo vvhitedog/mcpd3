@@ -31,7 +31,7 @@ int main(int argc, char *argv[]) {
   }
 
   auto min_cut_graph_data = mcpd3::read_dimacs(argv[1]);
-  mcpd3::PrimalDualMinCutSolver min_cut_solver(min_cut_graph_data);
+  mcpd3::PrimalDualMinCutSolver min_cut_solver(std::move(min_cut_graph_data));
   std::cout << " ========= direct maxflow computation =========\n";
   auto maxflow_value = min_cut_solver.maxflow();
   std::cout << " maxflow value: " << maxflow_value << "\n";

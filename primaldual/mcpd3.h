@@ -29,8 +29,8 @@ namespace mcpd3 {
 class PrimalDualMinCutSolver {
 public:
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
-                         std::vector<int> &&arc_capacities,
-                         std::vector<int> &&terminal_capacities)
+                         std::vector<int> arc_capacities,
+                         std::vector<int> terminal_capacities)
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
@@ -38,7 +38,7 @@ public:
     initializeMaxflowGraph();
   }
 
-  PrimalDualMinCutSolver(MinCutGraph &min_cut_graph)
+  PrimalDualMinCutSolver(MinCutGraph min_cut_graph)
       : PrimalDualMinCutSolver(min_cut_graph.nnode, min_cut_graph.narc,
                                std::move(min_cut_graph.arcs),
                                std::move(min_cut_graph.arc_capacities),
