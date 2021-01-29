@@ -50,6 +50,9 @@ add_executable(simple_example example/simple.cpp ${MAXFLOW_SRC})
 ## DIMACS maxflow format example
 add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
 
+## DIMACS maxflow format example for dual decomposition
+add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
+
 #set(DDPD_SRC src)
 #set(SHARED ${DDPD_SRC}/util/timer.cpp ${DDPD_SRC}/maxflow/graph.cpp  ${DDPD_SRC}/maxflow/maxflow.cpp)
 #

@@ -14,12 +14,11 @@
 // You should have received a copy of the GNU General Public License along with
 // this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#pragma once 
+#pragma once
 
 #include <list>
 
 namespace mcpd3 {
-
 
 struct DualDecompositionConstraintArc {
   int alpha;                  /* lagrange multiplier */
@@ -27,6 +26,14 @@ struct DualDecompositionConstraintArc {
   int partition_index_target; /* partition index for target node */
   int local_index_source;     /* index within sub-problem of source */
   int local_index_target;     /* index within sub-problem of target */
+
+  DualDecompositionConstraintArc(int alpha, int partition_index_source,
+                                 int partition_index_target,
+                                 int local_index_source, int local_index_target)
+      : alpha(alpha), partition_index_source(partition_index_source),
+        partition_index_target(partition_index_target),
+        local_index_source(local_index_source),
+        local_index_target(local_index_target) {}
 };
 
 using DualDecompositionConstraintArcReference =

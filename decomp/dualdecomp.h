@@ -19,6 +19,7 @@
 #include <list>
 #include <set>
 #include <unordered_map>
+#include <iostream>
 
 #include "constraint.h"
 #include <primaldual/mcpd3.h>
@@ -32,12 +33,44 @@ public:
                     std::vector<int> &&arc_capacities,
                     std::vector<int> &&terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
-        partitions_(partitions), arcs_(arcs), arc_capacities_(arc_capacities),
-        terminal_capacities_(terminal_capacities) {
-          initializeDecomposition();
-        }
+        partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
+        terminal_capacities_(std::move(terminal_capacities)) {
+    initializeDecomposition();
+  }
+
+  DualDecomposition(int npartition, std::vector<int> &&partitions,
+                    MinCutGraph &min_cut_graph)
+      : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
+                          std::move(partitions), std::move(min_cut_graph.arcs),
+                          std::move(min_cut_graph.arc_capacities),
+                          std::move(min_cut_graph.terminal_capacities)) {}
+
+  void runOptimizationStep(int nstep,int step_size) {
+    for ( int i = 0; i < nstep; ++i ) {
+    long lower_bound = 0;
+    for ( auto &solver : solvers_ ) {
+      solver.solve();
+      auto adjusted_min_cut_value = solver.getMinCutValue();
+    //std::cout << "\rstep_size: " << step_size << " adjusted_min_cut_value : " << adjusted_min_cut_value << "";
+      lower_bound += adjusted_min_cut_value;
+    }
+    std::cout << "\rstep_size: " << step_size <<  " lower_bound : " << lower_bound << "";
+    std::flush(std::cout);
+    runAggregationStep(step_size);
+    }
+  }
 
 private:
+  void runAggregationStep(int step_size) {
+    for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+      for ( auto &constraint : constraints ) {
+        int diff = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target)
+          - solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
+        constraint.alpha += step_size*diff;
+      }
+    }
+  }
+
   void initializeDecomposition() {
     std::unordered_map</*global_index=*/int,
                        /*exists_in_partitions=*/std::set<int>>
@@ -51,6 +84,10 @@ private:
       int t = arcs_[2 * i + 1];
       int forward_capacity = arc_capacities_[2 * i + 0];
       int backward_capacity = arc_capacities_[2 * i + 1];
+      if ( s >  t ) {
+        std::swap(s,t);
+        std::swap(forward_capacity,backward_capacity);
+      }
       // the sub graph each arc belongs to is defined to be the partition of the
       // source node
       int arc_partition = partitions_[s];
@@ -77,7 +114,7 @@ private:
       solvers_.emplace_back(min_cut_sub_graph.graph);
     }
     /**
-     * step 4: create DualDecompositionConstraintArc for each constraint
+     * step 4: create a DualDecompositionConstraintArc for each constraint
      * induced on each constrained node (which should be one less than the
      * number of partitions the node appears in)
      */
@@ -134,7 +171,35 @@ private:
   std::unordered_map</*global_index=*/int,
                      std::list<DualDecompositionConstraintArc>>
       constraint_arc_map_;
-  std::vector<PrimalDualMinCutSolver> solvers_;
+
+  template <typename T>
+  /**
+   * @brief a minimal class to make use of an expanding vector without the need
+   * for copying its contents when expanding
+   */
+  class stable_vector {
+  public:
+    template <typename... Args> void emplace_back(Args &&... args) {
+      list_.emplace_back(args...);
+      vector_.emplace_back(--list_.end());
+    }
+
+    T &operator[](size_t index) { return *vector_[index]; }
+
+    typename std::list<T>::iterator begin() {
+      return list_.begin();
+    }
+
+    typename std::list<T>::iterator end() {
+      return list_.end();
+    }
+
+  private:
+    std::list<T> list_;
+    std::vector<typename std::list<T>::iterator> vector_;
+  };
+
+  stable_vector<PrimalDualMinCutSolver> solvers_;
 
   struct MinCutSubGraph {
     MinCutGraph graph;
@@ -160,7 +225,6 @@ private:
                    int forward_capacity, int backward_capacity) {
       int s = getOrInsertNode(global_source_index);
       int t = getOrInsertNode(global_target_index);
-      assert(s < t);
       graph.arc_capacities.push_back(forward_capacity);
       graph.arc_capacities.push_back(backward_capacity);
       graph.arcs.push_back(s);

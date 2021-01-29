@@ -17,11 +17,12 @@
 #pragma once
 
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
-#include <maxflow/graph.h>
-#include <graph/mcgraph.h>
 #include <decomp/constraint.h>
+#include <graph/mcgraph.h>
+#include <maxflow/graph.h>
 
 namespace mcpd3 {
 
@@ -30,17 +31,18 @@ public:
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<int> &&arc_capacities,
                          std::vector<int> &&terminal_capacities)
-      : nnode_(nnode), narc_(narc), arcs_(arcs),
-        arc_capacities_(arc_capacities),
-        terminal_capacities_(terminal_capacities), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_) {
+      : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
+        arc_capacities_(std::move(arc_capacities)),
+        terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
+        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration(true) {
     initializeMaxflowGraph();
   }
 
   PrimalDualMinCutSolver(MinCutGraph &min_cut_graph)
       : PrimalDualMinCutSolver(min_cut_graph.nnode, min_cut_graph.narc,
-          std::move(min_cut_graph.arcs),
-          std::move(min_cut_graph.arc_capacities), std::move(min_cut_graph.terminal_capacities) )  {}
+                               std::move(min_cut_graph.arcs),
+                               std::move(min_cut_graph.arc_capacities),
+                               std::move(min_cut_graph.terminal_capacities)) {}
 
   long maxflow() {
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
@@ -57,7 +59,7 @@ public:
     for (int i = 0; i < nnode_; ++i) {
       int source_capacity = terminal_capacities_[2 * i + 0];
       int sink_capacity = terminal_capacities_[2 * i + 1];
-      maxflow_graph_.add_tweights(i,source_capacity,sink_capacity);
+      maxflow_graph_.add_tweights(i, source_capacity, sink_capacity);
     }
     auto maxflow = maxflow_graph_.maxflow();
     maxflow_graph_.reset();
@@ -66,6 +68,7 @@ public:
   }
 
   void solve() {
+    std::fill(x_.begin(),x_.end(),0); // reset min cut
     initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                       // complementary slackness conditions
     auto nviolated =
@@ -77,7 +80,9 @@ public:
       return; // no violated node based lagrange multiplier complementary
               // slackness conditions; translation: solution is optimal already
     }
-    maxflow_graph_.maxflow();
+    maxflow_graph_.maxflow(!is_first_iteration);
+    is_first_iteration = false;
+    markNodes();
     updateFlow();   // get updated flow
     updateMinCut(); // get updated min cut solution
   }
@@ -92,13 +97,13 @@ public:
       node_balance[s] += flow;
       node_balance[t] -= flow;
     }
-    for ( int i = 0; i < nnode_; ++i ) {
-      if ( node_balance[i] > 0 ) {
+    for (int i = 0; i < nnode_; ++i) {
+      if (node_balance[i] > 0) {
         maxflow += node_balance[i];
       }
       int source_capacity = terminal_capacities_[2 * i + 0];
       int sink_capacity = terminal_capacities_[2 * i + 1];
-      maxflow += std::min(source_capacity,sink_capacity);
+      maxflow += std::min(source_capacity, sink_capacity);
     }
     return maxflow;
   }
@@ -124,13 +129,25 @@ public:
       } else {
         min_cut_value += source_capacity;
       }
+      min_cut_value +=
+          getDualDecompositionLagrangeMultiplier(i) * x_[i];
     }
     return min_cut_value;
   }
 
-  void addDualDecompositionConstraint( DualDecompositionConstraintArcReference arc_reference,
-      bool is_source ) {
-    dual_decomposition_constraints_.emplace_back(is_source,arc_reference);
+  void addDualDecompositionConstraint(
+      DualDecompositionConstraintArcReference arc_reference, bool is_source) {
+    if (is_source) { // is source
+      dual_decomposition_constraints_map_.insert(
+          {arc_reference->local_index_source, {arc_reference, is_source}});
+    } else { // is target
+      dual_decomposition_constraints_map_.insert(
+          {arc_reference->local_index_target, {arc_reference, is_source}});
+    }
+  }
+
+  int getMinCutSolution( int index ) const {
+    return x_[index];
   }
 
 private:
@@ -143,14 +160,14 @@ private:
     }
   }
 
-  std::pair<int, int> arcGradients(int forward_capacity,
-                                   int backward_capacity, int flow) const {
+  std::pair<int, int> arcGradients(int forward_capacity, int backward_capacity,
+                                   int flow) const {
     int pos = flow + forward_capacity;
     int neg = flow - backward_capacity;
     return {pos, neg};
   }
 
-  int nodeGradient( int source_capacity, int sink_capacity, int flow) const {
+  int nodeGradient(int source_capacity, int sink_capacity, int flow) const {
     return flow + source_capacity - sink_capacity;
   }
 
@@ -162,8 +179,7 @@ private:
       int forward_capacity = arc_capacities_[2 * i + 0];
       int backward_capacity = arc_capacities_[2 * i + 1];
       int flow = v_flow_[i];
-      auto [pos, neg] =
-          arcGradients(forward_capacity, backward_capacity, flow);
+      auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
       int new_flow = 0;
       int dfp, dfn;
       if (pos < 0 || neg > 0) {
@@ -180,8 +196,8 @@ private:
         d_flow_[s] += new_flow;
         d_flow_[t] -= new_flow;
       }
-      std::tie(pos, neg) = arcGradients(forward_capacity,
-                                        backward_capacity, v_flow_[i]);
+      std::tie(pos, neg) =
+          arcGradients(forward_capacity, backward_capacity, v_flow_[i]);
       assert(pos >= 0 && neg <= 0);
       maxflow_graph_.set_rcap(a, pos);
       a = maxflow_graph_.get_next_arc(a);
@@ -190,14 +206,35 @@ private:
     }
   }
 
+  void markNodes() {
+    for (const auto &[index,constraint]: dual_decomposition_constraints_map_) {
+      maxflow_graph_.mark_node(index);
+    }
+  }
+
+  int getDualDecompositionLagrangeMultiplier(int index) const {
+    int lagrange_multiplier_term = 0;
+    auto constraint_map_iter = dual_decomposition_constraints_map_.find(index);
+    if (constraint_map_iter != dual_decomposition_constraints_map_.end()) {
+      const auto &constraint = constraint_map_iter->second;
+      if (constraint.is_source) { // is source in constraint
+        lagrange_multiplier_term -= constraint.arc_reference->alpha;
+      } else { // is target in constraint
+        lagrange_multiplier_term += constraint.arc_reference->alpha;
+      }
+    }
+    return lagrange_multiplier_term;
+  }
+
   int updateNodePotentials() {
     int nviolated = 0;
     for (int i = 0; i < nnode_; ++i) {
       int source_capacity = terminal_capacities_[2 * i + 0];
       int sink_capacity = terminal_capacities_[2 * i + 1];
-      auto pos =
-          nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
-      if ( pos < 0 ) {
+      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      // include any active dual decomposition constraint if applicable
+      pos += getDualDecompositionLagrangeMultiplier(i);
+      if (pos < 0) {
         nviolated++;
       }
       maxflow_graph_.set_trcap(i, pos);
@@ -219,8 +256,7 @@ private:
       int forward_capacity = arc_capacities_[2 * i + 0];
       int backward_capacity = arc_capacities_[2 * i + 1];
       int flow = v_flow_[i];
-      auto [pos, neg] =
-          arcGradients(forward_capacity, backward_capacity, flow);
+      auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
       int new_flow = maxflow_graph_.get_rcap(a) - pos;
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
@@ -248,15 +284,20 @@ private:
   using MaxflowGraph =
       Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
+  bool is_first_iteration;
 
   /**
    * specific to dual decomposition
    */
   struct DualDecompositionConstraint {
+    DualDecompositionConstraintArcReference arc_reference;
     bool is_source; // otherwise is_target
-    DualDecompositionConstraintArcReference dual_decomposition_constraint_arc_ref;
+    DualDecompositionConstraint(DualDecompositionConstraintArcReference _a,
+                                bool _s)
+        : arc_reference(_a), is_source(_s) {}
   };
-  std::list<DualDecompositionConstraint> dual_decomposition_constraints_;
+  std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
+      dual_decomposition_constraints_map_;
 };
 
 } // namespace mcpd3
