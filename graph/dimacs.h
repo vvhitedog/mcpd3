@@ -24,9 +24,18 @@
 
 namespace mcpd3 {
 
+int remap_index(int original_index, int source_index, int sink_index ) {
+  if ( original_index > source_index ) {
+    --original_index;
+  }
+  if ( original_index > sink_index ) {
+    --original_index;
+  }
+  return --original_index; // indices in DIMACS start at 1 but we wish for them to start at 0
+}
+
 MinCutGraph read_dimacs(const std::string &filename) {
   MinCutGraph g;
-  std::unordered_map<int, int> remapped_indices;
   std::unordered_map<int, std::unordered_map<int, int>> arc_adjacency;
   const int line_length = 1024;
   char line[line_length];
@@ -47,7 +56,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
             "p line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
       }
-      g.terminal_capacities.resize(2 * (n - 2), 0);
+      g.nnode = n-2;
+      g.terminal_capacities.resize(2*(g.nnode),0);
       break;
     case 'a':
       if (source == -1 || sink == -1) {
@@ -67,29 +77,23 @@ MinCutGraph read_dimacs(const std::string &filename) {
             filename + "\n";
         throw std::runtime_error(err_msg.c_str());
       }
-      if (s != source && remapped_indices.find(s) == remapped_indices.end()) {
-        remapped_indices.insert({s,remapped_indices.size()});
-      }
-      if (t != sink && remapped_indices.find(t) == remapped_indices.end()) {
-        remapped_indices.insert({t,remapped_indices.size()});
-      }
       if (s != source && t != sink) { // handle non terminal arc
-        _s = remapped_indices[s];
-        _t = remapped_indices[t];
+        _s = remap_index(s,source,sink);
+        _t = remap_index(t,source,sink);
         if (arc_adjacency[_s].find(_t) == arc_adjacency[_s].end()) {
           arc_adjacency[_s][_t] = cap;
           if (arc_adjacency[_t].find(_s) == arc_adjacency[_t].end()) {
             arc_adjacency[_t][_s] = 0;
           }
         } else {
-          arc_adjacency[_s][_t] += cap;
+          arc_adjacency[_s][_t] = cap;
         }
       } else { // handle terminal arc
         if (s == source) {
-          _t = remapped_indices[t];
+          _t = remap_index(t,source,sink);
           g.terminal_capacities[2 * _t + 0] += cap;
         } else if (t == sink) {
-          _s = remapped_indices[s];
+          _s = remap_index(s,source,sink);
           g.terminal_capacities[2 * _s + 1] += cap;
         }
       }
@@ -114,9 +118,6 @@ MinCutGraph read_dimacs(const std::string &filename) {
       break;
     }
   }
-  assert(remapped_indices.find(source) == remapped_indices.end());
-  assert(remapped_indices.find(sink) == remapped_indices.end());
-  g.nnode = remapped_indices.size();
   g.narc = 0;
   for (const auto &[s, arc_list] : arc_adjacency) {
     for (const auto &[t, cap] : arc_list) {
