@@ -37,38 +37,35 @@ else ()
   ADD_DEFINITIONS( -std=c++17 )
 endif ()
 
-# Dependencies
-find_package(METIS REQUIRED)
+# Options
+option(GPERF_PROFILER_BUILD "Build with gperftools CPU profiling enabled." OFF )
+option(TRAP_SIGNED_INTEGER_OVERFLOW "Trap signed and unsigned integer overflow using the `ftrapv` flag." OFF )
+option(METIS_ENABLED "Use the metis library for graph partitioning (highly recommended.)" OFF )
+
+# Set flags based on options
+if (GPERF_PROFILER_BUILD) 
+  set(PROFILER_LINK_FLAG profiler)
+else ()
+  set(PROFILER_LINK_FLAG)
+endif (GPERF_PROFILER_BUILD)
+if (TRAP_SIGNED_INTEGER_OVERFLOW)
+  SET(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -ftrapv")
+endif (TRAP_SIGNED_INTEGER_OVERFLOW)
+if (METIS_ENABLED)
+  find_package(METIS REQUIRED)
+endif (METIS_ENABLED)
 
 include_directories(.)
-
 set(MAXFLOW_SRC maxflow/graph.cpp  maxflow/maxflow.cpp)
 
 ## Simple example
 add_executable(simple_example example/simple.cpp ${MAXFLOW_SRC})
+target_link_libraries(simple_example PUBLIC ${PROFILER_LINK_FLAG} )
 
 ## DIMACS maxflow format example
 add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
+target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} )
 
 ## DIMACS maxflow format example for dual decomposition
 add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
-
-#set(DDPD_SRC src)
-#set(SHARED ${DDPD_SRC}/util/timer.cpp ${DDPD_SRC}/maxflow/graph.cpp  ${DDPD_SRC}/maxflow/maxflow.cpp)
-#
-## Compile the dual decomp init binary
-#set(DUAL_DECOMP_INIT ${DDPD_SRC}/dual_decomp_init.cpp )
-#add_executable(dual_decomp_init ${DUAL_DECOMP_INIT} ${SHARED})
-#target_include_directories( dual_decomp_init PRIVATE ${DDPD_SRC} ${METIS_INCLUDE_DIR} )
-#target_link_libraries(dual_decomp_init ${METIS_LIBRARIES} )
-#
-## Compile the dual decomp init binary
-#set(DUAL_DECOMP_SOLVE ${DDPD_SRC}/dual_decomp_solve.cpp )
-#add_executable(dual_decomp_solve ${DUAL_DECOMP_SOLVE} ${SHARED})
-#target_include_directories( dual_decomp_solve PRIVATE ${DDPD_SRC} )
-#target_link_libraries(dual_decomp_solve pthread profiler)
-#
-#set(DUAL_DECOMP_flow_test ${DDPD_SRC}/dual_decomp_flow_test.cpp )
-#add_executable(dual_decomp_flow_test ${DUAL_DECOMP_flow_test} ${SHARED})
-#target_include_directories( dual_decomp_flow_test PRIVATE ${DDPD_SRC} )
-#target_link_libraries(dual_decomp_flow_test pthread profiler)
+target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} )
