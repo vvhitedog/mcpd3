@@ -82,11 +82,15 @@ public:
     for (int i = 0; i < nstep; ++i) {
 
       long lower_bound = 0;
+      long min_sub_lower_bound = std::numeric_limits<long>::max();
+      long max_sub_lower_bound = std::numeric_limits<long>::min();
       for (auto &solver : solvers_) {
         solver.solve();
         auto adjusted_min_cut_value = solver.getMinCutValue();
         lower_bound += adjusted_min_cut_value;
-        printf(" -subproblem lower_bound- : %ld\n",adjusted_min_cut_value);
+        min_sub_lower_bound = std::min(min_sub_lower_bound,adjusted_min_cut_value);
+        max_sub_lower_bound = std::max(max_sub_lower_bound,adjusted_min_cut_value);
+        //printf(" -subproblem lower_bound- : %ld\n",adjusted_min_cut_value);
       }
       max_lower_bound = std::max(lower_bound,max_lower_bound);
 
