@@ -168,6 +168,8 @@ public:
 	//    NOTE: adding new arcs may invalidate these pointers (if reallocation    //
 	//    happens). So it's best not to add arcs while reading graph structure.   //
 	////////////////////////////////////////////////////////////////////////////////
+  
+	node* get_nodes();
 
 	// The following two functions return arcs in the same order that they
 	// were added to the graph. NOTE: for each call add_edge(i,j,cap,cap_rev)
@@ -431,6 +433,12 @@ template <typename captype, typename tcaptype, typename flowtype>
 	a_rev -> head = i;
 	a -> r_cap = cap;
 	a_rev -> r_cap = rev_cap;
+}
+
+template <typename captype, typename tcaptype, typename flowtype> 
+	inline typename Graph<captype,tcaptype,flowtype>::node* Graph<captype,tcaptype,flowtype>::get_nodes()
+{
+	return nodes;
 }
 
 template <typename captype, typename tcaptype, typename flowtype> 

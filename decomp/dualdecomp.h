@@ -20,6 +20,7 @@
 #include <set>
 #include <unordered_map>
 #include <memory>
+#include <queue>
 
 #include "constraint.h"
 #include <primaldual/mcpd3.h>
@@ -31,16 +32,16 @@ namespace mcpd3 {
 class DualDecomposition {
 public:
   DualDecomposition(int npartition, int nnode, int narc,
-                    std::vector<int> partitions, std::vector<int> arcs,
-                    std::vector<int> arc_capacities,
-                    std::vector<int> terminal_capacities)
+                    std::vector<long> partitions, std::vector<long> arcs,
+                    std::vector<long> arc_capacities,
+                    std::vector<long> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_) {
     initializeDecomposition();
   }
 
-  DualDecomposition(int npartition, std::vector<int> partitions,
+  DualDecomposition(int npartition, std::vector<long> partitions,
                     MinCutGraph min_cut_graph)
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
                           std::move(partitions), std::move(min_cut_graph.arcs),
@@ -75,10 +76,19 @@ public:
       return primal_solver_->getMinCutValue();
   }
 
-  void runOptimizationStep(int nstep, int step_size, int max_cycle_count = 2) {
+  void runOptimizationStep(int nstep, int step_size, int max_cycle_count = 2, int break_on_small_change = false) {
+    const int numstats = 10;
+    ScalarStatisticsTracker<long> lower_bound_stats(numstats);
+    ScalarStatisticsTracker<long> lower_bound_diff_stats(numstats);
+    ScalarStatisticsTracker<long> lower_bound_stats_range0(numstats);
+    ScalarStatisticsTracker<long> lower_bound_stats_range1(numstats);
+    ScalarStatisticsTracker<int> num_disagreeing_stats(numstats);
+    ScalarStatisticsTracker<long> lower_bound_diff_abs_stats(numstats);
+    long last_lower_bound;
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
     long min_upper_bound = std::numeric_limits<long>::max();
+    std::unordered_set<int> disagreeing_unique_global_indices;
     for (int i = 0; i < nstep; ++i) {
 
       long lower_bound = 0;
@@ -100,8 +110,60 @@ public:
       min_upper_bound = std::min(upper_bound,min_upper_bound);
 
       auto [num_disagreeing, disagreeing_global_indices] =
-          runLagrangeMultipliersUpdateStep(step_size);
+          runLagrangeMultipliersUpdateStep(step_size,break_on_small_change);
+      for (const auto &index : disagreeing_global_indices) {
+        disagreeing_unique_global_indices.insert(index);
+      }
+      for (auto &solver : solvers_) { // inform each solver of the total number of unsatisfied nodes
+        solver.setNumUnsatisfiedNodes(disagreeing_unique_global_indices.size());
+      }
       printf("lower_bound : %ld num_disagreeing : %ld upper_bound : %ld\n",lower_bound,num_disagreeing,upper_bound);
+
+      if ( i > 0 ) {
+        auto lower_bound_diff = lower_bound - last_lower_bound;
+        lower_bound_diff_stats.addValue(lower_bound_diff);
+        if ( (i / numstats) % 2 == 0  ) {
+          lower_bound_stats_range0.addValue(lower_bound);
+        } else {
+          lower_bound_stats_range1.addValue(lower_bound);
+        }
+        lower_bound_diff_abs_stats.addValue(std::abs(lower_bound_diff));
+      }
+      lower_bound_stats.addValue(lower_bound);
+      num_disagreeing_stats.addValue(num_disagreeing);
+      if ( i > numstats + 1 ) {
+        printf( " > last %d stats, lower_bound : %lf lower_bound_diff : %lf num_disagreeing : %lf lower_bound_diff_abs : %lf lower_bound_range0 max: %ld lower_bound_range1 max : %ld\n",
+            numstats,lower_bound_stats.getAverage(),
+            lower_bound_diff_stats.getAverage(),
+            num_disagreeing_stats.getAverage(),
+            lower_bound_diff_abs_stats.getAverage(),
+            lower_bound_stats_range0.getMaximum(),
+            lower_bound_stats_range1.getMaximum()
+            );
+        //if ( break_on_small_change && std::abs(lower_bound_diff_stats.getAverage()) < 1 && lower_bound_diff_stats.getAverage() < 0 ) {
+        //  std::cout << "breaking because of small change\n";
+        //  break;
+        //}
+        if ( break_on_small_change && i % (numstats) == numstats-1 && i >= 2*numstats-1 ) {
+          if ( (i / numstats) % 2 == 1  ) {
+            if ( lower_bound_stats_range1.getMaximum() <= 
+                lower_bound_stats_range0.getMaximum() ) {
+              std::cout << "breaking because max of this interval is less than last interval : " << lower_bound_stats_range1.getMaximum()
+                << " and " << lower_bound_stats_range0.getMaximum() << " \n";
+              break;
+            }
+          } else {
+            if ( lower_bound_stats_range0.getMaximum() <= 
+                lower_bound_stats_range1.getMaximum() ) {
+              std::cout << "breaking because max of this interval is less than last interval : " << lower_bound_stats_range0.getMaximum()
+                << " and " << lower_bound_stats_range1.getMaximum() << " \n";
+              break;
+            }
+          }
+        }
+      }
+
+      last_lower_bound = lower_bound;
       if (num_disagreeing == 0) { // optimality condition
         std::cout << "breaking because of no disagreement\n";
         break;
@@ -148,7 +210,7 @@ private:
     return hash;
   }
 
-  std::pair<long,std::list<int>> runLagrangeMultipliersUpdateStep(int step_size) {
+  std::pair<long,std::list<int>> runLagrangeMultipliersUpdateStep(int step_size, bool use_momentum ) {
     std::list<int> disagreeing_global_indices;
     double num_disagreeing = 0;
     for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
@@ -156,7 +218,13 @@ private:
         int diff = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target)
           - solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
         if ( diff != 0 ) {
+          if ( use_momentum ) {
+        const double beta = .9;
+        constraint.alpha_momentum = beta * constraint.alpha_momentum * beta + (1-beta) * diff;
+        constraint.alpha += step_size*int(10*constraint.alpha_momentum);
+          } else {
         constraint.alpha += step_size*diff;
+        }
         disagreeing_global_indices.emplace_back(global_index);
         constraint.is_unsatisfied = 1;
         } else {
@@ -209,15 +277,13 @@ private:
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
       solvers_.emplace_back(std::move(min_cut_sub_graph.graph));
     }
-    for ( auto &solver : solvers_ )  {
-      solver.setDecompositionSize(npartition_);
-    }
     /**
      * step 4: create a DualDecompositionConstraintArc for each constraint
      * induced on each constrained node (which should be one less than the
      * number of partitions the node appears in)
      */
     std::set<int> constrained_nodes_partition_counts;
+    long total_constrained_dual_nodes = 0;
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
@@ -237,6 +303,7 @@ private:
               min_cut_sub_graphs_[partition].getNode(global_index);
           constraint_arcs.emplace_back(
               /*alpha=*/0,
+              /*alpha_momentum=*/0,
               /*partition_index_source=*/previous_partition,
               /*partition_index_target=*/partition,
               /*local_index_source=*/local_index_source,
@@ -251,7 +318,11 @@ private:
       }
       assert(constraint_arcs.size() == partitions.size() - 1);
       constrained_nodes_partition_counts.insert(partitions.size());
+      total_constrained_dual_nodes += partitions.size();
     }
+    //for (auto &solver : solvers_ ) {
+    //  solver.setNumUnsatisfiedNodes(total_constrained_dual_nodes);
+    //}
     printf("partition counts: ");
     for (const auto &count : constrained_nodes_partition_counts ) {
       printf("%d,",count);
@@ -272,10 +343,10 @@ private:
   int npartition_;
   int nnode_;
   int narc_;
-  std::vector<int> partitions_;
-  std::vector<int> arcs_;
-  std::vector<int> arc_capacities_;
-  std::vector<int> terminal_capacities_;
+  std::vector<long> partitions_;
+  std::vector<long> arcs_;
+  std::vector<long> arc_capacities_;
+  std::vector<long> terminal_capacities_;
 
   /**
    * data structures needed for solving dual decomposition
@@ -363,7 +434,42 @@ private:
   };
 
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
-  std::vector<int> primal_solution_;
+  std::vector<long> primal_solution_;
+
+  template<typename T>
+  struct ScalarStatisticsTracker {
+    ScalarStatisticsTracker(size_t n):n_(n),running_sum_(0),id_(0) {}
+
+    void addValue(const T& value) {
+      values_.push_back({value,id_});
+      ordered_values_.insert(values_.back());
+      id_ = (id_ + 1) % n_;
+      running_sum_ += value;
+      if ( values_.size() > n_ ) {
+        running_sum_ -= values_.front().first;
+        ordered_values_.erase(values_.front());
+        values_.pop_front();
+      }
+    }
+
+    double getAverage() const {
+      return static_cast<double>(running_sum_)/n_;
+    }
+
+    T getMaximum() const {
+      if ( !ordered_values_.size() ) {
+        return {};
+      }
+      return ordered_values_.rbegin()->first;
+    }
+
+    private:
+    size_t n_;
+    size_t id_;
+    std::list<std::pair<T,size_t>> values_;
+    T running_sum_;
+    std::set<std::pair<T,size_t>> ordered_values_;
+  };
 };
 
 } // namespace mcpd3

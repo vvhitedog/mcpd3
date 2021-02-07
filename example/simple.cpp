@@ -35,9 +35,9 @@
 #include <iostream>
 
 int main(int argc, char *argv[]) {
-  std::vector<int> arcs{0, 1};
-  std::vector<int> arc_capacities{3, 4};
-  std::vector<int> terminal_capacities{10, 5, 5, 10};
+  std::vector<long> arcs{0, 1};
+  std::vector<long> arc_capacities{3, 4};
+  std::vector<long> terminal_capacities{10, 5, 5, 10};
   mcpd3::PrimalDualMinCutSolver min_cut_solver(2, 1, std::move(arcs),
                                 std::move(arc_capacities),
                                 std::move(terminal_capacities));

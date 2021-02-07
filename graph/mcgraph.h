@@ -25,9 +25,9 @@ namespace mcpd3 {
 
 struct MinCutGraph {
   int nnode, narc;
-  std::vector<int> arcs;
-  std::vector<int> arc_capacities;
-  std::vector<int> terminal_capacities;
+  std::vector<long> arcs;
+  std::vector<long> arc_capacities;
+  std::vector<long> terminal_capacities;
 };
 
 void to_file(const std::string &filename, const MinCutGraph &min_cut_graph) {

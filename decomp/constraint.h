@@ -21,17 +21,18 @@
 namespace mcpd3 {
 
 struct DualDecompositionConstraintArc {
-  int alpha;                  /* lagrange multiplier */
+  long alpha;                  /* lagrange multiplier */
+  float alpha_momentum;           /* lagrange multiplier momentum */
   int partition_index_source; /* partition index for source node */
   int partition_index_target; /* partition index for target node */
   int local_index_source;     /* index within sub-problem of source */
   int local_index_target;     /* index within sub-problem of target */
   int is_unsatisfied : 1;        /* bit flag indicating if constraint has changed since last iteration */
 
-  DualDecompositionConstraintArc(int alpha, int partition_index_source,
+  DualDecompositionConstraintArc(int alpha, float alpha_momentum, int partition_index_source,
                                  int partition_index_target,
                                  int local_index_source, int local_index_target)
-      : alpha(alpha), partition_index_source(partition_index_source),
+      : alpha(alpha), alpha_momentum(alpha_momentum), partition_index_source(partition_index_source),
         partition_index_target(partition_index_target),
         local_index_source(local_index_source),
         local_index_target(local_index_target),

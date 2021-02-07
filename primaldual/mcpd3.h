@@ -30,13 +30,13 @@ namespace mcpd3 {
 
 class PrimalDualMinCutSolver {
 public:
-  PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
-                         std::vector<int> arc_capacities,
-                         std::vector<int> terminal_capacities)
+  PrimalDualMinCutSolver(int nnode, int narc, std::vector<long> &&arcs,
+                         std::vector<long> arc_capacities,
+                         std::vector<long> terminal_capacities)
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true), scale_(1), decomposition_size_(0) {
+        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true), scale_(1), num_unsatisfied_nodes_(0), trcap_(nnode_,0) {
         //previous_terminal_node_capacities_(nnode_,-1) {
     initializeMaxflowGraph();
   }
@@ -47,27 +47,28 @@ public:
                                std::move(min_cut_graph.arc_capacities),
                                std::move(min_cut_graph.terminal_capacities)) {}
 
-  void setDecompositionSize(int decomposition_size) {
-    decomposition_size_ = decomposition_size;
+  void setNumUnsatisfiedNodes( int num_unsatisfied_nodes ) {
+    disagreeing_unique_indices_.clear();
+    num_unsatisfied_nodes_ = num_unsatisfied_nodes;
   }
 
   template<int scale>
   void scaleProblem() {
     scale_ *= scale;
     for (int i = 0; i < nnode_; ++i) {
-      int &source_capacity = terminal_capacities_[2 * i + 0];
-      int &sink_capacity = terminal_capacities_[2 * i + 1];
+      auto &source_capacity = terminal_capacities_[2 * i + 0];
+      auto &sink_capacity = terminal_capacities_[2 * i + 1];
       source_capacity *= scale;
       sink_capacity *= scale;
-      int &flow = d_flow_[i];
+      auto &flow = d_flow_[i];
       flow *= scale;
     }
     for (int i = 0; i < narc_; ++i) {
-      int &forward_capacity = arc_capacities_[2 * i + 0];
-      int &backward_capacity = arc_capacities_[2 * i + 1];
+      auto &forward_capacity = arc_capacities_[2 * i + 0];
+      auto &backward_capacity = arc_capacities_[2 * i + 1];
       forward_capacity *= scale;
       backward_capacity *= scale;
-      int &flow = v_flow_[i];
+      auto &flow = v_flow_[i];
       flow *= scale;
     }
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
@@ -92,16 +93,16 @@ public:
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
-      int forward_capacity = arc_capacities_[2 * i + 0];
-      int backward_capacity = arc_capacities_[2 * i + 1];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
       maxflow_graph_.set_rcap(a, forward_capacity);
       a = maxflow_graph_.get_next_arc(a);
       maxflow_graph_.set_rcap(a, backward_capacity);
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
-      int source_capacity = terminal_capacities_[2 * i + 0];
-      int sink_capacity = terminal_capacities_[2 * i + 1];
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
       maxflow_graph_.add_tweights(i, source_capacity, sink_capacity);
     }
     auto maxflow = maxflow_graph_.maxflow();
@@ -150,8 +151,8 @@ public:
       if (node_balance[i] > 0) {
         maxflow += node_balance[i];
       }
-      int source_capacity = terminal_capacities_[2 * i + 0];
-      int sink_capacity = terminal_capacities_[2 * i + 1];
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
       maxflow += std::min(source_capacity, sink_capacity);
     }
     return maxflow;
@@ -162,8 +163,8 @@ public:
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
-      int forward_capacity = arc_capacities_[2 * i + 0];
-      int backward_capacity = arc_capacities_[2 * i + 1];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
       if (x_[s] == 0 && x_[t] == 1) {
         min_cut_value += forward_capacity;
       } else if (x_[s] == 1 && x_[t] == 0) {
@@ -171,8 +172,8 @@ public:
       }
     }
     for (int i = 0; i < nnode_; ++i) {
-      int source_capacity = terminal_capacities_[2 * i + 0];
-      int sink_capacity = terminal_capacities_[2 * i + 1];
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
       if (x_[i] == 0) {
         min_cut_value += sink_capacity;
       } else {
@@ -241,7 +242,7 @@ public:
     return x_[index];
   }
 
-  void setMinCutSolution( const std::vector<int> new_solution ) {
+  void setMinCutSolution( const std::vector<long> new_solution ) {
     std::copy(new_solution.begin(),new_solution.end(),x_.begin());
   }
 
@@ -255,14 +256,14 @@ private:
     }
   }
 
-  std::pair<int, int> arcGradients(int forward_capacity, int backward_capacity,
-                                   int flow) const {
-    int pos = flow + forward_capacity;
-    int neg = flow - backward_capacity;
+  std::pair<long, long> arcGradients(long forward_capacity, long backward_capacity,
+                                   long flow) const {
+    long pos = flow + forward_capacity;
+    long neg = flow - backward_capacity;
     return {pos, neg};
   }
 
-  int nodeGradient(int source_capacity, int sink_capacity, int flow) const {
+  long nodeGradient(long source_capacity, long sink_capacity, long flow) const {
     return flow + source_capacity - sink_capacity;
   }
 
@@ -271,15 +272,15 @@ private:
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
-      int forward_capacity = arc_capacities_[2 * i + 0];
-      int backward_capacity = arc_capacities_[2 * i + 1];
-      int flow = v_flow_[i];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
+      auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      int new_flow = 0;
-      int dfp, dfn;
+      long new_flow = 0;
+       long dfp, dfn;
       if (pos < 0 || neg > 0) {
-        dfp = std::min(pos, 0);
-        dfn = std::max(neg, 0);
+        dfp = std::min(pos, 0L);
+        dfn = std::max(neg, 0L);
         if (std::abs(dfn) > std::abs(dfp)) {
           new_flow = -dfn;
         } else {
@@ -312,7 +313,10 @@ private:
     }
   }
 
-  std::pair<int,std::list<int>> getRegularizationParameters() const {
+  std::pair<int,std::list<int>> getRegularizationParameters() {
+    if ( scale_ == 1 || num_unsatisfied_nodes_ == 0 ) {
+      return {0,{}};
+    }
     std::list<int> to_regularize_indices;
     int lambda = 0;
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
@@ -320,27 +324,30 @@ private:
       if ( constraint.source_arc_reference ) {
         if ( (*constraint.source_arc_reference)->is_unsatisfied ){
           is_index_unsatisfied = true;
+        //lambda += 1;
         }
       } 
       if ( constraint.target_arc_reference ) {
         if ( (*constraint.target_arc_reference)->is_unsatisfied ){
           is_index_unsatisfied = true;
+        //lambda += 1;
         }
       } 
       if ( is_index_unsatisfied ) {
-        to_regularize_indices.emplace_back(index);
+        //to_regularize_indices.emplace_back(index);
+        disagreeing_unique_indices_.insert(index);
         lambda += 1;
       }
     }
-    lambda = lambda > 0 && decomposition_size_ > 0 ? scale_ / decomposition_size_ / lambda : 0;
+    lambda = lambda > 0 ? (scale_ ) / (2*num_unsatisfied_nodes_) : 0;
     if ( lambda >= 1 ) {
       return {lambda,to_regularize_indices};
     }
     return {0,{}};
   }
 
-  std::pair<int,int> getDualDecompositionLagrangeMultiplier(int index) const {
-    std::pair<int,int> lagrange_multiplier_terms = {0,0};
+  std::pair<long,long> getDualDecompositionLagrangeMultiplier(int index) const {
+    std::pair<long,long> lagrange_multiplier_terms = {0,0};
     auto constraint_map_iter = dual_decomposition_constraints_map_.find(index);
     if (constraint_map_iter != dual_decomposition_constraints_map_.end()) {
       const auto &constraint = constraint_map_iter->second;
@@ -359,7 +366,7 @@ private:
     return lagrange_multiplier_terms;
   }
   
-  void updateNodeTerminal(int i, int pos, int &nviolated, bool do_update) {
+  void updateNodeTerminal(int i, long pos, int &nviolated, bool do_update) {
     if (do_update ) {
         auto existing_pos = maxflow_graph_.get_trcap(i);
         if ( existing_pos < 0 ) {
@@ -391,14 +398,15 @@ private:
         maxflow_graph_.set_trcap(i, pos);
       }
     }
+    trcap_[i] = pos;
   }
 
   int updateNodePotentials() {
     int nviolated = 0;
     // add mincut node potential terms
     for (int i = 0; i < nnode_; ++i) {
-      int source_capacity = terminal_capacities_[2 * i + 0];
-      int sink_capacity = terminal_capacities_[2 * i + 1];
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
       updateNodeTerminal(i,pos,nviolated,false);
       // include any active dual decomposition constraint if applicable
@@ -420,7 +428,7 @@ private:
     }
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
-      int pos = 0;
+      long pos = 0;
       if ( constraint.source_arc_reference ) {
         pos -= (*constraint.source_arc_reference)->alpha;
       } 
@@ -430,8 +438,11 @@ private:
       updateNodeTerminal(index,pos,nviolated,true);
     }
     // add regularization node potential terms (when/if applicable)
+#if 0
     auto [lambda,to_regularize_indices] = getRegularizationParameters();
-    for(auto i : to_regularize_indices ) {
+    if ( lambda > 0 ) {
+    //for(auto i : to_regularize_indices ) {
+    for(auto i : disagreeing_unique_indices_ ) {
       updateNodeTerminal(i,lambda,nviolated,true);
       //auto pos = maxflow_graph_.get_trcap(i);
       //pos += lambda;
@@ -445,12 +456,50 @@ private:
       //  maxflow_graph_.set_trcap(i, pos);
       //}
     }
+    }
+#endif
     return nviolated;
   }
 
   void updateMinCut() {
     for (int i = 0; i < nnode_; ++i) {
       x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+    }
+    //reverseBfsUpdateMinCut();
+  }
+
+  void reverseBfsUpdateMinCut() {
+    std::fill(x_.begin(),x_.end(),0);
+    std::vector<bool> visited(nnode_,false);
+    std::list<int> q;
+    int index = 0;
+    for ( const auto &trcap : trcap_ ) {
+      if ( trcap < 0 && maxflow_graph_.get_trcap(index) != 0 ) {
+        q.emplace_back(index);
+        x_[index] = 1;
+        visited[index] = true;
+      }
+      ++index;
+    }
+    MaxflowGraph::arc_id a;
+    auto nodes = maxflow_graph_.get_nodes();
+    while( !q.empty() ) {
+      int u = q.front();
+      q.pop_front();
+      const auto &_u = nodes[u];
+			for (a=_u.first; a; a=a->next) {
+        auto v = a->head;
+        // check that the reverse edge has non-zero residual capacity
+        auto residual_cap = a->sister->r_cap;
+        if ( residual_cap > 0 ) { // arc exists
+          auto iv = std::distance(nodes,v);
+          if ( !visited[iv] ) {
+            visited[iv] = true;
+            x_[iv] = 1;
+            q.emplace_back(iv);
+          }
+        }
+      }
     }
   }
 
@@ -459,11 +508,11 @@ private:
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
-      int forward_capacity = arc_capacities_[2 * i + 0];
-      int backward_capacity = arc_capacities_[2 * i + 1];
-      int flow = v_flow_[i];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
+      auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      int new_flow = maxflow_graph_.get_rcap(a) - pos;
+      long new_flow = maxflow_graph_.get_rcap(a) - pos;
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
       d_flow_[t] -= new_flow;
@@ -477,24 +526,24 @@ private:
    */
   int nnode_;
   int narc_;
-  std::vector<int> arcs_;
-  std::vector<int> arc_capacities_;
-  std::vector<int> terminal_capacities_;
+  std::vector<long> arcs_;
+  std::vector<long> arc_capacities_;
+  std::vector<long> terminal_capacities_;
 
   /**
    * data structures needed for solving primal dual problem
    */
-  std::vector<int> v_flow_; // flow on the arcs
-  std::vector<int> d_flow_; // flow on the nodes
-  std::vector<int> x_;      // mincut solution
+  std::vector<long> v_flow_; // flow on the arcs
+  std::vector<long> d_flow_; // flow on the nodes
+  std::vector<long> x_;      // mincut solution
   using MaxflowGraph =
-      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
+      Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   int scale_;
-  int decomposition_size_;
+  int num_unsatisfied_nodes_;
   //std::unordered_set<int> to_mark_nodes_;
-  //std::vector<int> previous_terminal_node_capacities_; // from a previous iteration
+  //std::vector<long> previous_terminal_node_capacities_; // from a previous iteration
 
   /**
    * specific to dual decomposition
@@ -507,6 +556,10 @@ private:
   };
   std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
       dual_decomposition_constraints_map_;
+
+  std::unordered_set<int> disagreeing_unique_indices_;
+
+  std::vector<long> trcap_;
 };
 
 } // namespace mcpd3
