@@ -52,6 +52,106 @@ public:
     num_unsatisfied_nodes_ = num_unsatisfied_nodes;
   }
 
+  void decodeNarrowBand(const std::list<int> seeds, int rad) {
+
+    std::vector<bool> visited(nnode_,false);
+    std::vector<int> dist(nnode_,0);
+    std::list<int> q;
+
+    int index = 0;
+    for ( const auto &index : seeds ) {
+      q.emplace_back(index);
+      visited[index] = true;
+    }
+    MaxflowGraph::arc_id a;
+    auto nodes = maxflow_graph_.get_nodes();
+
+
+    while( !q.empty() ) {
+      int u = q.front();
+      q.pop_front();
+      if (dist[u] >= rad) {
+        continue;
+      }
+      const auto &_u = nodes[u];
+			for (a=_u.first; a; a=a->next) {
+        auto v = a->head;
+        auto iv = std::distance(nodes,v);
+        if ( !visited[iv] ) {
+          dist[iv] = dist[u] + 1;
+          visited[iv] = true;
+          q.emplace_back(iv);
+        }
+      }
+    }
+
+
+    size_t num_arcs_in_decoding = 0;
+    size_t num_nodes_in_decoding = 0;
+
+    // setup capacities
+    a = maxflow_graph_.get_first_arc();
+    for (int i = 0; i < narc_; ++i) {
+      int s = arcs_[2 * i + 0];
+      int t = arcs_[2 * i + 1];
+      if ( !visited[s] || !visited[t] ) {
+        maxflow_graph_.set_rcap(a, 0);
+        a = maxflow_graph_.get_next_arc(a);
+        maxflow_graph_.set_rcap(a, 0);
+        a = maxflow_graph_.get_next_arc(a);
+        continue;
+      }
+      num_arcs_in_decoding++;
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
+      maxflow_graph_.set_rcap(a, forward_capacity);
+      a = maxflow_graph_.get_next_arc(a);
+      maxflow_graph_.set_rcap(a, backward_capacity);
+      a = maxflow_graph_.get_next_arc(a);
+    }
+    for (int i = 0; i < nnode_; ++i) {
+      if ( !visited[i] ) {
+        maxflow_graph_.set_trcap(i, 0);
+        continue;
+      }
+      num_nodes_in_decoding++;
+      if ( dist[i] < rad ) {
+        auto source_capacity = terminal_capacities_[2 * i + 0];
+        auto sink_capacity = terminal_capacities_[2 * i + 1];
+        maxflow_graph_.add_tweights(i, source_capacity, sink_capacity);
+      } else {
+        if ( x_[i] == 0 ) {
+          maxflow_graph_.set_trcap(i, std::numeric_limits<int>::max()/2);
+        } else {
+          maxflow_graph_.set_trcap(i, -std::numeric_limits<int>::max()/2);
+        }
+      }
+    }
+
+    auto maxflow_val = maxflow_graph_.maxflow();
+
+    //for ( const auto &index : seeds ) {
+    //  x_[index] = maxflow_graph_.what_segment(index) == MaxflowGraph::SINK;
+    //}
+    for (int i = 0; i < nnode_; ++i) {
+      if ( !visited[i] ) {
+        continue;
+      }
+      if ( dist[i] < rad ) {
+        x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK;
+      }
+    }
+
+    printf("/////////////////////////////////////////\n");
+    printf("//////////  DECODING STATS //////////////\n");
+    printf("// num_arcs in decoding :  %8lu    //\n",num_arcs_in_decoding);
+    printf("// num_nodes in decoding : %8lu    //\n",num_nodes_in_decoding);
+    printf("// maxflow val :           %8ld    //\n",maxflow_val);
+    printf("/////////////////////////////////////////\n");
+
+  }
+
+
   template<int scale>
   void scaleProblem() {
     scale_ *= scale;
@@ -187,12 +287,18 @@ public:
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
       int lagrange_multiplier_term = 0;
-      if ( constraint.source_arc_reference ) {
-        lagrange_multiplier_term -= (*constraint.source_arc_reference)->alpha;
-      } 
-      if ( constraint.target_arc_reference ) {
-        lagrange_multiplier_term += (*constraint.target_arc_reference)->alpha;
-      } 
+      for (const auto &arc_reference : constraint.source_arc_references ) {
+        lagrange_multiplier_term -= arc_reference->alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references ) {
+        lagrange_multiplier_term += arc_reference->alpha;
+      }
+      //if ( constraint.source_arc_reference ) {
+      //  lagrange_multiplier_term -= (*constraint.source_arc_reference)->alpha;
+      //} 
+      //if ( constraint.target_arc_reference ) {
+      //  lagrange_multiplier_term += (*constraint.target_arc_reference)->alpha;
+      //} 
       min_cut_value +=
           lagrange_multiplier_term * x_[index];
     }
@@ -216,10 +322,10 @@ public:
     auto find_iter = dual_decomposition_constraints_map_.find(index);
     if ( find_iter != dual_decomposition_constraints_map_.end() ) {
       auto &constraint = find_iter->second;
-      constraint.source_arc_reference = arc_reference;
+      constraint.source_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
-      constraint.source_arc_reference = arc_reference;
+      constraint.source_arc_references.emplace_back(arc_reference);
       dual_decomposition_constraints_map_.insert({index,constraint});
     }
   }
@@ -230,10 +336,10 @@ public:
     auto find_iter = dual_decomposition_constraints_map_.find(index);
     if ( find_iter != dual_decomposition_constraints_map_.end() ) {
       auto &constraint = find_iter->second;
-      constraint.target_arc_reference = arc_reference;
+      constraint.target_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
-      constraint.target_arc_reference = arc_reference;
+      constraint.target_arc_references.emplace_back(arc_reference);
       dual_decomposition_constraints_map_.insert({index,constraint});
     }
   }
@@ -313,6 +419,7 @@ private:
     }
   }
 
+#if 0
   std::pair<int,std::list<int>> getRegularizationParameters() {
     if ( scale_ == 1 || num_unsatisfied_nodes_ == 0 ) {
       return {0,{}};
@@ -345,22 +452,24 @@ private:
     }
     return {0,{}};
   }
+#endif
 
   std::pair<long,long> getDualDecompositionLagrangeMultiplier(int index) const {
     std::pair<long,long> lagrange_multiplier_terms = {0,0};
     auto constraint_map_iter = dual_decomposition_constraints_map_.find(index);
     if (constraint_map_iter != dual_decomposition_constraints_map_.end()) {
       const auto &constraint = constraint_map_iter->second;
-      if ( constraint.source_arc_reference ) {
-        lagrange_multiplier_terms.first -= (*constraint.source_arc_reference)->alpha;
+      for ( const auto &arc_reference : constraint.source_arc_references ) {
+        lagrange_multiplier_terms.first -= arc_reference->alpha;
       }
-      if ( constraint.target_arc_reference ) {
-        lagrange_multiplier_terms.first += (*constraint.target_arc_reference)->alpha;
+      for ( const auto &arc_reference : constraint.target_arc_references ) {
+        lagrange_multiplier_terms.first += arc_reference->alpha;
       }
-      //if (constraint.is_source) { // is source in constraint
-      //  lagrange_multiplier_term -= constraint.arc_reference->alpha;
-      //} else { // is target in constraint
-      //  lagrange_multiplier_term += constraint.arc_reference->alpha;
+      //if ( constraint.source_arc_reference ) {
+      //  lagrange_multiplier_terms.first -= (*constraint.source_arc_reference)->alpha;
+      //}
+      //if ( constraint.target_arc_reference ) {
+      //  lagrange_multiplier_terms.first += (*constraint.target_arc_reference)->alpha;
       //}
     }
     return lagrange_multiplier_terms;
@@ -429,12 +538,18 @@ private:
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
       long pos = 0;
-      if ( constraint.source_arc_reference ) {
-        pos -= (*constraint.source_arc_reference)->alpha;
-      } 
-      if ( constraint.target_arc_reference ) {
-        pos += (*constraint.target_arc_reference)->alpha;
-      } 
+      for (const auto &arc_reference : constraint.source_arc_references ) {
+        pos -= arc_reference->alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references ) {
+        pos += arc_reference->alpha;
+      }
+      //if ( constraint.source_arc_reference ) {
+      //  pos -= (*constraint.source_arc_reference)->alpha;
+      //} 
+      //if ( constraint.target_arc_reference ) {
+      //  pos += (*constraint.target_arc_reference)->alpha;
+      //} 
       updateNodeTerminal(index,pos,nviolated,true);
     }
     // add regularization node potential terms (when/if applicable)
@@ -549,10 +664,10 @@ private:
    * specific to dual decomposition
    */
   struct DualDecompositionConstraint {
-    std::optional<DualDecompositionConstraintArcReference> source_arc_reference;
-    std::optional<DualDecompositionConstraintArcReference> target_arc_reference;
-    DualDecompositionConstraint(): source_arc_reference({}),
-      target_arc_reference({}) {}
+    //std::optional<DualDecompositionConstraintArcReference> source_arc_reference;
+    std::list<DualDecompositionConstraintArcReference> source_arc_references;
+    //std::optional<DualDecompositionConstraintArcReference> target_arc_reference;
+    std::list<DualDecompositionConstraintArcReference> target_arc_references;
   };
   std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
       dual_decomposition_constraints_map_;

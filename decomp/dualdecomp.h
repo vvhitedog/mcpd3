@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <memory>
 #include <queue>
+#include <cmath>
 
 #include "constraint.h"
 #include <primaldual/mcpd3.h>
@@ -48,7 +49,7 @@ public:
                           std::move(min_cut_graph.arc_capacities),
                           std::move(min_cut_graph.terminal_capacities)) {}
 
-  void runPrimalSolutionDecodingStep() {
+  void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
     for ( int i = 0; i < npartition_; ++i ) {
       const auto &min_cut_sub_graph = min_cut_sub_graphs_[i];
       const auto &solver = solvers_[i];
@@ -56,17 +57,43 @@ public:
         primal_solution_[global_index] = solver.getMinCutSolution(local_index);
       }
     }
+    int total_disagree_count = 0;
     for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
-      int sum_x = 0;
-      bool is_first_constraint = true;
+      double sum_x = 0;
+      bool disagreement = false;
       for ( auto &constraint : constraints ) {
-        if ( is_first_constraint ) {
-          sum_x += solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target);
-          is_first_constraint = false;
+        auto u = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target);
+        auto v = solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
+        if ( u != v ) {
+          disagreement = true;
         }
-        sum_x += solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
+        sum_x += u;
+        sum_x += v;
       }
-      primal_solution_[global_index]  = sum_x / (constraints.size() + 1); // use an averaging scheme to resolve what primal solution should be for constrained nodes
+      primal_solution_[global_index]  = std::round(sum_x / (2*constraints.size())); // use an averaging scheme to resolve what primal solution should be for constrained nodes
+      if ( disagreement ) {
+        total_disagree_count++;
+      }
+    }
+
+    if ( do_narrow_band_decode && total_disagree_count > 0  ) {
+      std::list<int> disagree_nodes;
+      for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+        bool disagreement = false;
+        for ( auto &constraint : constraints ) {
+          auto u = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target);
+          auto v = solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
+          if ( u != v ) {
+            disagreement = true;
+          }
+        }
+        if ( disagreement ) { // search for better configuration
+          disagree_nodes.emplace_back(global_index);
+        }
+      }
+      primal_solver_->setMinCutSolution(primal_solution_);
+      primal_solver_->decodeNarrowBand(disagree_nodes,14);
+      printf("recalc primal: %ld \n",primal_solver_->getMinCutValue() );
     }
   }
 
@@ -283,7 +310,6 @@ private:
      * number of partitions the node appears in)
      */
     std::set<int> constrained_nodes_partition_counts;
-    long total_constrained_dual_nodes = 0;
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
@@ -291,38 +317,34 @@ private:
       auto &constraint_arcs = constraint_arc_map_[global_index];
       assert(partitions.size() >
              1); // requirement to be a proper constrained node
-      bool not_first_partition = false;
-      int previous_partition = -1;
-      for (const auto &partition :
-           partitions) { // iterates in sorted order due to std::set
-        if (not_first_partition) {
+      for (const auto &partition_source :
+          partitions) { // iterates in sorted order due to std::set
+        for (const auto &partition_target :
+            partitions) { // iterates in sorted order due to std::set
+          if ( partition_source >= partition_target ) {
+            continue;
+          }
           int local_index_source =
-              min_cut_sub_graphs_[previous_partition].getNode(
-                  global_index);
+            min_cut_sub_graphs_[partition_source].getNode(
+                global_index);
           int local_index_target =
-              min_cut_sub_graphs_[partition].getNode(global_index);
+            min_cut_sub_graphs_[partition_target].getNode(global_index);
           constraint_arcs.emplace_back(
               /*alpha=*/0,
               /*alpha_momentum=*/0,
-              /*partition_index_source=*/previous_partition,
-              /*partition_index_target=*/partition,
+              /*partition_index_source=*/partition_source,
+              /*partition_index_target=*/partition_target,
               /*local_index_source=*/local_index_source,
               /*local_index_target=*/local_index_target);
           auto arc_reference = --constraint_arcs.end();
-          solvers_[previous_partition].addSourceDualDecompositionConstraint(
+          solvers_[partition_source].addSourceDualDecompositionConstraint(
               arc_reference);
-          solvers_[partition].addTargetDualDecompositionConstraint(arc_reference);
+          solvers_[partition_target].addTargetDualDecompositionConstraint(arc_reference);
         }
-        previous_partition = partition;
-        not_first_partition = true;
       }
-      assert(constraint_arcs.size() == partitions.size() - 1);
+      //assert(constraint_arcs.size() == partitions.size() - 1);
       constrained_nodes_partition_counts.insert(partitions.size());
-      total_constrained_dual_nodes += partitions.size();
     }
-    //for (auto &solver : solvers_ ) {
-    //  solver.setNumUnsatisfiedNodes(total_constrained_dual_nodes);
-    //}
     printf("partition counts: ");
     for (const auto &count : constrained_nodes_partition_counts ) {
       printf("%d,",count);

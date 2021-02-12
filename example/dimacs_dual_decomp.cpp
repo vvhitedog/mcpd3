@@ -127,24 +127,28 @@ int main(int argc, char *argv[]) {
 
 
   dual_decomp.runOptimizationStep(10000,1,1,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,1,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,1,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,2,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.scaleProblem<10>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.scaleProblem<10>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.scaleProblem<10>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
+  dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.runPrimalSolutionDecodingStep();
   std::cout << "primal min cut value : " <<  dual_decomp.getPrimalMinCutValue() << "\n";
   return EXIT_SUCCESS;
