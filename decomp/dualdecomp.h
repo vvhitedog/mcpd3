@@ -38,7 +38,7 @@ public:
                     std::vector<long> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
-        terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_) {
+        terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1) {
     initializeDecomposition();
   }
 
@@ -104,117 +104,51 @@ public:
   }
 
   void runOptimizationStep(int nstep, int step_size, int max_cycle_count = 2, int break_on_small_change = false) {
-    const int numstats = 10;
-    ScalarStatisticsTracker<long> lower_bound_stats(numstats);
-    ScalarStatisticsTracker<long> lower_bound_diff_stats(numstats);
-    ScalarStatisticsTracker<long> lower_bound_stats_range0(numstats);
-    ScalarStatisticsTracker<long> lower_bound_stats_range1(numstats);
-    ScalarStatisticsTracker<int> num_disagreeing_stats(numstats);
-    ScalarStatisticsTracker<long> lower_bound_diff_abs_stats(numstats);
-    long last_lower_bound;
+    const int num_stats_in_group = 10;
+    TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(num_stats_in_group);
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
-    long min_upper_bound = std::numeric_limits<long>::max();
-    std::unordered_set<int> disagreeing_unique_global_indices;
     for (int i = 0; i < nstep; ++i) {
 
       long lower_bound = 0;
-      long min_sub_lower_bound = std::numeric_limits<long>::max();
-      long max_sub_lower_bound = std::numeric_limits<long>::min();
       for (auto &solver : solvers_) {
         solver.solve();
         auto adjusted_min_cut_value = solver.getMinCutValue();
         lower_bound += adjusted_min_cut_value;
-        min_sub_lower_bound = std::min(min_sub_lower_bound,adjusted_min_cut_value);
-        max_sub_lower_bound = std::max(max_sub_lower_bound,adjusted_min_cut_value);
-        //printf(" -subproblem lower_bound- : %ld\n",adjusted_min_cut_value);
       }
       max_lower_bound = std::max(lower_bound,max_lower_bound);
 
-      runPrimalSolutionDecodingStep();
-      primal_solver_->setMinCutSolution(primal_solution_);
-      auto upper_bound = primal_solver_->getMinCutValue();
-      min_upper_bound = std::min(upper_bound,min_upper_bound);
-
-      auto [num_disagreeing, disagreeing_global_indices] =
+      auto disagreeing_global_indices =
           runLagrangeMultipliersUpdateStep(step_size,break_on_small_change);
-      for (const auto &index : disagreeing_global_indices) {
-        disagreeing_unique_global_indices.insert(index);
-      }
-      for (auto &solver : solvers_) { // inform each solver of the total number of unsatisfied nodes
-        solver.setNumUnsatisfiedNodes(disagreeing_unique_global_indices.size());
-      }
-      printf("lower_bound : %ld num_disagreeing : %ld upper_bound : %ld\n",lower_bound,num_disagreeing,upper_bound);
+      printf("lower_bound : %lf num_disagreeing : %ld\n",double(lower_bound) / scale_,disagreeing_global_indices.size());
 
-      if ( i > 0 ) {
-        auto lower_bound_diff = lower_bound - last_lower_bound;
-        lower_bound_diff_stats.addValue(lower_bound_diff);
-        if ( (i / numstats) % 2 == 0  ) {
-          lower_bound_stats_range0.addValue(lower_bound);
-        } else {
-          lower_bound_stats_range1.addValue(lower_bound);
-        }
-        lower_bound_diff_abs_stats.addValue(std::abs(lower_bound_diff));
-      }
-      lower_bound_stats.addValue(lower_bound);
-      num_disagreeing_stats.addValue(num_disagreeing);
-      if ( i > numstats + 1 ) {
-        printf( " > last %d stats, lower_bound : %lf lower_bound_diff : %lf num_disagreeing : %lf lower_bound_diff_abs : %lf lower_bound_range0 max: %ld lower_bound_range1 max : %ld\n",
-            numstats,lower_bound_stats.getAverage(),
-            lower_bound_diff_stats.getAverage(),
-            num_disagreeing_stats.getAverage(),
-            lower_bound_diff_abs_stats.getAverage(),
-            lower_bound_stats_range0.getMaximum(),
-            lower_bound_stats_range1.getMaximum()
-            );
-        //if ( break_on_small_change && std::abs(lower_bound_diff_stats.getAverage()) < 1 && lower_bound_diff_stats.getAverage() < 0 ) {
-        //  std::cout << "breaking because of small change\n";
-        //  break;
-        //}
-        if ( break_on_small_change && i % (numstats) == numstats-1 && i >= 2*numstats-1 ) {
-          if ( (i / numstats) % 2 == 1  ) {
-            if ( lower_bound_stats_range1.getMaximum() <= 
-                lower_bound_stats_range0.getMaximum() ) {
-              std::cout << "breaking because max of this interval is less than last interval : " << lower_bound_stats_range1.getMaximum()
-                << " and " << lower_bound_stats_range0.getMaximum() << " \n";
-              break;
-            }
-          } else {
-            if ( lower_bound_stats_range0.getMaximum() <= 
-                lower_bound_stats_range1.getMaximum() ) {
-              std::cout << "breaking because max of this interval is less than last interval : " << lower_bound_stats_range0.getMaximum()
-                << " and " << lower_bound_stats_range1.getMaximum() << " \n";
-              break;
-            }
-          }
+      lower_bound_group_stats.addValue(lower_bound);
+      if ( lower_bound_group_stats.areGroupsPopulated() ) {
+        auto [first_group_max, second_group_max] = lower_bound_group_stats.getMaximums();
+        if ( second_group_max <= first_group_max ) {
+          std::cout << "breaking because max of this group's interval is less than or qual to max in last last group's interval\n";
+          break;
         }
       }
 
-      last_lower_bound = lower_bound;
-      if (num_disagreeing == 0) { // optimality condition
+      if (disagreeing_global_indices.size() == 0) { // optimality condition
         std::cout << "breaking because of no disagreement\n";
         break;
       }
-      //std::stringstream stream_to_hash;
-      //stream_to_hash << lower_bound << ";";
-      //for (const auto &global_index : disagreeing_global_indices) {
-      //  stream_to_hash << global_index << ";";
-      //}
-      //long hash_value = std::hash<std::string>{}(stream_to_hash.str());
+
       dual_cycle_list.addNode(getDualSolutionHash(std::move(disagreeing_global_indices),lower_bound));
-      //dual_cycle_list.addNode(getDualSolutionHash(std::move(disagreeing_global_indices),0));
       if (dual_cycle_list.getMaxCycleCount() >
-          max_cycle_count ) { // at least one set of configurations repeated twice
+          max_cycle_count ) { // at least one set of configurations likely repeated more than a specified number of times
         std::cout << "breaking because cycle detected\n";
         break;
       }
   }
     printf(" === MAX === lower_bound : %ld\n",max_lower_bound);
-    printf(" === MIN === upper_bound : %ld\n",min_upper_bound);
 }
 
   template<int scale>
   void scaleProblem() {
+    scale_ *= scale;
       for (auto &solver : solvers_) {
         solver.scaleProblem<scale>();
       }
@@ -237,30 +171,29 @@ private:
     return hash;
   }
 
-  std::pair<long,std::list<int>> runLagrangeMultipliersUpdateStep(int step_size, bool use_momentum ) {
+  std::list<int> runLagrangeMultipliersUpdateStep(int step_size, bool use_momentum ) {
     std::list<int> disagreeing_global_indices;
-    double num_disagreeing = 0;
     for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+      bool disagreement_exists = false;
       for ( auto &constraint : constraints ) {
         int diff = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target)
           - solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
         if ( diff != 0 ) {
           if ( use_momentum ) {
-        const double beta = .9;
-        constraint.alpha_momentum = beta * constraint.alpha_momentum * beta + (1-beta) * diff;
-        constraint.alpha += step_size*int(10*constraint.alpha_momentum);
+            const double beta = .9;
+            constraint.alpha_momentum = beta * constraint.alpha_momentum * beta + (1-beta) * diff;
+            constraint.alpha += step_size*int(10*constraint.alpha_momentum);
           } else {
-        constraint.alpha += step_size*diff;
+            constraint.alpha += step_size*diff;
+          }
+          disagreement_exists = true;
         }
+      }
+      if ( disagreement_exists ) {
         disagreeing_global_indices.emplace_back(global_index);
-        constraint.is_unsatisfied = 1;
-        } else {
-          constraint.is_unsatisfied = 0;
-        }
-        num_disagreeing += diff * diff;
       }
     }
-    return {num_disagreeing,disagreeing_global_indices};
+    return std::move(disagreeing_global_indices);
   }
 
   void initializeDecomposition() {
@@ -457,9 +390,11 @@ private:
 
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
   std::vector<long> primal_solution_;
+  long scale_;
 
   template<typename T>
-  struct ScalarStatisticsTracker {
+  class ScalarStatisticsTracker {
+    public:
     ScalarStatisticsTracker(size_t n):n_(n),running_sum_(0),id_(0) {}
 
     void addValue(const T& value) {
@@ -492,6 +427,48 @@ private:
     T running_sum_;
     std::set<std::pair<T,size_t>> ordered_values_;
   };
+
+  template<typename T>
+  class TwoGroupScalarStatisticsTracker {
+    public:
+    TwoGroupScalarStatisticsTracker(size_t n ): n_(n), group_1_(n), group_2_(n),
+    first_group(&group_1_),second_group(&group_2_), internal_counter_(0), is_ready_(false){}
+
+    void addValue(const T& value) {
+      switch(internal_counter_ / n_) {
+        case 0:
+          first_group->addValue(value);
+          break;
+        case 1:
+          second_group->addValue(value);
+          break;
+        default:
+          assert(false);
+      }
+      internal_counter_++;
+      if ( internal_counter_ == 2*n_ ) {
+        std::swap(first_group,second_group);
+        internal_counter_ = 0;
+        is_ready_ = true;
+      }
+    }
+
+    std::pair<T,T> getMaximums() const {
+      return {second_group->getMaximum(),first_group->getMaximum()};
+    }
+
+    bool areGroupsPopulated() const {
+      return is_ready_ && internal_counter_ == 0;
+    }
+
+    private:
+    size_t n_;
+    ScalarStatisticsTracker<T> group_1_, group_2_;
+    ScalarStatisticsTracker<T> *first_group, *second_group;
+    size_t internal_counter_;
+    bool is_ready_;
+  };
+
 };
 
 } // namespace mcpd3

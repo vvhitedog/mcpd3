@@ -36,8 +36,7 @@ public:
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true), scale_(1), num_unsatisfied_nodes_(0), trcap_(nnode_,0) {
-        //previous_terminal_node_capacities_(nnode_,-1) {
+        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true) {
     initializeMaxflowGraph();
   }
 
@@ -47,12 +46,9 @@ public:
                                std::move(min_cut_graph.arc_capacities),
                                std::move(min_cut_graph.terminal_capacities)) {}
 
-  void setNumUnsatisfiedNodes( int num_unsatisfied_nodes ) {
-    disagreeing_unique_indices_.clear();
-    num_unsatisfied_nodes_ = num_unsatisfied_nodes;
-  }
-
   void decodeNarrowBand(const std::list<int> seeds, int rad) {
+    // TODO: this function needs to be cleaned up and rewritten to be much more
+    // memory/runtime efficient
 
     std::vector<bool> visited(nnode_,false);
     std::vector<int> dist(nnode_,0);
@@ -130,9 +126,6 @@ public:
 
     auto maxflow_val = maxflow_graph_.maxflow();
 
-    //for ( const auto &index : seeds ) {
-    //  x_[index] = maxflow_graph_.what_segment(index) == MaxflowGraph::SINK;
-    //}
     for (int i = 0; i < nnode_; ++i) {
       if ( !visited[i] ) {
         continue;
@@ -154,7 +147,6 @@ public:
 
   template<int scale>
   void scaleProblem() {
-    scale_ *= scale;
     for (int i = 0; i < nnode_; ++i) {
       auto &source_capacity = terminal_capacities_[2 * i + 0];
       auto &sink_capacity = terminal_capacities_[2 * i + 1];
@@ -212,7 +204,6 @@ public:
   }
 
   void solve() {
-    //std::fill(x_.begin(),x_.end(),0); // reset min cut
     if ( is_first_iteration_ ) {
     initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                       // complementary slackness conditions
@@ -227,11 +218,7 @@ public:
       return; // no violated node based lagrange multiplier complementary
               // slackness conditions; translation: solution is optimal already
     }
-    //if ( !is_first_iteration_ ) {
-    //  markNodes();
-    //}
     maxflow_graph_.maxflow(!is_first_iteration_);
-    //maxflow_graph_.maxflow();
     is_first_iteration_ = false;
     updateFlow();   // get updated flow
     updateMinCut(); // get updated min cut solution
@@ -279,10 +266,6 @@ public:
       } else {
         min_cut_value += source_capacity;
       }
-      //auto [source_lagrange_multiplier,
-      //target_lagrange_multiplier] = getDualDecompositionLagrangeMultiplier(i);
-      //min_cut_value +=
-      //    (source_lagrange_multiplier + target_lagrange_multiplier) * x_[i];
     }
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
@@ -293,28 +276,11 @@ public:
       for (const auto &arc_reference : constraint.target_arc_references ) {
         lagrange_multiplier_term += arc_reference->alpha;
       }
-      //if ( constraint.source_arc_reference ) {
-      //  lagrange_multiplier_term -= (*constraint.source_arc_reference)->alpha;
-      //} 
-      //if ( constraint.target_arc_reference ) {
-      //  lagrange_multiplier_term += (*constraint.target_arc_reference)->alpha;
-      //} 
       min_cut_value +=
           lagrange_multiplier_term * x_[index];
     }
     return min_cut_value;
   }
-
-  //void addDualDecompositionConstraint(
-  //    DualDecompositionConstraintArcReference arc_reference, bool is_source) {
-  //  if (is_source) { // is source
-  //    dual_decomposition_constraints_map_.insert(
-  //        {arc_reference->local_index_source, {arc_reference, is_source}});
-  //  } else { // is target
-  //    dual_decomposition_constraints_map_.insert(
-  //        {arc_reference->local_index_target, {arc_reference, is_source}});
-  //  }
-  //}
 
   void addSourceDualDecompositionConstraint(
       DualDecompositionConstraintArcReference arc_reference) {
@@ -408,52 +374,6 @@ private:
     }
   }
 
-  void markNodes() {
-    for (const auto &[index,constraint]: dual_decomposition_constraints_map_) {
-      //if ( constraint.arc_reference->has_changed || 
-      //    flow_modified_nodes_.find(index) != flow_modified_nodes_.end() ) {
-      //if ( to_mark_nodes_.find(index) != to_mark_nodes_.end() ) {
-        //maxflow_graph_.mark_node(index);
-      //}
-      //}
-    }
-  }
-
-#if 0
-  std::pair<int,std::list<int>> getRegularizationParameters() {
-    if ( scale_ == 1 || num_unsatisfied_nodes_ == 0 ) {
-      return {0,{}};
-    }
-    std::list<int> to_regularize_indices;
-    int lambda = 0;
-    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
-      bool is_index_unsatisfied = false;
-      if ( constraint.source_arc_reference ) {
-        if ( (*constraint.source_arc_reference)->is_unsatisfied ){
-          is_index_unsatisfied = true;
-        //lambda += 1;
-        }
-      } 
-      if ( constraint.target_arc_reference ) {
-        if ( (*constraint.target_arc_reference)->is_unsatisfied ){
-          is_index_unsatisfied = true;
-        //lambda += 1;
-        }
-      } 
-      if ( is_index_unsatisfied ) {
-        //to_regularize_indices.emplace_back(index);
-        disagreeing_unique_indices_.insert(index);
-        lambda += 1;
-      }
-    }
-    lambda = lambda > 0 ? (scale_ ) / (2*num_unsatisfied_nodes_) : 0;
-    if ( lambda >= 1 ) {
-      return {lambda,to_regularize_indices};
-    }
-    return {0,{}};
-  }
-#endif
-
   std::pair<long,long> getDualDecompositionLagrangeMultiplier(int index) const {
     std::pair<long,long> lagrange_multiplier_terms = {0,0};
     auto constraint_map_iter = dual_decomposition_constraints_map_.find(index);
@@ -465,12 +385,6 @@ private:
       for ( const auto &arc_reference : constraint.target_arc_references ) {
         lagrange_multiplier_terms.first += arc_reference->alpha;
       }
-      //if ( constraint.source_arc_reference ) {
-      //  lagrange_multiplier_terms.first -= (*constraint.source_arc_reference)->alpha;
-      //}
-      //if ( constraint.target_arc_reference ) {
-      //  lagrange_multiplier_terms.first += (*constraint.target_arc_reference)->alpha;
-      //}
     }
     return lagrange_multiplier_terms;
   }
@@ -507,7 +421,6 @@ private:
         maxflow_graph_.set_trcap(i, pos);
       }
     }
-    trcap_[i] = pos;
   }
 
   int updateNodePotentials() {
@@ -518,22 +431,6 @@ private:
       auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
       updateNodeTerminal(i,pos,nviolated,false);
-      // include any active dual decomposition constraint if applicable
-      //auto [source_lagrange_multiplier,
-      //target_lagrange_multiplier] = getDualDecompositionLagrangeMultiplier(i);
-      //pos += source_lagrange_multiplier + target_lagrange_multiplier;
-      //if (pos < 0) {
-      //  nviolated++;
-      //}
-      //if ( !is_first_iteration_ ) {
-      //  auto stored_pos = maxflow_graph_.get_trcap(i);
-      //  if ( stored_pos != pos ) {
-      //    maxflow_graph_.set_trcap(i, pos);
-      //    maxflow_graph_.mark_node(i);
-      //  }
-      //} else if (is_first_iteration_) {
-      //  maxflow_graph_.set_trcap(i, pos);
-      //}
     }
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
@@ -544,77 +441,14 @@ private:
       for (const auto &arc_reference : constraint.target_arc_references ) {
         pos += arc_reference->alpha;
       }
-      //if ( constraint.source_arc_reference ) {
-      //  pos -= (*constraint.source_arc_reference)->alpha;
-      //} 
-      //if ( constraint.target_arc_reference ) {
-      //  pos += (*constraint.target_arc_reference)->alpha;
-      //} 
       updateNodeTerminal(index,pos,nviolated,true);
     }
-    // add regularization node potential terms (when/if applicable)
-#if 0
-    auto [lambda,to_regularize_indices] = getRegularizationParameters();
-    if ( lambda > 0 ) {
-    //for(auto i : to_regularize_indices ) {
-    for(auto i : disagreeing_unique_indices_ ) {
-      updateNodeTerminal(i,lambda,nviolated,true);
-      //auto pos = maxflow_graph_.get_trcap(i);
-      //pos += lambda;
-      //if ( pos < 0 ) {
-      //  nviolated++;
-      //}
-      //if ( !is_first_iteration_ ) {
-      //  maxflow_graph_.set_trcap(i, pos);
-      //  maxflow_graph_.mark_node(i);
-      //} else if (is_first_iteration_) {
-      //  maxflow_graph_.set_trcap(i, pos);
-      //}
-    }
-    }
-#endif
     return nviolated;
   }
 
   void updateMinCut() {
     for (int i = 0; i < nnode_; ++i) {
       x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
-    }
-    //reverseBfsUpdateMinCut();
-  }
-
-  void reverseBfsUpdateMinCut() {
-    std::fill(x_.begin(),x_.end(),0);
-    std::vector<bool> visited(nnode_,false);
-    std::list<int> q;
-    int index = 0;
-    for ( const auto &trcap : trcap_ ) {
-      if ( trcap < 0 && maxflow_graph_.get_trcap(index) != 0 ) {
-        q.emplace_back(index);
-        x_[index] = 1;
-        visited[index] = true;
-      }
-      ++index;
-    }
-    MaxflowGraph::arc_id a;
-    auto nodes = maxflow_graph_.get_nodes();
-    while( !q.empty() ) {
-      int u = q.front();
-      q.pop_front();
-      const auto &_u = nodes[u];
-			for (a=_u.first; a; a=a->next) {
-        auto v = a->head;
-        // check that the reverse edge has non-zero residual capacity
-        auto residual_cap = a->sister->r_cap;
-        if ( residual_cap > 0 ) { // arc exists
-          auto iv = std::distance(nodes,v);
-          if ( !visited[iv] ) {
-            visited[iv] = true;
-            x_[iv] = 1;
-            q.emplace_back(iv);
-          }
-        }
-      }
     }
   }
 
@@ -655,26 +489,17 @@ private:
       Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
-  int scale_;
-  int num_unsatisfied_nodes_;
-  //std::unordered_set<int> to_mark_nodes_;
-  //std::vector<long> previous_terminal_node_capacities_; // from a previous iteration
 
   /**
    * specific to dual decomposition
    */
   struct DualDecompositionConstraint {
-    //std::optional<DualDecompositionConstraintArcReference> source_arc_reference;
     std::list<DualDecompositionConstraintArcReference> source_arc_references;
-    //std::optional<DualDecompositionConstraintArcReference> target_arc_reference;
     std::list<DualDecompositionConstraintArcReference> target_arc_references;
   };
   std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
       dual_decomposition_constraints_map_;
 
-  std::unordered_set<int> disagreeing_unique_indices_;
-
-  std::vector<long> trcap_;
 };
 
 } // namespace mcpd3

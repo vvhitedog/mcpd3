@@ -102,13 +102,6 @@ int main(int argc, char *argv[]) {
   }
 
   auto min_cut_graph_data = mcpd3::read_dimacs(argv[1]);
-  //const int scale = 10000;
-  //for ( auto &cap  :min_cut_graph_data.arc_capacities ) {
-  //  cap *= scale;
-  //}
-  //for ( auto &cap  :min_cut_graph_data.terminal_capacities ) {
-  //  cap *= scale;
-  //}
 #ifdef HAVE_METIS
   auto partitions = metis_partition(npartition, min_cut_graph_data);
 #else
@@ -117,36 +110,28 @@ int main(int argc, char *argv[]) {
 
   mcpd3::DualDecomposition dual_decomp(npartition, std::move(partitions),
                                        std::move(min_cut_graph_data));
-  //dual_decomp.runOptimizationStep(10000,10000,1);
-  //dual_decomp.runOptimizationStep(10000,1000,2);
-  //dual_decomp.runOptimizationStep(10000,100,3);
-  //dual_decomp.runOptimizationStep(10000,10,4);
-  //dual_decomp.runOptimizationStep(10000,1,5);
-  //dual_decomp.runPrimalSolutionDecodingStep();
-  //std::cout << "primal min cut value : " <<  dual_decomp.getPrimalMinCutValue() << "\n";
-
-
+  const int scaling_factor = 10;
   dual_decomp.runOptimizationStep(10000,1,1,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,1,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,1,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,2,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<10>();
+  dual_decomp.scaleProblem<scaling_factor>();
   dual_decomp.runOptimizationStep(10000,1,5,true);
   dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.runPrimalSolutionDecodingStep();

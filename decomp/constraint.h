@@ -27,7 +27,6 @@ struct DualDecompositionConstraintArc {
   int partition_index_target; /* partition index for target node */
   int local_index_source;     /* index within sub-problem of source */
   int local_index_target;     /* index within sub-problem of target */
-  int is_unsatisfied : 1;        /* bit flag indicating if constraint has changed since last iteration */
 
   DualDecompositionConstraintArc(int alpha, float alpha_momentum, int partition_index_source,
                                  int partition_index_target,
@@ -35,8 +34,7 @@ struct DualDecompositionConstraintArc {
       : alpha(alpha), alpha_momentum(alpha_momentum), partition_index_source(partition_index_source),
         partition_index_target(partition_index_target),
         local_index_source(local_index_source),
-        local_index_target(local_index_target),
-        is_unsatisfied(1) {}
+        local_index_target(local_index_target) {}
 };
 
 using DualDecompositionConstraintArcReference =
