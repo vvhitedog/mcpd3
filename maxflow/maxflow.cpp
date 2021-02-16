@@ -241,7 +241,7 @@ template <typename captype, typename tcaptype, typename flowtype>
 }
 
 template <typename captype, typename tcaptype, typename flowtype> 
-	void Graph<captype,tcaptype,flowtype>::augment(arc *middle_arc)
+	void Graph<captype,tcaptype,flowtype>::augment(arc *middle_arc, std::unordered_set<arc*> &changed_arcs_, bool get_changed_arcs)
 {
 	node *i;
 	arc *a;
@@ -272,12 +272,18 @@ template <typename captype, typename tcaptype, typename flowtype>
 	/* 2a - the source tree */
 	middle_arc -> sister -> r_cap += bottleneck;
 	middle_arc -> r_cap -= bottleneck;
+  if ( get_changed_arcs ) {
+    changed_arcs_.insert(middle_arc);
+  }
 	for (i=middle_arc->sister->head; ; i=a->head)
 	{
 		a = i -> parent;
 		if (a == TERMINAL) break;
 		a -> r_cap += bottleneck;
 		a -> sister -> r_cap -= bottleneck;
+    if ( get_changed_arcs ) {
+      changed_arcs_.insert(a);
+    }
 		if (!a->sister->r_cap)
 		{
 			set_orphan_front(i); // add i to the beginning of the adoption list
@@ -295,6 +301,9 @@ template <typename captype, typename tcaptype, typename flowtype>
 		if (a == TERMINAL) break;
 		a -> sister -> r_cap += bottleneck;
 		a -> r_cap -= bottleneck;
+    if ( get_changed_arcs ) {
+      changed_arcs_.insert(a);
+    }
 		if (!a->r_cap)
 		{
 			set_orphan_front(i); // add i to the beginning of the adoption list
@@ -469,7 +478,13 @@ template <typename captype, typename tcaptype, typename flowtype>
 /***********************************************************************/
 
 template <typename captype, typename tcaptype, typename flowtype> 
-	flowtype Graph<captype,tcaptype,flowtype>::maxflow(bool reuse_trees, Block<node_id>* _changed_list)
+	flowtype Graph<captype,tcaptype,flowtype>::maxflow(bool reuse_trees, Block<node_id>* _changed_list) {
+  std::unordered_set<arc*> empty_list;
+  return maxflow(reuse_trees,empty_list,_changed_list);
+}
+
+template <typename captype, typename tcaptype, typename flowtype> 
+flowtype Graph<captype,tcaptype,flowtype>::maxflow(bool reuse_trees, std::unordered_set<arc*> &changed_arcs_, Block<node_id>* _changed_list) 
 {
 	node *i, *j, *current_node = NULL;
 	arc *a;
@@ -566,7 +581,7 @@ template <typename captype, typename tcaptype, typename flowtype>
 			current_node = i;
 
 			/* augmentation */
-			augment(a);
+			augment(a,changed_arcs_,reuse_trees);
 			/* augmentation end */
 
 			/* adoption */

@@ -27,8 +27,25 @@
 #include <primaldual/mcpd3.h>
 #include <graph/cycle.h>
 #include <iostream>
+#include <multithread/threadpool.h>
 
 namespace mcpd3 {
+
+/**
+ * @brief Time a lambda function.
+ *
+ * @param lambda - the function to execute and time
+ *
+ * @return the number of microseconds elapsed while executing lambda
+ */
+template <typename Lambda>
+std::chrono::microseconds time_lambda(Lambda lambda) {
+  auto start_time = std::chrono::high_resolution_clock::now();
+  lambda();
+  auto end_time = std::chrono::high_resolution_clock::now();
+  return std::chrono::duration_cast<std::chrono::microseconds>(end_time -
+                                                               start_time);
+}
 
 class DualDecomposition {
 public:
@@ -38,7 +55,9 @@ public:
                     std::vector<long> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
-        terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1) {
+        terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
+        thread_pool_(std::thread::hardware_concurrency()), solve_loop_time_(0) {
+        //thread_pool_(1) {
     initializeDecomposition();
   }
 
@@ -48,6 +67,11 @@ public:
                           std::move(partitions), std::move(min_cut_graph.arcs),
                           std::move(min_cut_graph.arc_capacities),
                           std::move(min_cut_graph.terminal_capacities)) {}
+
+
+  long getTotalSolveLoopTime() const {
+    return solve_loop_time_;
+  }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
     for ( int i = 0; i < npartition_; ++i ) {
@@ -85,6 +109,7 @@ public:
           auto v = solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
           if ( u != v ) {
             disagreement = true;
+            break;
           }
         }
         if ( disagreement ) { // search for better configuration
@@ -103,19 +128,61 @@ public:
       return primal_solver_->getMinCutValue();
   }
 
-  void runOptimizationStep(int nstep, int step_size, int max_cycle_count = 2, int break_on_small_change = false) {
+  enum OptimizationStatus {
+    OPTIMAL,
+    NO_FURTHER_PROGRESS,
+    ITERATION_COUNT_EXCEEDED
+  };
+
+  OptimizationStatus runOptimizationScale(int nstep, int step_size, int max_cycle_count = 2, int break_on_small_change = false) {
+    OptimizationStatus opt_status = ITERATION_COUNT_EXCEEDED;
     const int num_stats_in_group = 10;
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(num_stats_in_group);
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
+    std::vector<long> solver_min_cut_values(npartition_);
     for (int i = 0; i < nstep; ++i) {
 
       long lower_bound = 0;
+      auto solve_loop_time = time_lambda([&]{
+#define THREAD_MODEL 1
+#if THREAD_MODEL == 1
+      int j = 0;
       for (auto &solver : solvers_) {
-        solver.solve();
-        auto adjusted_min_cut_value = solver.getMinCutValue();
-        lower_bound += adjusted_min_cut_value;
+        thread_pool_.push([&,j]{
+            solver.solve();
+            solver_min_cut_values[j] = solver.getMinCutValue();
+        });
+        j++;
       }
+      thread_pool_.wait();
+      for (const auto &min_cut_value : solver_min_cut_values ) {
+        lower_bound += min_cut_value;
+      }
+#elif THREAD_MODEL == 2
+      std::vector<std::future<long>> futures;
+      for (auto &solver : solvers_) {
+        futures.emplace_back(
+        std::async(std::launch::async, [&] () ->long {
+            solver.solve();
+            return solver.getMinCutValue();
+              }));
+      }
+      for ( auto &future : futures ) {
+        lower_bound += future.get();
+      }
+#else
+      for (auto &solver : solvers_) {
+        auto indiv_timer = time_lambda( [&] {
+          solver.solve();
+          lower_bound += solver.getMinCutValue();
+          });
+        //std::cout << "  > individual timer time: " << indiv_timer.count() << "\n";
+      }
+#endif
+
+          });
+      solve_loop_time_ += solve_loop_time.count();
       max_lower_bound = std::max(lower_bound,max_lower_bound);
 
       auto disagreeing_global_indices =
@@ -127,12 +194,14 @@ public:
         auto [first_group_max, second_group_max] = lower_bound_group_stats.getMaximums();
         if ( second_group_max <= first_group_max ) {
           std::cout << "breaking because max of this group's interval is less than or qual to max in last last group's interval\n";
+          opt_status = NO_FURTHER_PROGRESS;
           break;
         }
       }
 
       if (disagreeing_global_indices.size() == 0) { // optimality condition
         std::cout << "breaking because of no disagreement\n";
+        opt_status = OPTIMAL;
         break;
       }
 
@@ -140,10 +209,12 @@ public:
       if (dual_cycle_list.getMaxCycleCount() >
           max_cycle_count ) { // at least one set of configurations likely repeated more than a specified number of times
         std::cout << "breaking because cycle detected\n";
+        opt_status = NO_FURTHER_PROGRESS;
         break;
       }
   }
     printf(" === MAX === lower_bound : %ld\n",max_lower_bound);
+    return opt_status;
 }
 
   template<int scale>
@@ -155,6 +226,7 @@ public:
     for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
       for ( auto &constraint : constraints ) {
         constraint.alpha *= scale;
+        //constraint.last_alpha *= scale;
       }
     }
   }
@@ -179,10 +251,12 @@ private:
         int diff = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target)
           - solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
         if ( diff != 0 ) {
+          constraint.last_alpha = constraint.alpha; // record alpha before update
           if ( use_momentum ) {
-            const double beta = .9;
+            const double beta = .85;
+            const int momentum_scale = 10;
             constraint.alpha_momentum = beta * constraint.alpha_momentum * beta + (1-beta) * diff;
-            constraint.alpha += step_size*int(10*constraint.alpha_momentum);
+            constraint.alpha += step_size*static_cast<int>(momentum_scale*constraint.alpha_momentum);
           } else {
             constraint.alpha += step_size*diff;
           }
@@ -264,6 +338,7 @@ private:
             min_cut_sub_graphs_[partition_target].getNode(global_index);
           constraint_arcs.emplace_back(
               /*alpha=*/0,
+              /*last_alpha=*/0,
               /*alpha_momentum=*/0,
               /*partition_index_source=*/partition_source,
               /*partition_index_target=*/partition_target,
@@ -391,6 +466,8 @@ private:
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
   std::vector<long> primal_solution_;
   long scale_;
+  ThreadPool<void> thread_pool_;
+  long solve_loop_time_;
 
   template<typename T>
   class ScalarStatisticsTracker {

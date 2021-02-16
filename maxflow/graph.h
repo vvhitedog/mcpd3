@@ -61,6 +61,7 @@
 #define __GRAPH_H__
 
 #include <string.h>
+#include <unordered_set>
 #include "block.h"
 
 #include <assert.h>
@@ -147,6 +148,7 @@ private:
 	struct arc;
 
 public:
+	flowtype maxflow(bool reuse_trees, std::unordered_set<arc*> &changed_arcs_, Block<node_id>* changed_list = NULL);
 
 	////////////////////////////
 	// 1. Reallocating graph. //
@@ -356,7 +358,7 @@ private:
 
 	void maxflow_init();             // called if reuse_trees == false
 	void maxflow_reuse_trees_init(); // called if reuse_trees == true
-	void augment(arc *middle_arc);
+	void augment(arc *middle_arc, std::unordered_set<arc*> &changed_arcs_, bool get_changed_arcs);
 	void process_source_orphan(node *i);
 	void process_sink_orphan(node *i);
 

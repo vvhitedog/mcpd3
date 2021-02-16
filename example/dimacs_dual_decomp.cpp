@@ -102,6 +102,15 @@ int main(int argc, char *argv[]) {
   }
 
   auto min_cut_graph_data = mcpd3::read_dimacs(argv[1]);
+
+  //{ // run maxflow
+  //  auto min_cut_graph_data_copy = min_cut_graph_data;
+  //  mcpd3::PrimalDualMinCutSolver solver(std::move(min_cut_graph_data_copy));
+  //  auto microseconds = mcpd3::time_lambda([&]{
+  //      solver.maxflow(); // compute maxflow
+  //      });
+  //  std::cout << " maxflow : " << microseconds.count() << "ms\n";
+  //}
 #ifdef HAVE_METIS
   auto partitions = metis_partition(npartition, min_cut_graph_data);
 #else
@@ -110,31 +119,42 @@ int main(int argc, char *argv[]) {
 
   mcpd3::DualDecomposition dual_decomp(npartition, std::move(partitions),
                                        std::move(min_cut_graph_data));
+  auto microseconds = mcpd3::time_lambda( [&] {
   const int scaling_factor = 10;
-  dual_decomp.runOptimizationStep(10000,1,1,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,1,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,1,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,2,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
-  dual_decomp.scaleProblem<scaling_factor>();
-  dual_decomp.runOptimizationStep(10000,1,5,true);
-  dual_decomp.runPrimalSolutionDecodingStep(true);
+  const int num_optimization_scales = 6;
+  for ( int iscale = 0; iscale < num_optimization_scales; ++iscale ) {
+    auto status = dual_decomp.runOptimizationScale(10000,1,1,true);
+    //dual_decomp.runPrimalSolutionDecodingStep(true);
+    if ( status == mcpd3::DualDecomposition::OPTIMAL ) {
+      break;
+    }
+    dual_decomp.scaleProblem<scaling_factor>();
+  }
+  });
+    std::cout << " full loop time : " << microseconds.count() << "ms\n";
+
+  //dual_decomp.runOptimizationScale(10000,1,1,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,1,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,2,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,5,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,5,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,5,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
+  //dual_decomp.scaleProblem<scaling_factor>();
+  //dual_decomp.runOptimizationScale(10000,1,5,true);
+  //dual_decomp.runPrimalSolutionDecodingStep(true);
   dual_decomp.runPrimalSolutionDecodingStep();
   std::cout << "primal min cut value : " <<  dual_decomp.getPrimalMinCutValue() << "\n";
+  std::cout << " total solve loop time: " << dual_decomp.getTotalSolveLoopTime() << "\n";
   return EXIT_SUCCESS;
 }

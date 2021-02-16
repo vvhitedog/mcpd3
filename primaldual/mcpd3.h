@@ -36,7 +36,8 @@ public:
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true) {
+        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_), is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
+  maxflow_changed_list_(128){
     initializeMaxflowGraph();
   }
 
@@ -142,6 +143,8 @@ public:
     printf("// maxflow val :           %8ld    //\n",maxflow_val);
     printf("/////////////////////////////////////////\n");
 
+    computeMinCutValueInitial(); // TODO: is this needed?
+
   }
 
 
@@ -178,6 +181,11 @@ public:
       flow = maxflow_graph_.get_trcap(i);
       maxflow_graph_.set_trcap(i,flow*scale);
     }
+    // NOTE: after changing scale, the capacities from previous and this scale
+    // are at completely different values, hence incremental update of
+    // mincut_value_ will not work properly
+    is_first_iteration_of_new_scale_ = true;
+    //computeMinCutValueInitial(); // must recompute mincut_value_
   }
 
   long maxflow() {
@@ -213,15 +221,22 @@ public:
                                 // complementary slackness conditions are
                                 // violated and sets source and sink capacities
                                 // accordingly
-    if (!nviolated) {
-      std::fill(x_.begin(),x_.end(),0); // reset min cut; no flow adjustment is necessary
-      return; // no violated node based lagrange multiplier complementary
-              // slackness conditions; translation: solution is optimal already
-    }
-    maxflow_graph_.maxflow(!is_first_iteration_);
-    is_first_iteration_ = false;
+    //if (!nviolated) {
+    //  std::fill(x_.begin(),x_.end(),0); // reset min cut; no flow adjustment is necessary
+    //  return; // no violated node based lagrange multiplier complementary
+    //          // slackness conditions; translation: solution is optimal already
+    //}
+    computeMaxflow(); // compute maxflow
     updateFlow();   // get updated flow
     updateMinCut(); // get updated min cut solution
+
+    // set flag indicating that incremental methods should be used hereafter
+    if ( is_first_iteration_ || is_first_iteration_of_new_scale_ ) {
+      computeMinCutValueInitial(); // initialize min cut value to compute incremental changes later
+      is_first_iteration_of_new_scale_ = false;
+      is_first_iteration_ = false;
+    } 
+     // computeMinCutValueInitial(); // initialize min cut value to compute incremental changes later
   }
 
   long getMaxFlowValue() const {
@@ -246,6 +261,9 @@ public:
   }
 
   long getMinCutValue() const {
+    //computeMinCutValueInitial();
+    return mincut_value_;
+#if 0
     long min_cut_value = 0;
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
@@ -280,6 +298,7 @@ public:
           lagrange_multiplier_term * x_[index];
     }
     return min_cut_value;
+#endif
   }
 
   void addSourceDualDecompositionConstraint(
@@ -314,11 +333,48 @@ public:
     return x_[index];
   }
 
-  void setMinCutSolution( const std::vector<long> new_solution ) {
+  void setMinCutSolution( const std::vector<long> &new_solution ) {
     std::copy(new_solution.begin(),new_solution.end(),x_.begin());
+    computeMinCutValueInitial();
   }
 
 private:
+  void computeMinCutValueInitial() {
+    mincut_value_ = 0;
+    for (int i = 0; i < narc_; ++i) {
+      int s = arcs_[2 * i + 0];
+      int t = arcs_[2 * i + 1];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
+      if (x_[s] == 0 && x_[t] == 1) {
+        mincut_value_ += forward_capacity;
+      } else if (x_[s] == 1 && x_[t] == 0) {
+        mincut_value_ += backward_capacity;
+      }
+    }
+    for (int i = 0; i < nnode_; ++i) {
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
+      if (x_[i] == 0) {
+        mincut_value_ += sink_capacity;
+      } else {
+        mincut_value_ += source_capacity;
+      }
+    }
+    // add dual decomposition node potential terms (when/if applicable)
+    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
+      int lagrange_multiplier_term = 0;
+      for (const auto &arc_reference : constraint.source_arc_references ) {
+        lagrange_multiplier_term -= arc_reference->alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references ) {
+        lagrange_multiplier_term += arc_reference->alpha;
+      }
+      mincut_value_ +=
+          lagrange_multiplier_term * x_[index];
+    }
+  }
+
   void initializeMaxflowGraph() {
     maxflow_graph_.add_node(nnode_);
     for (int i = 0; i < narc_; ++i) {
@@ -424,6 +480,17 @@ private:
   }
 
   int updateNodePotentials() {
+    //return updateNodePotentialsInitial();
+    int nviolated;
+    if ( is_first_iteration_ ) {
+      nviolated =  updateNodePotentialsInitial();
+    } else {
+      nviolated = updateNodePotentialsIncremental();
+    }
+    return nviolated;
+  }
+
+  int updateNodePotentialsInitial() {
     int nviolated = 0;
     // add mincut node potential terms
     for (int i = 0; i < nnode_; ++i) {
@@ -432,6 +499,43 @@ private:
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
       updateNodeTerminal(i,pos,nviolated,false);
     }
+    return updateDualDecompositionNodePotentials(nviolated);
+#if 0
+    // add dual decomposition node potential terms (when/if applicable)
+    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
+      long pos = 0;
+      for (const auto &arc_reference : constraint.source_arc_references ) {
+        pos -= arc_reference->alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references ) {
+        pos += arc_reference->alpha;
+      }
+      updateNodeTerminal(index,pos,nviolated,true);
+    }
+    return nviolated;
+#endif
+  }
+
+  int updateNodePotentialsIncremental() {
+    int nviolated = 0;
+    // add mincut node potential terms
+    //for (int i = 0; i < nnode_; ++i) {
+    for (const int i : incremental_mincut_nodes_ ) {
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
+      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      updateNodeTerminal(i,pos,nviolated,false);
+    }
+    for (const auto &[i,constraint] : dual_decomposition_constraints_map_ ) {
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
+      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      updateNodeTerminal(i,pos,nviolated,false);
+    }
+    return updateDualDecompositionNodePotentials(nviolated);
+  }
+
+  int updateDualDecompositionNodePotentials(int nviolated) {
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
       long pos = 0;
@@ -447,12 +551,100 @@ private:
   }
 
   void updateMinCut() {
+    if ( is_first_iteration_ ) {
+      updateMinCutInitial();
+    } else {
+      updateMinCutIncremental();
+    }
+  }
+
+  void updateMinCutInitial() {
     for (int i = 0; i < nnode_; ++i) {
       x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
     }
   }
 
-  void updateFlow() {
+  void updateMinCutIncremental() {
+    // update dual decomposition node potential terms (when/if applicable)
+    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
+      auto x_i_new = maxflow_graph_.what_segment(index) == MaxflowGraph::SINK ? 1 : 0;
+      int lagrange_multiplier_term = 0;
+      int last_lagrange_multiplier_term = 0;
+      for (const auto &arc_reference : constraint.source_arc_references ) {
+        lagrange_multiplier_term -= arc_reference->alpha;
+        last_lagrange_multiplier_term -= arc_reference->last_alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references ) {
+        lagrange_multiplier_term += arc_reference->alpha;
+        last_lagrange_multiplier_term += arc_reference->last_alpha;
+      }
+      mincut_value_ -=
+          last_lagrange_multiplier_term * (x_[index]);
+      mincut_value_ +=
+          lagrange_multiplier_term * (x_i_new);
+    }
+
+    // update node and arc terms that may have changed
+    std::unordered_set<long> proccessed_arcs;
+    auto nodes = maxflow_graph_.get_nodes();
+    MaxflowGraph::arc_id first_arc = maxflow_graph_.get_first_arc();
+    for ( const int i : incremental_mincut_nodes_ ) {
+      auto x_i_new = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+
+      // process terminals
+      auto source_capacity = terminal_capacities_[2 * i + 0];
+      auto sink_capacity = terminal_capacities_[2 * i + 1];
+      if ( x_[i] == 0 && !(x_i_new == 0) ) {
+        mincut_value_ += source_capacity;
+        mincut_value_ -= sink_capacity;
+      }
+      if ( x_[i] == 1 && !(x_i_new == 1) ) {
+        mincut_value_ -= source_capacity;
+        mincut_value_ += sink_capacity;
+      }
+
+      // processes each possible arc
+#if 1
+      MaxflowGraph::arc_id a;
+      const auto &node_i = nodes[i];
+			for (a=node_i.first; a; a=a->next) {
+        auto arc_index = std::distance(first_arc,
+            a) / 2;
+        auto [iter,success] = proccessed_arcs.insert(arc_index);
+        if (!success) {
+          continue; // skip arc as it was processed with other node
+        }
+        auto forward_capacity = arc_capacities_[2 * arc_index + 0];
+        auto backward_capacity = arc_capacities_[2 * arc_index + 1];
+        int s = arcs_[2 * arc_index + 0];
+        int t = arcs_[2 * arc_index + 1];
+        auto x_s_new = maxflow_graph_.what_segment(s) == MaxflowGraph::SINK ? 1 : 0;
+        auto x_t_new = maxflow_graph_.what_segment(t) == MaxflowGraph::SINK ? 1 : 0;
+        if ( (x_[s] == 0 && x_[t] == 1) &&
+            !( x_s_new == 0 && x_t_new == 1 ) ) {
+          mincut_value_ -= forward_capacity;
+        }
+        if ( (x_[s] == 1 && x_[t] == 0) &&
+            !( x_s_new == 1 && x_t_new == 0 ) ) {
+          mincut_value_ -= backward_capacity;
+        }
+        if ( !(x_[s] == 0 && x_[t] == 1) &&
+            ( x_s_new == 0 && x_t_new == 1 ) ) {
+          mincut_value_ += forward_capacity;
+        }
+        if ( !(x_[s] == 1 && x_[t] == 0) &&
+            ( x_s_new == 1 && x_t_new == 0 ) ) {
+          mincut_value_ += backward_capacity;
+        }
+      }
+#endif
+
+      // update
+      x_[i] = x_i_new;
+    }
+  }
+
+  void updateFlowInitial() {
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
@@ -470,6 +662,89 @@ private:
     }
   }
 
+  void updateFlowIncremental() {
+    MaxflowGraph::arc_id first_arc = maxflow_graph_.get_first_arc();
+    for (const int i : incremental_arcs_ ) {
+      int s = arcs_[2 * i + 0];
+      int t = arcs_[2 * i + 1];
+      auto forward_capacity = arc_capacities_[2 * i + 0];
+      auto backward_capacity = arc_capacities_[2 * i + 1];
+      auto flow = v_flow_[i];
+      auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
+      long new_flow = maxflow_graph_.get_rcap(first_arc + 2*i) - pos;
+      v_flow_[i] += new_flow;
+      d_flow_[s] += new_flow;
+      d_flow_[t] -= new_flow;
+      // add touched nodes to update later
+      incremental_touched_nodes_.insert(s);
+      incremental_touched_nodes_.insert(t);
+      // an optimization: compute arc's contribution change to mincut
+      //auto x_s_new = maxflow_graph_.what_segment(s) == MaxflowGraph::SINK ? 1 : 0;
+      //auto x_t_new = maxflow_graph_.what_segment(t) == MaxflowGraph::SINK ? 1 : 0;
+      //auto mincut_before = mincut_value_;
+      //if ( (x_[s] == 0 && x_[t] == 1) &&
+      //    !( x_s_new == 0 && x_t_new == 1 ) ) {
+      //  mincut_value_ -= forward_capacity;
+      //}
+      //if ( (x_[s] == 1 && x_[t] == 0) &&
+      //    !( x_s_new == 1 && x_t_new == 0 ) ) {
+      //  mincut_value_ -= backward_capacity;
+      //}
+      //if ( !(x_[s] == 0 && x_[t] == 1) &&
+      //    ( x_s_new == 0 && x_t_new == 1 ) ) {
+      //  mincut_value_ += forward_capacity;
+      //}
+      //if ( !(x_[s] == 1 && x_[t] == 0) &&
+      //    ( x_s_new == 1 && x_t_new == 0 ) ) {
+      //  mincut_value_ += backward_capacity;
+      //}
+      //auto mincut_after = mincut_value_;
+      //if ( mincut_after != mincut_before ) {
+      //  printf(" mincut before != after: %ld, %ld\n",mincut_before,mincut_after);
+      //}
+    }
+  }
+
+  void updateFlow() {
+    if ( is_first_iteration_ ) {
+      updateFlowInitial();
+    } else {
+      updateFlowIncremental();
+    }
+  }
+
+  void computeMaxflow() {
+    if ( is_first_iteration_ ) {
+      maxflow_graph_.maxflow();
+    } else {
+      incremental_arcs_.clear();
+      incremental_mincut_nodes_.clear();
+      incremental_touched_nodes_.clear();
+      std::unordered_set<MaxflowGraph::arc_id> changed_arcs;
+      maxflow_graph_.maxflow(true,changed_arcs,&maxflow_changed_list_);
+
+      // update incremental nodes
+      MaxflowGraph::node_id* ptr;
+      for (ptr=maxflow_changed_list_.ScanFirst(); ptr; ptr=maxflow_changed_list_.ScanNext())
+      {
+        MaxflowGraph::node_id i = *ptr; assert(i>=0 && i<nodeNum);
+        maxflow_graph_.remove_from_changed_list(i);
+        incremental_mincut_nodes_.emplace_back(i);
+        incremental_touched_nodes_.insert(i);
+      }
+      maxflow_changed_list_.Reset();
+
+      // update incremental arcs
+      auto first_arc = maxflow_graph_.get_first_arc();
+      for ( const auto &arc_id : changed_arcs) {
+        auto arc_index = std::distance(first_arc,
+            arc_id) / 2;
+        incremental_arcs_.emplace_back(arc_index);
+      }
+    }
+  }
+
+
   /**
    * data passed into solver
    */
@@ -486,9 +761,17 @@ private:
   std::vector<long> d_flow_; // flow on the nodes
   std::vector<long> x_;      // mincut solution
   using MaxflowGraph =
-      Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
+      //Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
+      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
+  bool is_first_iteration_of_new_scale_;
+
+  Block<MaxflowGraph::node_id> maxflow_changed_list_;
+  std::list<int> incremental_mincut_nodes_;
+  std::unordered_set<int> incremental_touched_nodes_;
+  std::list<int> incremental_arcs_;
+  long mincut_value_;
 
   /**
    * specific to dual decomposition
