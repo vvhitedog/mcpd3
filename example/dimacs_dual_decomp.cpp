@@ -25,9 +25,9 @@
 #include <metis.h>
 #endif
 
-std::vector<long> basic_graph_partition(int npartition,
+std::vector<int> basic_graph_partition(int npartition,
                                        const mcpd3::MinCutGraph &graph) {
-  std::vector<long> partitions(graph.nnode);
+  std::vector<int> partitions(graph.nnode);
   int nnode_in_each_partition = (graph.nnode + npartition - 1) / npartition;
   for (int i = 0; i < graph.nnode; ++i) {
     partitions[i] = i / nnode_in_each_partition;
@@ -37,7 +37,7 @@ std::vector<long> basic_graph_partition(int npartition,
 
 
 #ifdef HAVE_METIS
-std::vector<long> metis_partition(int npartition,
+std::vector<int> metis_partition(int npartition,
               const mcpd3::MinCutGraph &graph) {
 
   const auto &narc = graph.narc;
@@ -83,7 +83,7 @@ std::vector<long> metis_partition(int npartition,
     std::exit(EXIT_FAILURE);
   }
 
-  std::vector<long> label(nnode,-1);
+  std::vector<int> label(nnode,-1);
   std::copy(part.begin(), part.end(), label.begin());
   return std::move(label);
 }

@@ -30,9 +30,9 @@ namespace mcpd3 {
 
 class PrimalDualMinCutSolver {
 public:
-  PrimalDualMinCutSolver(int nnode, int narc, std::vector<long> &&arcs,
-                         std::vector<long> arc_capacities,
-                         std::vector<long> terminal_capacities)
+  PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
+                         std::vector<int> arc_capacities,
+                         std::vector<int> terminal_capacities)
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
@@ -241,7 +241,7 @@ public:
 
   long getMaxFlowValue() const {
     long maxflow = 0;
-    std::vector<long> node_balance(nnode_, 0);
+    std::vector<int> node_balance(nnode_, 0);
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
@@ -333,7 +333,7 @@ public:
     return x_[index];
   }
 
-  void setMinCutSolution( const std::vector<long> &new_solution ) {
+  void setMinCutSolution( const std::vector<int> &new_solution ) {
     std::copy(new_solution.begin(),new_solution.end(),x_.begin());
     computeMinCutValueInitial();
   }
@@ -727,7 +727,7 @@ private:
       MaxflowGraph::node_id* ptr;
       for (ptr=maxflow_changed_list_.ScanFirst(); ptr; ptr=maxflow_changed_list_.ScanNext())
       {
-        MaxflowGraph::node_id i = *ptr; assert(i>=0 && i<nodeNum);
+        MaxflowGraph::node_id i = *ptr;
         maxflow_graph_.remove_from_changed_list(i);
         incremental_mincut_nodes_.emplace_back(i);
         incremental_touched_nodes_.insert(i);
@@ -750,16 +750,16 @@ private:
    */
   int nnode_;
   int narc_;
-  std::vector<long> arcs_;
-  std::vector<long> arc_capacities_;
-  std::vector<long> terminal_capacities_;
+  std::vector<int> arcs_;
+  std::vector<int> arc_capacities_;
+  std::vector<int> terminal_capacities_;
 
   /**
    * data structures needed for solving primal dual problem
    */
-  std::vector<long> v_flow_; // flow on the arcs
-  std::vector<long> d_flow_; // flow on the nodes
-  std::vector<long> x_;      // mincut solution
+  std::vector<int> v_flow_; // flow on the arcs
+  std::vector<int> d_flow_; // flow on the nodes
+  std::vector<int> x_;      // mincut solution
   using MaxflowGraph =
       //Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
       Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;

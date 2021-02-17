@@ -71,10 +71,5 @@ add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
 target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} )
 
 ## DIMACS maxflow format example for dual decomposition
-if (METIS_ENABLED)
-  add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC} ${METIS_INCLUDE_DIR})
-  target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
-else()
-  add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
-  target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
-endif (METIS_ENABLED)
+add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC} ${METIS_INCLUDE_DIR})
+target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )

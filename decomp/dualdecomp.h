@@ -50,9 +50,9 @@ std::chrono::microseconds time_lambda(Lambda lambda) {
 class DualDecomposition {
 public:
   DualDecomposition(int npartition, int nnode, int narc,
-                    std::vector<long> partitions, std::vector<long> arcs,
-                    std::vector<long> arc_capacities,
-                    std::vector<long> terminal_capacities)
+                    std::vector<int> partitions, std::vector<int> arcs,
+                    std::vector<int> arc_capacities,
+                    std::vector<int> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
@@ -61,7 +61,7 @@ public:
     initializeDecomposition();
   }
 
-  DualDecomposition(int npartition, std::vector<long> partitions,
+  DualDecomposition(int npartition, std::vector<int> partitions,
                     MinCutGraph min_cut_graph)
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
                           std::move(partitions), std::move(min_cut_graph.arcs),
@@ -140,7 +140,7 @@ public:
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(num_stats_in_group);
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
-    std::vector<long> solver_min_cut_values(npartition_);
+    std::vector<int> solver_min_cut_values(npartition_);
     for (int i = 0; i < nstep; ++i) {
 
       long lower_bound = 0;
@@ -373,10 +373,10 @@ private:
   int npartition_;
   int nnode_;
   int narc_;
-  std::vector<long> partitions_;
-  std::vector<long> arcs_;
-  std::vector<long> arc_capacities_;
-  std::vector<long> terminal_capacities_;
+  std::vector<int> partitions_;
+  std::vector<int> arcs_;
+  std::vector<int> arc_capacities_;
+  std::vector<int> terminal_capacities_;
 
   /**
    * data structures needed for solving dual decomposition
@@ -464,7 +464,7 @@ private:
   };
 
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
-  std::vector<long> primal_solution_;
+  std::vector<int> primal_solution_;
   long scale_;
   ThreadPool<void> thread_pool_;
   long solve_loop_time_;
