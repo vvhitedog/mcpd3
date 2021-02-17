@@ -16,18 +16,18 @@
 
 #pragma once
 
+#include <cmath>
 #include <list>
-#include <set>
-#include <unordered_map>
 #include <memory>
 #include <queue>
-#include <cmath>
+#include <set>
+#include <unordered_map>
 
 #include "constraint.h"
-#include <primaldual/mcpd3.h>
 #include <graph/cycle.h>
 #include <iostream>
 #include <multithread/threadpool.h>
+#include <primaldual/mcpd3.h>
 
 namespace mcpd3 {
 
@@ -54,8 +54,10 @@ public:
                     std::vector<int> arc_capacities,
                     std::vector<int> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
-        partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
-        terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
+        partitions_(std::move(partitions)), arcs_(std::move(arcs)),
+        arc_capacities_(std::move(arc_capacities)),
+        terminal_capacities_(std::move(terminal_capacities)),
+        min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
         thread_pool_(std::thread::hardware_concurrency()), solve_loop_time_(0) {
     initializeDecomposition();
   }
@@ -67,64 +69,71 @@ public:
                           std::move(min_cut_graph.arc_capacities),
                           std::move(min_cut_graph.terminal_capacities)) {}
 
-
-  long getTotalSolveLoopTime() const {
-    return solve_loop_time_;
-  }
+  long getTotalSolveLoopTime() const { return solve_loop_time_; }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
-    for ( int i = 0; i < npartition_; ++i ) {
+    for (int i = 0; i < npartition_; ++i) {
       const auto &min_cut_sub_graph = min_cut_sub_graphs_[i];
       const auto &solver = solvers_[i];
-      for ( const auto & [global_index,local_index] : min_cut_sub_graph.global_to_local_map ) {
+      for (const auto &[global_index, local_index] :
+           min_cut_sub_graph.global_to_local_map) {
         primal_solution_[global_index] = solver.getMinCutSolution(local_index);
       }
     }
     int total_disagree_count = 0;
-    for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
       double sum_x = 0;
       bool disagreement = false;
-      for ( auto &constraint : constraints ) {
-        auto u = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target);
-        auto v = solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
-        if ( u != v ) {
+      for (auto &constraint : constraints) {
+        auto u = solvers_[constraint.partition_index_target].getMinCutSolution(
+            constraint.local_index_target);
+        auto v = solvers_[constraint.partition_index_source].getMinCutSolution(
+            constraint.local_index_source);
+        if (u != v) {
           disagreement = true;
         }
         sum_x += u;
         sum_x += v;
       }
-      primal_solution_[global_index]  = std::round(sum_x / (2*constraints.size())); // use an averaging scheme to resolve what primal solution should be for constrained nodes
-      if ( disagreement ) {
+      primal_solution_[global_index] = std::round(
+          sum_x /
+          (2 * constraints
+                   .size())); // use an averaging scheme to resolve what primal
+                              // solution should be for constrained nodes
+      if (disagreement) {
         total_disagree_count++;
       }
     }
 
-    if ( do_narrow_band_decode && total_disagree_count > 0  ) {
+    if (do_narrow_band_decode && total_disagree_count > 0) {
       std::list<int> disagree_nodes;
-      for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+      for (auto &[global_index, constraints] : constraint_arc_map_) {
         bool disagreement = false;
-        for ( auto &constraint : constraints ) {
-          auto u = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target);
-          auto v = solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
-          if ( u != v ) {
+        for (auto &constraint : constraints) {
+          auto u =
+              solvers_[constraint.partition_index_target].getMinCutSolution(
+                  constraint.local_index_target);
+          auto v =
+              solvers_[constraint.partition_index_source].getMinCutSolution(
+                  constraint.local_index_source);
+          if (u != v) {
             disagreement = true;
             break;
           }
         }
-        if ( disagreement ) { // search for better configuration
+        if (disagreement) { // search for better configuration
           disagree_nodes.emplace_back(global_index);
         }
       }
       primal_solver_->setMinCutSolution(primal_solution_);
-      primal_solver_->decodeNarrowBand(disagree_nodes,14);
-      printf("recalc primal: %ld \n",primal_solver_->getMinCutValue() );
+      primal_solver_->decodeNarrowBand(disagree_nodes, 14);
+      printf("recalc primal: %ld \n", primal_solver_->getMinCutValue());
     }
   }
 
-
   long getPrimalMinCutValue() const {
-      primal_solver_->setMinCutSolution(primal_solution_);
-      return primal_solver_->getMinCutValue();
+    primal_solver_->setMinCutSolution(primal_solution_);
+    return primal_solver_->getMinCutValue();
   }
 
   enum OptimizationStatus {
@@ -133,60 +142,66 @@ public:
     ITERATION_COUNT_EXCEEDED
   };
 
-  OptimizationStatus runOptimizationScale(int nstep, int step_size, int max_cycle_count = 2, int break_on_small_change = false) {
+  OptimizationStatus runOptimizationScale(int nstep, int step_size,
+                                          int max_cycle_count = 2,
+                                          int break_on_small_change = false) {
     OptimizationStatus opt_status = ITERATION_COUNT_EXCEEDED;
     const int num_stats_in_group = 10;
-    TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(num_stats_in_group);
+    TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(
+        num_stats_in_group);
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
     for (int i = 0; i < nstep; ++i) {
 
       std::atomic<long> lower_bound = 0;
-      auto solve_loop_time = time_lambda([&]{
+      auto solve_loop_time = time_lambda([&] {
 #define THREAD_MODEL 1
 #if THREAD_MODEL == 1
-      for (auto &solver : solvers_) {
-        thread_pool_.push([&]{
+        for (auto &solver : solvers_) {
+          thread_pool_.push([&] {
             solver.solve();
             lower_bound += solver.getMinCutValue();
-        });
-      }
-      thread_pool_.wait();
+          });
+        }
+        thread_pool_.wait();
 #elif THREAD_MODEL == 2
-      std::vector<std::future<long>> futures;
-      for (auto &solver : solvers_) {
-        futures.emplace_back(
-        std::async(std::launch::async, [&] () ->long {
+        std::vector<std::future<long>> futures;
+        for (auto &solver : solvers_) {
+          futures.emplace_back(std::async(std::launch::async, [&]() -> long {
             solver.solve();
             return solver.getMinCutValue();
-              }));
-      }
-      for ( auto &future : futures ) {
-        lower_bound += future.get();
-      }
+          }));
+        }
+        for (auto &future : futures) {
+          lower_bound += future.get();
+        }
 #else
-      for (auto &solver : solvers_) {
-        auto indiv_timer = time_lambda( [&] {
-          solver.solve();
-          lower_bound += solver.getMinCutValue();
+        for (auto &solver : solvers_) {
+          auto indiv_timer = time_lambda([&] {
+            solver.solve();
+            lower_bound += solver.getMinCutValue();
           });
-        //std::cout << "  > individual timer time: " << indiv_timer.count() << "\n";
-      }
+          // std::cout << "  > individual timer time: " << indiv_timer.count()
+          // << "\n";
+        }
 #endif
-
-          });
+      });
       solve_loop_time_ += solve_loop_time.count();
-      max_lower_bound = std::max(static_cast<long>(lower_bound),max_lower_bound);
+      max_lower_bound =
+          std::max(static_cast<long>(lower_bound), max_lower_bound);
 
       auto disagreeing_global_indices =
-          runLagrangeMultipliersUpdateStep(step_size,break_on_small_change);
-      printf("lower_bound : %lf num_disagreeing : %ld\n",double(lower_bound) / scale_,disagreeing_global_indices.size());
+          runLagrangeMultipliersUpdateStep(step_size, break_on_small_change);
+      printf("lower_bound : %lf num_disagreeing : %ld\n",
+             double(lower_bound) / scale_, disagreeing_global_indices.size());
 
       lower_bound_group_stats.addValue(lower_bound);
-      if ( lower_bound_group_stats.areGroupsPopulated() ) {
-        auto [first_group_max, second_group_max] = lower_bound_group_stats.getMaximums();
-        if ( second_group_max <= first_group_max ) {
-          std::cout << "breaking because max of this group's interval is less than or qual to max in last last group's interval\n";
+      if (lower_bound_group_stats.areGroupsPopulated()) {
+        auto [first_group_max, second_group_max] =
+            lower_bound_group_stats.getMaximums();
+        if (second_group_max <= first_group_max) {
+          std::cout << "breaking because max of this group's interval is less "
+                       "than or qual to max in last last group's interval\n";
           opt_status = NO_FURTHER_PROGRESS;
           break;
         }
@@ -198,65 +213,73 @@ public:
         break;
       }
 
-      dual_cycle_list.addNode(getDualSolutionHash(std::move(disagreeing_global_indices),lower_bound));
+      dual_cycle_list.addNode(getDualSolutionHash(
+          std::move(disagreeing_global_indices), lower_bound));
       if (dual_cycle_list.getMaxCycleCount() >
-          max_cycle_count ) { // at least one set of configurations likely repeated more than a specified number of times
+          max_cycle_count) { // at least one set of configurations likely
+                             // repeated more than a specified number of times
         std::cout << "breaking because cycle detected\n";
         opt_status = NO_FURTHER_PROGRESS;
         break;
       }
-  }
-    printf(" === MAX === lower_bound : %ld\n",max_lower_bound);
+    }
+    printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
     return opt_status;
-}
+  }
 
-  template<int scale>
-  void scaleProblem() {
+  template <int scale> void scaleProblem() {
     scale_ *= scale;
-      for (auto &solver : solvers_) {
-        solver.scaleProblem<scale>();
-      }
-    for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
-      for ( auto &constraint : constraints ) {
+    for (auto &solver : solvers_) {
+      solver.scaleProblem<scale>();
+    }
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      for (auto &constraint : constraints) {
         constraint.alpha *= scale;
-        //constraint.last_alpha *= scale;
+        // constraint.last_alpha *= scale;
       }
     }
   }
 
-
 private:
-  long getDualSolutionHash(std::list<int> disagreeing_global_indices, 
-      long lower_bound ) const {
+  long getDualSolutionHash(std::list<int> disagreeing_global_indices,
+                           long lower_bound) const {
     std::hash<long> hasher{};
     long hash = hasher(lower_bound);
-    for (const auto &global_index : disagreeing_global_indices ) {
+    for (const auto &global_index : disagreeing_global_indices) {
       hash ^= hasher(global_index);
     }
     return hash;
   }
 
-  std::list<int> runLagrangeMultipliersUpdateStep(int step_size, bool use_momentum ) {
+  std::list<int> runLagrangeMultipliersUpdateStep(int step_size,
+                                                  bool use_momentum) {
     std::list<int> disagreeing_global_indices;
-    for ( auto &[global_index,constraints] : constraint_arc_map_ ) {
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
-      for ( auto &constraint : constraints ) {
-        int diff = solvers_[constraint.partition_index_target].getMinCutSolution(constraint.local_index_target)
-          - solvers_[constraint.partition_index_source].getMinCutSolution(constraint.local_index_source);
-        if ( diff != 0 ) {
-          constraint.last_alpha = constraint.alpha; // record alpha before update
-          if ( use_momentum ) {
+      for (auto &constraint : constraints) {
+        int diff =
+            solvers_[constraint.partition_index_target].getMinCutSolution(
+                constraint.local_index_target) -
+            solvers_[constraint.partition_index_source].getMinCutSolution(
+                constraint.local_index_source);
+        if (diff != 0) {
+          constraint.last_alpha =
+              constraint.alpha; // record alpha before update
+          if (use_momentum) {
             const double beta = .85;
             const int momentum_scale = 10;
-            constraint.alpha_momentum = beta * constraint.alpha_momentum * beta + (1-beta) * diff;
-            constraint.alpha += step_size*static_cast<int>(momentum_scale*constraint.alpha_momentum);
+            constraint.alpha_momentum =
+                beta * constraint.alpha_momentum * beta + (1 - beta) * diff;
+            constraint.alpha +=
+                step_size *
+                static_cast<int>(momentum_scale * constraint.alpha_momentum);
           } else {
-            constraint.alpha += step_size*diff;
+            constraint.alpha += step_size * diff;
           }
           disagreement_exists = true;
         }
       }
-      if ( disagreement_exists ) {
+      if (disagreement_exists) {
         disagreeing_global_indices.emplace_back(global_index);
       }
     }
@@ -275,9 +298,9 @@ private:
       int t = arcs_[2 * i + 1];
       int forward_capacity = arc_capacities_[2 * i + 0];
       int backward_capacity = arc_capacities_[2 * i + 1];
-      if ( s >  t ) {
-        std::swap(s,t);
-        std::swap(forward_capacity,backward_capacity);
+      if (s > t) {
+        std::swap(s, t);
+        std::swap(forward_capacity, backward_capacity);
       }
       // the sub graph each arc belongs to is defined to be the partition of the
       // source node
@@ -296,7 +319,7 @@ private:
       int source_capacity = terminal_capacities_[2 * i + 0];
       int sink_capacity = terminal_capacities_[2 * i + 1];
       min_cut_sub_graphs_[partitions_[i]].insertTerminal(i, source_capacity,
-                                                        sink_capacity);
+                                                         sink_capacity);
     }
     /**
      * step 3: create solvers
@@ -318,17 +341,16 @@ private:
       assert(partitions.size() >
              1); // requirement to be a proper constrained node
       for (const auto &partition_source :
-          partitions) { // iterates in sorted order due to std::set
+           partitions) { // iterates in sorted order due to std::set
         for (const auto &partition_target :
-            partitions) { // iterates in sorted order due to std::set
-          if ( partition_source >= partition_target ) {
+             partitions) { // iterates in sorted order due to std::set
+          if (partition_source >= partition_target) {
             continue;
           }
           int local_index_source =
-            min_cut_sub_graphs_[partition_source].getNode(
-                global_index);
+              min_cut_sub_graphs_[partition_source].getNode(global_index);
           int local_index_target =
-            min_cut_sub_graphs_[partition_target].getNode(global_index);
+              min_cut_sub_graphs_[partition_target].getNode(global_index);
           constraint_arcs.emplace_back(
               /*alpha=*/0,
               /*last_alpha=*/0,
@@ -340,21 +362,23 @@ private:
           auto arc_reference = --constraint_arcs.end();
           solvers_[partition_source].addSourceDualDecompositionConstraint(
               arc_reference);
-          solvers_[partition_target].addTargetDualDecompositionConstraint(arc_reference);
+          solvers_[partition_target].addTargetDualDecompositionConstraint(
+              arc_reference);
         }
       }
-      //assert(constraint_arcs.size() == partitions.size() - 1);
+      // assert(constraint_arcs.size() == partitions.size() - 1);
       constrained_nodes_partition_counts.insert(partitions.size());
     }
     printf("partition counts: ");
-    for (const auto &count : constrained_nodes_partition_counts ) {
-      printf("%d,",count);
+    for (const auto &count : constrained_nodes_partition_counts) {
+      printf("%d,", count);
     }
     printf("\n");
     /**
-     * step 5: create a min cut problem from the original problem to evaluate the primal objective value
+     * step 5: create a min cut problem from the original problem to evaluate
+     * the primal objective value
      */
-    //primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
+    // primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
     //    std::move(arcs_),
     //    std::move(arc_capacities_),
     //    std::move(terminal_capacities_));
@@ -398,13 +422,9 @@ private:
 
     T &operator[](size_t index) { return *vector_[index]; }
 
-    typename std::list<T>::iterator begin() {
-      return list_.begin();
-    }
+    typename std::list<T>::iterator begin() { return list_.begin(); }
 
-    typename std::list<T>::iterator end() {
-      return list_.end();
-    }
+    typename std::list<T>::iterator end() { return list_.end(); }
 
   private:
     std::list<T> list_;
@@ -412,7 +432,8 @@ private:
   };
 
   stable_vector<PrimalDualMinCutSolver> solvers_;
-  std::unique_ptr<PrimalDualMinCutSolver> primal_solver_; // only used to evaluate primal value
+  std::unique_ptr<PrimalDualMinCutSolver>
+      primal_solver_; // only used to evaluate primal value
 
   struct MinCutSubGraph {
     MinCutGraph graph;
@@ -468,83 +489,79 @@ private:
   ThreadPool<void> thread_pool_;
   long solve_loop_time_;
 
-  template<typename T>
-  class ScalarStatisticsTracker {
-    public:
-    ScalarStatisticsTracker(size_t n):n_(n),running_sum_(0),id_(0) {}
+  template <typename T> class ScalarStatisticsTracker {
+  public:
+    ScalarStatisticsTracker(size_t n) : n_(n), running_sum_(0), id_(0) {}
 
-    void addValue(const T& value) {
-      values_.push_back({value,id_});
+    void addValue(const T &value) {
+      values_.push_back({value, id_});
       ordered_values_.insert(values_.back());
       id_ = (id_ + 1) % n_;
       running_sum_ += value;
-      if ( values_.size() > n_ ) {
+      if (values_.size() > n_) {
         running_sum_ -= values_.front().first;
         ordered_values_.erase(values_.front());
         values_.pop_front();
       }
     }
 
-    double getAverage() const {
-      return static_cast<double>(running_sum_)/n_;
-    }
+    double getAverage() const { return static_cast<double>(running_sum_) / n_; }
 
     T getMaximum() const {
-      if ( !ordered_values_.size() ) {
+      if (!ordered_values_.size()) {
         return {};
       }
       return ordered_values_.rbegin()->first;
     }
 
-    private:
+  private:
     size_t n_;
     size_t id_;
-    std::list<std::pair<T,size_t>> values_;
+    std::list<std::pair<T, size_t>> values_;
     T running_sum_;
-    std::set<std::pair<T,size_t>> ordered_values_;
+    std::set<std::pair<T, size_t>> ordered_values_;
   };
 
-  template<typename T>
-  class TwoGroupScalarStatisticsTracker {
-    public:
-    TwoGroupScalarStatisticsTracker(size_t n ): n_(n), group_1_(n), group_2_(n),
-    first_group(&group_1_),second_group(&group_2_), internal_counter_(0), is_ready_(false){}
+  template <typename T> class TwoGroupScalarStatisticsTracker {
+  public:
+    TwoGroupScalarStatisticsTracker(size_t n)
+        : n_(n), group_1_(n), group_2_(n), first_group(&group_1_),
+          second_group(&group_2_), internal_counter_(0), is_ready_(false) {}
 
-    void addValue(const T& value) {
-      switch(internal_counter_ / n_) {
-        case 0:
-          first_group->addValue(value);
-          break;
-        case 1:
-          second_group->addValue(value);
-          break;
-        default:
-          assert(false);
+    void addValue(const T &value) {
+      switch (internal_counter_ / n_) {
+      case 0:
+        first_group->addValue(value);
+        break;
+      case 1:
+        second_group->addValue(value);
+        break;
+      default:
+        assert(false);
       }
       internal_counter_++;
-      if ( internal_counter_ == 2*n_ ) {
-        std::swap(first_group,second_group);
+      if (internal_counter_ == 2 * n_) {
+        std::swap(first_group, second_group);
         internal_counter_ = 0;
         is_ready_ = true;
       }
     }
 
-    std::pair<T,T> getMaximums() const {
-      return {second_group->getMaximum(),first_group->getMaximum()};
+    std::pair<T, T> getMaximums() const {
+      return {second_group->getMaximum(), first_group->getMaximum()};
     }
 
     bool areGroupsPopulated() const {
       return is_ready_ && internal_counter_ == 0;
     }
 
-    private:
+  private:
     size_t n_;
     ScalarStatisticsTracker<T> group_1_, group_2_;
     ScalarStatisticsTracker<T> *first_group, *second_group;
     size_t internal_counter_;
     bool is_ready_;
   };
-
 };
 
 } // namespace mcpd3

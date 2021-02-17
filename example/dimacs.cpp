@@ -18,10 +18,9 @@
  * A example of computing a mincut using mcpd3 on dimacs format graphs.
  */
 
+#include <graph/dimacs.h>
 #include <iostream>
 #include <primaldual/mcpd3.h>
-#include <graph/dimacs.h>
-
 
 int main(int argc, char *argv[]) {
 

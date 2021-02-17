@@ -16,22 +16,23 @@
 
 #pragma once
 
-#include <unordered_map>
-#include <string>
 #include <cassert>
+#include <string>
+#include <unordered_map>
 
 #include <graph/mcgraph.h>
 
 namespace mcpd3 {
 
-int remap_index(int original_index, int source_index, int sink_index ) {
-  if ( original_index > source_index ) {
+int remap_index(int original_index, int source_index, int sink_index) {
+  if (original_index > source_index) {
     --original_index;
   }
-  if ( original_index > sink_index ) {
+  if (original_index > sink_index) {
     --original_index;
   }
-  return --original_index; // indices in DIMACS start at 1 but we wish for them to start at 0
+  return --original_index; // indices in DIMACS start at 1 but we wish for them
+                           // to start at 0
 }
 
 MinCutGraph read_dimacs(const std::string &filename) {
@@ -56,8 +57,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
             "p line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
       }
-      g.nnode = n-2;
-      g.terminal_capacities.resize(2*(g.nnode),0);
+      g.nnode = n - 2;
+      g.terminal_capacities.resize(2 * (g.nnode), 0);
       break;
     case 'a':
       if (source == -1 || sink == -1) {
@@ -78,8 +79,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
         throw std::runtime_error(err_msg.c_str());
       }
       if (s != source && t != sink) { // handle non terminal arc
-        _s = remap_index(s,source,sink);
-        _t = remap_index(t,source,sink);
+        _s = remap_index(s, source, sink);
+        _t = remap_index(t, source, sink);
         if (arc_adjacency[_s].find(_t) == arc_adjacency[_s].end()) {
           arc_adjacency[_s][_t] = cap;
           if (arc_adjacency[_t].find(_s) == arc_adjacency[_t].end()) {
@@ -90,10 +91,10 @@ MinCutGraph read_dimacs(const std::string &filename) {
         }
       } else { // handle terminal arc
         if (s == source) {
-          _t = remap_index(t,source,sink);
+          _t = remap_index(t, source, sink);
           g.terminal_capacities[2 * _t + 0] += cap;
         } else if (t == sink) {
-          _s = remap_index(s,source,sink);
+          _s = remap_index(s, source, sink);
           g.terminal_capacities[2 * _s + 1] += cap;
         }
       }
@@ -132,7 +133,6 @@ MinCutGraph read_dimacs(const std::string &filename) {
   }
   fclose(stream);
   return std::move(g);
-
 }
 
-}
+} // namespace mcpd3

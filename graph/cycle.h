@@ -16,42 +16,42 @@
 
 #pragma once
 
-#include <unordered_set>
 #include <map>
+#include <unordered_set>
 #include <vector>
 
 namespace mcpd3 {
 
-  class CycleCountingList {
-    public:
-      void addNode(long node) {
-        list_.emplace_back(node);
-        auto [iter,success] = seen_.insert(node);
-        if ( !success ) { // seen before
-          long current = node;
-          size_t i = list_.size() - 2;
-          std::vector<long> cycle;
-          cycle.push_back(node);
-          do {
-            current = list_[i--];
-            cycle.push_back(current);
-          } while ( current != node );
-          cycle_histogram_[cycle]++;
-        }
-      }
+class CycleCountingList {
+public:
+  void addNode(long node) {
+    list_.emplace_back(node);
+    auto [iter, success] = seen_.insert(node);
+    if (!success) { // seen before
+      long current = node;
+      size_t i = list_.size() - 2;
+      std::vector<long> cycle;
+      cycle.push_back(node);
+      do {
+        current = list_[i--];
+        cycle.push_back(current);
+      } while (current != node);
+      cycle_histogram_[cycle]++;
+    }
+  }
 
-      int getMaxCycleCount() const {
-        int max_count = 0;
-        for (const auto &[cycle,count] : cycle_histogram_ ) {
-          max_count = std::max(count,max_count);
-        }
-        return max_count;
-      }
+  int getMaxCycleCount() const {
+    int max_count = 0;
+    for (const auto &[cycle, count] : cycle_histogram_) {
+      max_count = std::max(count, max_count);
+    }
+    return max_count;
+  }
 
-    private:
-      std::vector<long> list_;
-      std::unordered_set<long> seen_;
-      std::map<std::vector<long>,int> cycle_histogram_;
-  };
+private:
+  std::vector<long> list_;
+  std::unordered_set<long> seen_;
+  std::map<std::vector<long>, int> cycle_histogram_;
+};
 
-}
+} // namespace mcpd3

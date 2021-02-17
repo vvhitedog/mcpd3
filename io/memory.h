@@ -24,7 +24,6 @@
 
 namespace mcpd3 {
 
-
 //////////////////////////////////////////////////////////////////////////////
 //
 // process_mem_usage(double &, double &) - takes two doubles by reference,
@@ -76,17 +75,15 @@ struct ResidentMemoryUsage {
   double usage_in_gb;
 };
 
-template<typename Lambda>
+template <typename Lambda>
 ResidentMemoryUsage get_resident_memory_usage(Lambda lambda) {
-  std::pair<double,double> mem_before, mem_after;
-  mcpd3::process_mem_usage(mem_before.first,
-      mem_before.second);
+  std::pair<double, double> mem_before, mem_after;
+  mcpd3::process_mem_usage(mem_before.first, mem_before.second);
   lambda();
-  mcpd3::process_mem_usage(mem_after.first,
-      mem_after.second);
-  return ResidentMemoryUsage{mem_before.second,
-  mem_after.second,
-  (mem_after.second - mem_before.second)/(1024.*1024.)};
+  mcpd3::process_mem_usage(mem_after.first, mem_after.second);
+  return ResidentMemoryUsage{mem_before.second, mem_after.second,
+                             (mem_after.second - mem_before.second) /
+                                 (1024. * 1024.)};
 }
 
 } // namespace mcpd3
