@@ -22,11 +22,12 @@
 #include <queue>
 #include <set>
 #include <unordered_map>
-
-#include "constraint.h"
-#include <graph/cycle.h>
 #include <iostream>
+
+#include <decomp/constraint.h>
 #include <multithread/threadpool.h>
+#include <graph/cycle.h>
+#include <graph/partition.h>
 #include <primaldual/mcpd3.h>
 
 namespace mcpd3 {
@@ -50,11 +51,11 @@ std::chrono::microseconds time_lambda(Lambda lambda) {
 class DualDecomposition {
 public:
   DualDecomposition(int npartition, int nnode, int narc,
-                    std::vector<int> partitions, std::vector<int> arcs,
+                    std::vector<int> arcs,
                     std::vector<int> arc_capacities,
                     std::vector<int> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
-        partitions_(std::move(partitions)), arcs_(std::move(arcs)),
+        arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)),
         min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
@@ -62,10 +63,10 @@ public:
     initializeDecomposition();
   }
 
-  DualDecomposition(int npartition, std::vector<int> partitions,
+  DualDecomposition(int npartition,
                     MinCutGraph min_cut_graph)
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
-                          std::move(partitions), std::move(min_cut_graph.arcs),
+                          std::move(min_cut_graph.arcs),
                           std::move(min_cut_graph.arc_capacities),
                           std::move(min_cut_graph.terminal_capacities)) {}
 
@@ -291,6 +292,15 @@ private:
                        /*exists_in_partitions=*/std::set<int>>
         constrained_nodes;
     /**
+     * step 0: parition graph into npartition_ partitions
+     */
+    std::vector<int> partitions_;
+#ifdef HAVE_METIS
+    partitions_ = metis_partition(npartition_,narc_,nnode_,arcs_);
+#else 
+    partitions_ = basic_graph_partition(npartition_,narc_,nnode_,arcs_);
+#endif
+    /**
      * step 1: distribute all arcs into one and only one sub graph
      */
     for (int i = 0; i < narc_; ++i) {
@@ -396,7 +406,6 @@ private:
   int npartition_;
   int nnode_;
   int narc_;
-  std::vector<int> partitions_;
   std::vector<int> arcs_;
   std::vector<int> arc_capacities_;
   std::vector<int> terminal_capacities_;

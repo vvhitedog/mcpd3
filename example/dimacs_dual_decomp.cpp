@@ -23,72 +23,6 @@
 #include <decomp/dualdecomp.h>
 #include <graph/dimacs.h>
 #include <iostream>
-#ifdef HAVE_METIS
-#include <metis.h>
-#endif
-
-std::vector<int> basic_graph_partition(int npartition,
-                                       const mcpd3::MinCutGraph &graph) {
-  std::vector<int> partitions(graph.nnode);
-  int nnode_in_each_partition = (graph.nnode + npartition - 1) / npartition;
-  for (int i = 0; i < graph.nnode; ++i) {
-    partitions[i] = i / nnode_in_each_partition;
-  }
-  return std::move(partitions);
-}
-
-#ifdef HAVE_METIS
-std::vector<int> metis_partition(int npartition,
-                                 const mcpd3::MinCutGraph &graph) {
-
-  const auto &narc = graph.narc;
-  const auto &arc = graph.arcs;
-  const auto &nnode = graph.nnode;
-
-  std::vector<std::vector<idx_t>> adj(nnode);
-
-  // map an arc list to adjacency type that metis supports
-  for (size_t aid = 0; aid < narc; ++aid) {
-    int32_t s, t;
-    s = arc[2 * aid + 0];
-    t = arc[2 * aid + 1];
-    adj[s].push_back(t);
-    adj[t].push_back(s);
-  }
-
-  std::vector<idx_t> xadj(nnode + 1);
-  std::vector<idx_t> adjv(narc * 2);
-
-  size_t j = 0;
-  size_t cumsum = 0;
-  xadj[0] = cumsum;
-  for (size_t inode = 0; inode < nnode; ++inode) {
-    for (size_t i = 0; i < adj[inode].size(); ++i) {
-      adjv[j++] = adj[inode][i];
-    }
-    cumsum += adj[inode].size();
-    xadj[inode + 1] = cumsum;
-  }
-
-  std::vector<idx_t> part(nnode);
-  idx_t ncon = 1;
-  idx_t _nnode = nnode;
-  idx_t _npart = npartition;
-  idx_t objval;
-  int ret = METIS_PartGraphKway(&_nnode, &ncon, &xadj[0], &adjv[0], nullptr,
-                                nullptr, nullptr, &_npart, nullptr, nullptr,
-                                nullptr, &objval, &part[0]);
-
-  if (ret != METIS_OK) {
-    fprintf(stderr, "Something failed while partitioning.\n");
-    std::exit(EXIT_FAILURE);
-  }
-
-  std::vector<int> label(nnode, -1);
-  std::copy(part.begin(), part.end(), label.begin());
-  return std::move(label);
-}
-#endif
 
 int main(int argc, char *argv[]) {
 
@@ -106,21 +40,7 @@ int main(int argc, char *argv[]) {
       [&] { min_cut_graph_data = mcpd3::read_dimacs(argv[1]); });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
 
-  //{ // run maxflow
-  //  auto min_cut_graph_data_copy = min_cut_graph_data;
-  //  mcpd3::PrimalDualMinCutSolver solver(std::move(min_cut_graph_data_copy));
-  //  auto microseconds = mcpd3::time_lambda([&]{
-  //      solver.maxflow(); // compute maxflow
-  //      });
-  //  std::cout << " maxflow : " << microseconds.count() << "ms\n";
-  //}
-#ifdef HAVE_METIS
-  auto partitions = metis_partition(npartition, min_cut_graph_data);
-#else
-  auto partitions = basic_graph_partition(npartition, min_cut_graph_data);
-#endif
-
-  mcpd3::DualDecomposition dual_decomp(npartition, std::move(partitions),
+  mcpd3::DualDecomposition dual_decomp(npartition, 
                                        std::move(min_cut_graph_data));
   auto microseconds = mcpd3::time_lambda([&] {
     const int scaling_factor = 10;
