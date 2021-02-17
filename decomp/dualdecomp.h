@@ -57,7 +57,6 @@ public:
         partitions_(std::move(partitions)), arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
         thread_pool_(std::thread::hardware_concurrency()), solve_loop_time_(0) {
-        //thread_pool_(1) {
     initializeDecomposition();
   }
 
@@ -140,25 +139,19 @@ public:
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(num_stats_in_group);
     CycleCountingList dual_cycle_list;
     long max_lower_bound = 0;
-    std::vector<int> solver_min_cut_values(npartition_);
     for (int i = 0; i < nstep; ++i) {
 
-      long lower_bound = 0;
+      std::atomic<long> lower_bound = 0;
       auto solve_loop_time = time_lambda([&]{
 #define THREAD_MODEL 1
 #if THREAD_MODEL == 1
-      int j = 0;
       for (auto &solver : solvers_) {
-        thread_pool_.push([&,j]{
+        thread_pool_.push([&]{
             solver.solve();
-            solver_min_cut_values[j] = solver.getMinCutValue();
+            lower_bound += solver.getMinCutValue();
         });
-        j++;
       }
       thread_pool_.wait();
-      for (const auto &min_cut_value : solver_min_cut_values ) {
-        lower_bound += min_cut_value;
-      }
 #elif THREAD_MODEL == 2
       std::vector<std::future<long>> futures;
       for (auto &solver : solvers_) {
@@ -183,7 +176,7 @@ public:
 
           });
       solve_loop_time_ += solve_loop_time.count();
-      max_lower_bound = std::max(lower_bound,max_lower_bound);
+      max_lower_bound = std::max(static_cast<long>(lower_bound),max_lower_bound);
 
       auto disagreeing_global_indices =
           runLagrangeMultipliersUpdateStep(step_size,break_on_small_change);
@@ -361,10 +354,16 @@ private:
     /**
      * step 5: create a min cut problem from the original problem to evaluate the primal objective value
      */
-    primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
-        std::move(arcs_),
-        std::move(arc_capacities_),
-        std::move(terminal_capacities_));
+    //primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
+    //    std::move(arcs_),
+    //    std::move(arc_capacities_),
+    //    std::move(terminal_capacities_));
+    arcs_.clear();
+    arcs_.shrink_to_fit();
+    arc_capacities_.clear();
+    arc_capacities_.shrink_to_fit();
+    terminal_capacities_.clear();
+    terminal_capacities_.shrink_to_fit();
   }
 
   /**
