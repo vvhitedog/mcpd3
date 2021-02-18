@@ -382,14 +382,14 @@ private:
     }
   }
 
-  std::pair<long, long> arcGradients(long forward_capacity,
-                                     long backward_capacity, long flow) const {
-    long pos = flow + forward_capacity;
-    long neg = flow - backward_capacity;
+  std::pair<int, int> arcGradients(int forward_capacity,
+                                     int backward_capacity, int flow) const {
+    int pos = flow + forward_capacity;
+    int neg = flow - backward_capacity;
     return {pos, neg};
   }
 
-  long nodeGradient(long source_capacity, long sink_capacity, long flow) const {
+  int nodeGradient(int source_capacity, int sink_capacity, int flow) const {
     return flow + source_capacity - sink_capacity;
   }
 
@@ -402,11 +402,11 @@ private:
       auto backward_capacity = arc_capacities_[2 * i + 1];
       auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      long new_flow = 0;
-      long dfp, dfn;
+      int new_flow = 0;
+      int dfp, dfn;
       if (pos < 0 || neg > 0) {
-        dfp = std::min(pos, 0L);
-        dfn = std::max(neg, 0L);
+        dfp = std::min(pos, 0);
+        dfn = std::max(neg, 0);
         if (std::abs(dfn) > std::abs(dfp)) {
           new_flow = -dfn;
         } else {
@@ -428,23 +428,7 @@ private:
     }
   }
 
-  std::pair<long, long>
-  getDualDecompositionLagrangeMultiplier(int index) const {
-    std::pair<long, long> lagrange_multiplier_terms = {0, 0};
-    auto constraint_map_iter = dual_decomposition_constraints_map_.find(index);
-    if (constraint_map_iter != dual_decomposition_constraints_map_.end()) {
-      const auto &constraint = constraint_map_iter->second;
-      for (const auto &arc_reference : constraint.source_arc_references) {
-        lagrange_multiplier_terms.first -= arc_reference->alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references) {
-        lagrange_multiplier_terms.first += arc_reference->alpha;
-      }
-    }
-    return lagrange_multiplier_terms;
-  }
-
-  void updateNodeTerminal(int i, long pos, int &nviolated, bool do_update) {
+  void updateNodeTerminal(int i, int pos, int &nviolated, bool do_update) {
     if (do_update) {
       auto existing_pos = maxflow_graph_.get_trcap(i);
       if (existing_pos < 0) {
@@ -518,7 +502,6 @@ private:
   int updateNodePotentialsIncremental() {
     int nviolated = 0;
     // add mincut node potential terms
-    // for (int i = 0; i < nnode_; ++i) {
     for (const int i : incremental_mincut_nodes_) {
       auto source_capacity = terminal_capacities_[2 * i + 0];
       auto sink_capacity = terminal_capacities_[2 * i + 1];
@@ -538,7 +521,7 @@ private:
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index, constraint] :
          dual_decomposition_constraints_map_) {
-      long pos = 0;
+      int pos = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
         pos -= arc_reference->alpha;
       }
@@ -585,12 +568,15 @@ private:
     }
 
     // update node and arc terms that may have changed
-    std::unordered_set<long> proccessed_arcs;
+    std::unordered_set<int> proccessed_arcs;
     auto nodes = maxflow_graph_.get_nodes();
     MaxflowGraph::arc_id first_arc = maxflow_graph_.get_first_arc();
     for (const int i : incremental_mincut_nodes_) {
       auto x_i_new =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      if ( x_i_new == x_[i] ) {
+        continue; // do nothing
+      }
 
       // process terminals
       auto source_capacity = terminal_capacities_[2 * i + 0];
@@ -651,7 +637,7 @@ private:
       auto backward_capacity = arc_capacities_[2 * i + 1];
       auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      long new_flow = maxflow_graph_.get_rcap(a) - pos;
+      int new_flow = maxflow_graph_.get_rcap(a) - pos;
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
       d_flow_[t] -= new_flow;
@@ -669,7 +655,7 @@ private:
       auto backward_capacity = arc_capacities_[2 * i + 1];
       auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      long new_flow = maxflow_graph_.get_rcap(first_arc + 2 * i) - pos;
+      int new_flow = maxflow_graph_.get_rcap(first_arc + 2 * i) - pos;
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
       d_flow_[t] -= new_flow;

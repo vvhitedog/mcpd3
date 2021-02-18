@@ -143,6 +143,20 @@ public:
     ITERATION_COUNT_EXCEEDED
   };
 
+  void solve() {
+    const int scaling_factor = 10;
+    const int num_optimization_scales = 5;
+    const int max_cycle_count = 2;
+    for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
+      auto status = runOptimizationScale(10000, 1, max_cycle_count, true);
+      if (status == mcpd3::DualDecomposition::OPTIMAL) {
+        break;
+      }
+      scaleProblem<scaling_factor>();
+    }
+  }
+
+
   OptimizationStatus runOptimizationScale(int nstep, int step_size,
                                           int max_cycle_count = 2,
                                           int break_on_small_change = false) {
@@ -258,14 +272,14 @@ private:
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
       for (auto &constraint : constraints) {
+        constraint.last_alpha =
+            constraint.alpha; // record alpha before update
         int diff =
             solvers_[constraint.partition_index_target].getMinCutSolution(
                 constraint.local_index_target) -
             solvers_[constraint.partition_index_source].getMinCutSolution(
                 constraint.local_index_source);
         if (diff != 0) {
-          constraint.last_alpha =
-              constraint.alpha; // record alpha before update
           if (use_momentum) {
             const double beta = .85;
             const int momentum_scale = 10;

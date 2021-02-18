@@ -43,16 +43,7 @@ int main(int argc, char *argv[]) {
   mcpd3::DualDecomposition dual_decomp(npartition, 
                                        std::move(min_cut_graph_data));
   auto microseconds = mcpd3::time_lambda([&] {
-    const int scaling_factor = 10;
-    const int num_optimization_scales = 6;
-    for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
-      auto status = dual_decomp.runOptimizationScale(10000, 1, 1, true);
-      // dual_decomp.runPrimalSolutionDecodingStep(true);
-      if (status == mcpd3::DualDecomposition::OPTIMAL) {
-        break;
-      }
-      dual_decomp.scaleProblem<scaling_factor>();
-    }
+      dual_decomp.solve();
   });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
