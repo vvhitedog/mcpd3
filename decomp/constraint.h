@@ -20,26 +20,30 @@
 
 namespace mcpd3 {
 
+  constexpr int MAX_DUAL_DECOMPOSITION_RECURSION_LEVEL = 10;
+
 struct DualDecompositionConstraintArc {
   long alpha; /* lagrange multiplier */
   long
       last_alpha; /* last lagrange multiplier recorded for incremental update */
   float alpha_momentum;       /* lagrange multiplier momentum */
-  int partition_index_source; /* partition index for source node */
-  int partition_index_target; /* partition index for target node */
-  int local_index_source;     /* index within sub-problem of source */
-  int local_index_target;     /* index within sub-problem of target */
+  int partition_index_source[MAX_DUAL_DECOMPOSITION_RECURSION_LEVEL]; /* partition index for source node */
+  int partition_index_target[MAX_DUAL_DECOMPOSITION_RECURSION_LEVEL]; /* partition index for target node */
+  int local_index_source[MAX_DUAL_DECOMPOSITION_RECURSION_LEVEL];     /* index within sub-problem of source */
+  int local_index_target[MAX_DUAL_DECOMPOSITION_RECURSION_LEVEL];     /* index within sub-problem of target */
 
-  DualDecompositionConstraintArc(int alpha, int last_alpha,
-                                 float alpha_momentum,
-                                 int partition_index_source,
-                                 int partition_index_target,
-                                 int local_index_source, int local_index_target)
-      : alpha(alpha), last_alpha(last_alpha), alpha_momentum(alpha_momentum),
-        partition_index_source(partition_index_source),
-        partition_index_target(partition_index_target),
-        local_index_source(local_index_source),
-        local_index_target(local_index_target) {}
+  DualDecompositionConstraintArc(int level, 
+                                 int _partition_index_source,
+                                 int _partition_index_target,
+                                 int _local_index_source,
+                                 int _local_index_target)
+      : alpha(0), last_alpha(0), alpha_momentum(0)
+        {
+          partition_index_source[level] = _partition_index_source;
+          partition_index_target[level] = _partition_index_target;
+          local_index_source[level] = _local_index_source;
+          local_index_target[level] = _local_index_target;
+        }
 };
 
 using DualDecompositionConstraintArcReference =

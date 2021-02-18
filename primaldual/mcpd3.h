@@ -25,10 +25,11 @@
 #include <decomp/constraint.h>
 #include <graph/mcgraph.h>
 #include <maxflow/graph.h>
+#include <decomp/subsolver.h>
 
 namespace mcpd3 {
 
-class PrimalDualMinCutSolver {
+class PrimalDualMinCutSolver : public DualDecompositionSubSolver {
 public:
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<int> arc_capacities,
@@ -207,7 +208,7 @@ public:
     return maxflow;
   }
 
-  void solve() {
+  void solve() override {
     if (is_first_iteration_) {
       initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                         // complementary slackness conditions
@@ -229,7 +230,7 @@ public:
     updateMinCut();   // get updated min cut solution
 
     // set flag indicating that incremental methods should be used hereafter
-    if (is_first_iteration_ || is_first_iteration_of_new_scale_) {
+    if (is_first_iteration_ || is_first_iteration_of_new_scale_ || true) {
       computeMinCutValueInitial(); // initialize min cut value to compute
                                    // incremental changes later
       is_first_iteration_of_new_scale_ = false;
@@ -260,7 +261,7 @@ public:
     return maxflow;
   }
 
-  long getMinCutValue() const {
+  long getMinCutValue() const override {
     // computeMinCutValueInitial();
     return mincut_value_;
 #if 0
@@ -302,34 +303,18 @@ public:
   }
 
   void addSourceDualDecompositionConstraint(
-      DualDecompositionConstraintArcReference arc_reference) {
-    auto index = arc_reference->local_index_source;
-    auto find_iter = dual_decomposition_constraints_map_.find(index);
-    if (find_iter != dual_decomposition_constraints_map_.end()) {
-      auto &constraint = find_iter->second;
-      constraint.source_arc_references.emplace_back(arc_reference);
-    } else {
-      DualDecompositionConstraint constraint;
-      constraint.source_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_map_.insert({index, constraint});
-    }
+      DualDecompositionConstraintArcReference arc_reference) override {
+    auto index = arc_reference->local_index_source[0];
+    DualDecompositionSubSolver::addSourceDualDecompositionConstraint(arc_reference,index);
   }
 
   void addTargetDualDecompositionConstraint(
-      DualDecompositionConstraintArcReference arc_reference) {
-    auto index = arc_reference->local_index_target;
-    auto find_iter = dual_decomposition_constraints_map_.find(index);
-    if (find_iter != dual_decomposition_constraints_map_.end()) {
-      auto &constraint = find_iter->second;
-      constraint.target_arc_references.emplace_back(arc_reference);
-    } else {
-      DualDecompositionConstraint constraint;
-      constraint.target_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_map_.insert({index, constraint});
-    }
+      DualDecompositionConstraintArcReference arc_reference) override {
+    auto index = arc_reference->local_index_target[0];
+    DualDecompositionSubSolver::addTargetDualDecompositionConstraint(arc_reference,index);
   }
 
-  int getMinCutSolution(int index) const { return x_[index]; }
+  int getMinCutSolution(int index) const override { return x_[index]; }
 
   void setMinCutSolution(const std::vector<int> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
@@ -773,12 +758,12 @@ private:
   /**
    * specific to dual decomposition
    */
-  struct DualDecompositionConstraint {
-    std::list<DualDecompositionConstraintArcReference> source_arc_references;
-    std::list<DualDecompositionConstraintArcReference> target_arc_references;
-  };
-  std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
-      dual_decomposition_constraints_map_;
+  //struct DualDecompositionConstraint {
+  //  std::list<DualDecompositionConstraintArcReference> source_arc_references;
+  //  std::list<DualDecompositionConstraintArcReference> target_arc_references;
+  //};
+  //std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
+  //    dual_decomposition_constraints_map_;
 };
 
 } // namespace mcpd3

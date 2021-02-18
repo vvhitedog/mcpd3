@@ -27,22 +27,37 @@
 int main(int argc, char *argv[]) {
 
   int npartition = 10;
+  int max_level = 0;
   if (argc < 2) {
     std::cout << "usage: " << argv[0]
-              << " DIMACS_MAXFLOW_FILE [NUM_PARTITIONS]\n";
+              << " DIMACS_MAXFLOW_FILE [NUM_PARTITIONS] [MAX_RECURSION_LEVEL]\n";
     std::exit(EXIT_SUCCESS);
   }
   if (argc > 2) {
     npartition = std::atoi(argv[2]);
+  }
+  if (argc > 3) {
+    max_level = std::atoi(argv[3]);
   }
   mcpd3::MinCutGraph min_cut_graph_data;
   auto read_graph_mem = mcpd3::get_resident_memory_usage(
       [&] { min_cut_graph_data = mcpd3::read_dimacs(argv[1]); });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
 
+  const int factor = 10000;
+  for ( auto & t : min_cut_graph_data.arc_capacities ) {
+    t *= factor;
+  }
+  for ( auto & t : min_cut_graph_data.terminal_capacities ) {
+    t *= factor;
+  }
+
   mcpd3::DualDecomposition dual_decomp(npartition, 
-                                       std::move(min_cut_graph_data));
+                                       std::move(min_cut_graph_data),
+                                       max_level,
+                                       max_level);
   auto microseconds = mcpd3::time_lambda([&] {
+#if 0
     const int scaling_factor = 10;
     const int num_optimization_scales = 6;
     for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
@@ -53,6 +68,9 @@ int main(int argc, char *argv[]) {
       }
       dual_decomp.scaleProblem<scaling_factor>();
     }
+#else
+    dual_decomp.solve();
+#endif
   });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
@@ -76,9 +94,9 @@ int main(int argc, char *argv[]) {
   // dual_decomp.scaleProblem<scaling_factor>();
   // dual_decomp.runOptimizationScale(10000,1,5,true);
   // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.runPrimalSolutionDecodingStep();
-  // std::cout << "primal min cut value : " <<
-  // dual_decomp.getPrimalMinCutValue() << "\n";
+  //dual_decomp.runPrimalSolutionDecodingStep();
+  //std::cout << "primal min cut value : " <<
+  //dual_decomp.getPrimalMinCutValue() << "\n";
   std::cout << " total solve loop time: " << dual_decomp.getTotalSolveLoopTime()
             << "\n";
   return EXIT_SUCCESS;
