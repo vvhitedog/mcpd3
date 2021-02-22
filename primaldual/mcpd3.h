@@ -659,9 +659,6 @@ private:
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
       d_flow_[t] -= new_flow;
-      // add touched nodes to update later
-      incremental_touched_nodes_.insert(s);
-      incremental_touched_nodes_.insert(t);
       // an optimization: compute arc's contribution change to mincut
       // auto x_s_new = maxflow_graph_.what_segment(s) == MaxflowGraph::SINK ? 1
       // : 0; auto x_t_new = maxflow_graph_.what_segment(t) == MaxflowGraph::SINK
@@ -704,7 +701,6 @@ private:
     } else {
       incremental_arcs_.clear();
       incremental_mincut_nodes_.clear();
-      incremental_touched_nodes_.clear();
       std::unordered_set<MaxflowGraph::arc_id> changed_arcs;
       maxflow_graph_.maxflow(true, changed_arcs, &maxflow_changed_list_);
 
@@ -715,7 +711,6 @@ private:
         MaxflowGraph::node_id i = *ptr;
         maxflow_graph_.remove_from_changed_list(i);
         incremental_mincut_nodes_.emplace_back(i);
-        incremental_touched_nodes_.insert(i);
       }
       maxflow_changed_list_.Reset();
 
@@ -752,7 +747,6 @@ private:
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
   std::list<int> incremental_mincut_nodes_;
-  std::unordered_set<int> incremental_touched_nodes_;
   std::list<int> incremental_arcs_;
   long mincut_value_;
 

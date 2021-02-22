@@ -72,7 +72,7 @@ public:
   }
 
   template <typename T> void push(T lambda) {
-    push(std::async(std::launch::async, lambda));
+    push(std::async(std::launch::deferred, lambda));
   }
 
   std::list<std::future<F>> &&get() {

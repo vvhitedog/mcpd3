@@ -59,7 +59,7 @@ public:
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)),
         min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
-        thread_pool_(std::thread::hardware_concurrency()), solve_loop_time_(0) {
+        thread_pool_(std::min<size_t>(npartition_,std::thread::hardware_concurrency()) ), solve_loop_time_(0) {
     initializeDecomposition();
   }
 
@@ -180,15 +180,15 @@ public:
         }
         thread_pool_.wait();
 #elif THREAD_MODEL == 2
-        std::vector<std::future<long>> futures;
+        std::list<std::future<void>> futures;
         for (auto &solver : solvers_) {
-          futures.emplace_back(std::async(std::launch::async, [&]() -> long {
+          futures.emplace_back(std::async(std::launch::async, [&]() {
             solver.solve();
-            return solver.getMinCutValue();
+            lower_bound += solver.getMinCutValue();
           }));
         }
         for (auto &future : futures) {
-          lower_bound += future.get();
+          future.get();
         }
 #else
         for (auto &solver : solvers_) {

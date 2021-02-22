@@ -64,12 +64,12 @@ set(MAXFLOW_SRC maxflow/graph.cpp  maxflow/maxflow.cpp)
 
 ## Simple example
 add_executable(simple_example example/simple.cpp ${MAXFLOW_SRC})
-target_link_libraries(simple_example PUBLIC ${PROFILER_LINK_FLAG} )
+target_link_libraries(simple_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
 
 ## DIMACS maxflow format example
 add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
-target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} )
+target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
 
 ## DIMACS maxflow format example for dual decomposition
-add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC} ${METIS_INCLUDE_DIR})
+add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
 target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )

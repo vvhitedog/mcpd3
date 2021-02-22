@@ -40,10 +40,15 @@ int main(int argc, char *argv[]) {
       [&] { min_cut_graph_data = mcpd3::read_dimacs(argv[1]); });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
 
-  mcpd3::DualDecomposition dual_decomp(npartition, 
+  std::unique_ptr<mcpd3::DualDecomposition> dual_decomp;
+  auto dual_decomp_mem = mcpd3::get_resident_memory_usage(
+  [&] {
+  dual_decomp = std::make_unique<mcpd3::DualDecomposition>(npartition, 
                                        std::move(min_cut_graph_data));
+  });
+  std::cout << "dual decomp mem usage: " << dual_decomp_mem.usage_in_gb << "GB\n";
   auto microseconds = mcpd3::time_lambda([&] {
-      dual_decomp.solve();
+      dual_decomp->solve();
   });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
@@ -70,7 +75,7 @@ int main(int argc, char *argv[]) {
   // dual_decomp.runPrimalSolutionDecodingStep();
   // std::cout << "primal min cut value : " <<
   // dual_decomp.getPrimalMinCutValue() << "\n";
-  std::cout << " total solve loop time: " << dual_decomp.getTotalSolveLoopTime()
+  std::cout << " total solve loop time: " << dual_decomp->getTotalSolveLoopTime()
             << "\n";
   return EXIT_SUCCESS;
 }
