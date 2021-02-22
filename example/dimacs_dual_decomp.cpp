@@ -52,29 +52,6 @@ int main(int argc, char *argv[]) {
   });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
-  // dual_decomp.runOptimizationScale(10000,1,1,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,1,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,2,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,5,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,5,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,5,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.scaleProblem<scaling_factor>();
-  // dual_decomp.runOptimizationScale(10000,1,5,true);
-  // dual_decomp.runPrimalSolutionDecodingStep(true);
-  // dual_decomp.runPrimalSolutionDecodingStep();
-  // std::cout << "primal min cut value : " <<
-  // dual_decomp.getPrimalMinCutValue() << "\n";
   std::cout << " total solve loop time: " << dual_decomp->getTotalSolveLoopTime()
             << "\n";
   return EXIT_SUCCESS;

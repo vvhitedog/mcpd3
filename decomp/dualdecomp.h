@@ -170,8 +170,6 @@ public:
 
       std::atomic<long> lower_bound = 0;
       auto solve_loop_time = time_lambda([&] {
-#define THREAD_MODEL 1
-#if THREAD_MODEL == 1
         for (auto &solver : solvers_) {
           thread_pool_.push([&] {
             solver.solve();
@@ -179,27 +177,6 @@ public:
           });
         }
         thread_pool_.wait();
-#elif THREAD_MODEL == 2
-        std::list<std::future<void>> futures;
-        for (auto &solver : solvers_) {
-          futures.emplace_back(std::async(std::launch::async, [&]() {
-            solver.solve();
-            lower_bound += solver.getMinCutValue();
-          }));
-        }
-        for (auto &future : futures) {
-          future.get();
-        }
-#else
-        for (auto &solver : solvers_) {
-          auto indiv_timer = time_lambda([&] {
-            solver.solve();
-            lower_bound += solver.getMinCutValue();
-          });
-          // std::cout << "  > individual timer time: " << indiv_timer.count()
-          // << "\n";
-        }
-#endif
       });
       solve_loop_time_ += solve_loop_time.count();
       max_lower_bound =
@@ -250,7 +227,6 @@ public:
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
         constraint.alpha *= scale;
-        // constraint.last_alpha *= scale;
       }
     }
   }
@@ -390,7 +366,6 @@ private:
               arc_reference);
         }
       }
-      // assert(constraint_arcs.size() == partitions.size() - 1);
       constrained_nodes_partition_counts.insert(partitions.size());
     }
     printf("partition counts: ");

@@ -181,7 +181,6 @@ public:
     // are at completely different values, hence incremental update of
     // mincut_value_ will not work properly
     is_first_iteration_of_new_scale_ = true;
-    // computeMinCutValueInitial(); // must recompute mincut_value_
   }
 
   long maxflow() {
@@ -212,18 +211,10 @@ public:
       initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                         // complementary slackness conditions
     }
-    auto nviolated =
-        updateNodePotentials(); // finds which node based lagrange multiplier
-                                // complementary slackness conditions are
-                                // violated and sets source and sink capacities
-                                // accordingly
-    // if (!nviolated) {
-    //  std::fill(x_.begin(),x_.end(),0); // reset min cut; no flow adjustment
-    //  is necessary return; // no violated node based lagrange multiplier
-    //  complementary
-    //          // slackness conditions; translation: solution is optimal
-    //          already
-    //}
+    updateNodePotentials(); // finds which node based lagrange multiplier
+                            // complementary slackness conditions are
+                            // violated and sets source and sink capacities
+                            // accordingly
     computeMaxflow(); // compute maxflow
     updateFlow();     // get updated flow
     updateMinCut();   // get updated min cut solution
@@ -235,8 +226,6 @@ public:
       is_first_iteration_of_new_scale_ = false;
       is_first_iteration_ = false;
     }
-    // computeMinCutValueInitial(); // initialize min cut value to compute
-    // incremental changes later
   }
 
   long getMaxFlowValue() const {
@@ -261,44 +250,7 @@ public:
   }
 
   long getMinCutValue() const {
-    // computeMinCutValueInitial();
     return mincut_value_;
-#if 0
-    long min_cut_value = 0;
-    for (int i = 0; i < narc_; ++i) {
-      int s = arcs_[2 * i + 0];
-      int t = arcs_[2 * i + 1];
-      auto forward_capacity = arc_capacities_[2 * i + 0];
-      auto backward_capacity = arc_capacities_[2 * i + 1];
-      if (x_[s] == 0 && x_[t] == 1) {
-        min_cut_value += forward_capacity;
-      } else if (x_[s] == 1 && x_[t] == 0) {
-        min_cut_value += backward_capacity;
-      }
-    }
-    for (int i = 0; i < nnode_; ++i) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      if (x_[i] == 0) {
-        min_cut_value += sink_capacity;
-      } else {
-        min_cut_value += source_capacity;
-      }
-    }
-    // add dual decomposition node potential terms (when/if applicable)
-    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
-      int lagrange_multiplier_term = 0;
-      for (const auto &arc_reference : constraint.source_arc_references ) {
-        lagrange_multiplier_term -= arc_reference->alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references ) {
-        lagrange_multiplier_term += arc_reference->alpha;
-      }
-      min_cut_value +=
-          lagrange_multiplier_term * x_[index];
-    }
-    return min_cut_value;
-#endif
   }
 
   void addSourceDualDecompositionConstraint(
@@ -428,16 +380,10 @@ private:
     }
   }
 
-  void updateNodeTerminal(int i, int pos, int &nviolated, bool do_update) {
+  void updateNodeTerminal(int i, int pos, bool do_update) {
     if (do_update) {
       auto existing_pos = maxflow_graph_.get_trcap(i);
-      if (existing_pos < 0) {
-        nviolated--;
-      }
       pos += existing_pos;
-      if (pos < 0) {
-        nviolated++;
-      }
       if (!is_first_iteration_) {
         if (existing_pos != pos) {
           maxflow_graph_.set_trcap(i, pos);
@@ -447,9 +393,6 @@ private:
         maxflow_graph_.set_trcap(i, pos);
       }
     } else {
-      if (pos < 0) {
-        nviolated++;
-      }
       if (!is_first_iteration_) {
         auto stored_pos = maxflow_graph_.get_trcap(i);
         if (stored_pos != pos) {
@@ -462,62 +405,43 @@ private:
     }
   }
 
-  int updateNodePotentials() {
-    // return updateNodePotentialsInitial();
-    int nviolated;
+  void updateNodePotentials() {
     if (is_first_iteration_) {
-      nviolated = updateNodePotentialsInitial();
+      updateNodePotentialsInitial();
     } else {
-      nviolated = updateNodePotentialsIncremental();
+      updateNodePotentialsIncremental();
     }
-    return nviolated;
   }
 
-  int updateNodePotentialsInitial() {
-    int nviolated = 0;
+  void updateNodePotentialsInitial() {
     // add mincut node potential terms
     for (int i = 0; i < nnode_; ++i) {
       auto source_capacity = terminal_capacities_[2 * i + 0];
       auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
-      updateNodeTerminal(i, pos, nviolated, false);
+      updateNodeTerminal(i, pos, false);
     }
-    return updateDualDecompositionNodePotentials(nviolated);
-#if 0
-    // add dual decomposition node potential terms (when/if applicable)
-    for (const auto &[index,constraint] : dual_decomposition_constraints_map_ ) {
-      long pos = 0;
-      for (const auto &arc_reference : constraint.source_arc_references ) {
-        pos -= arc_reference->alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references ) {
-        pos += arc_reference->alpha;
-      }
-      updateNodeTerminal(index,pos,nviolated,true);
-    }
-    return nviolated;
-#endif
+    updateDualDecompositionNodePotentials();
   }
 
-  int updateNodePotentialsIncremental() {
-    int nviolated = 0;
+  void updateNodePotentialsIncremental() {
     // add mincut node potential terms
     for (const int i : incremental_mincut_nodes_) {
       auto source_capacity = terminal_capacities_[2 * i + 0];
       auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
-      updateNodeTerminal(i, pos, nviolated, false);
+      updateNodeTerminal(i, pos, false);
     }
     for (const auto &[i, constraint] : dual_decomposition_constraints_map_) {
       auto source_capacity = terminal_capacities_[2 * i + 0];
       auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
-      updateNodeTerminal(i, pos, nviolated, false);
+      updateNodeTerminal(i, pos, false);
     }
-    return updateDualDecompositionNodePotentials(nviolated);
+    updateDualDecompositionNodePotentials();
   }
 
-  int updateDualDecompositionNodePotentials(int nviolated) {
+  void updateDualDecompositionNodePotentials() {
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index, constraint] :
          dual_decomposition_constraints_map_) {
@@ -528,9 +452,8 @@ private:
       for (const auto &arc_reference : constraint.target_arc_references) {
         pos += arc_reference->alpha;
       }
-      updateNodeTerminal(index, pos, nviolated, true);
+      updateNodeTerminal(index, pos, true);
     }
-    return nviolated;
   }
 
   void updateMinCut() {
@@ -591,7 +514,6 @@ private:
       }
 
       // processes each possible arc
-#if 1
       MaxflowGraph::arc_id a;
       const auto &node_i = nodes[i];
       for (a = node_i.first; a; a = a->next) {
@@ -621,7 +543,6 @@ private:
           mincut_value_ += backward_capacity;
         }
       }
-#endif
 
       // update
       x_[i] = x_i_new;
@@ -659,31 +580,6 @@ private:
       v_flow_[i] += new_flow;
       d_flow_[s] += new_flow;
       d_flow_[t] -= new_flow;
-      // an optimization: compute arc's contribution change to mincut
-      // auto x_s_new = maxflow_graph_.what_segment(s) == MaxflowGraph::SINK ? 1
-      // : 0; auto x_t_new = maxflow_graph_.what_segment(t) == MaxflowGraph::SINK
-      // ? 1 : 0; auto mincut_before = mincut_value_; if ( (x_[s] == 0 && x_[t]
-      // == 1) &&
-      //    !( x_s_new == 0 && x_t_new == 1 ) ) {
-      //  mincut_value_ -= forward_capacity;
-      //}
-      // if ( (x_[s] == 1 && x_[t] == 0) &&
-      //    !( x_s_new == 1 && x_t_new == 0 ) ) {
-      //  mincut_value_ -= backward_capacity;
-      //}
-      // if ( !(x_[s] == 0 && x_[t] == 1) &&
-      //    ( x_s_new == 0 && x_t_new == 1 ) ) {
-      //  mincut_value_ += forward_capacity;
-      //}
-      // if ( !(x_[s] == 1 && x_[t] == 0) &&
-      //    ( x_s_new == 1 && x_t_new == 0 ) ) {
-      //  mincut_value_ += backward_capacity;
-      //}
-      // auto mincut_after = mincut_value_;
-      // if ( mincut_after != mincut_before ) {
-      //  printf(" mincut before != after: %ld,
-      //  %ld\n",mincut_before,mincut_after);
-      //}
     }
   }
 
