@@ -47,15 +47,16 @@ int main(int argc, char *argv[]) {
   auto primal_decoder = [&](const std::vector<bool> &cut,
         double max_lower_bound,
         const std::list<int> &disagreeing_global_indices ) -> bool{
+    return false;
     primal_graph2.setCut(cut);
-    auto cut_value2 = primal_graph2.getCurrentCutValue();
-    std::cout << "primal cut value2: " << cut_value2 << "\n";
+    //auto cut_value2 = primal_graph2.getCurrentCutValue();
+    //std::cout << "primal cut value2: " << cut_value2 << "\n";
     primal_graph2.narrowBandDecode(disagreeing_global_indices);
     auto cut_value2_improved = primal_graph2.getCurrentCutValue();
     std::cout << "primal cut value2 improved: " << cut_value2_improved << "\n";
 
-    std::cout << "max_lower_bound : " << std::ceil(max_lower_bound) << "\n";
-    if ( cut_value2 == static_cast<int>(std::ceil(max_lower_bound))){
+    std::cout << "max_lower_bound : " << static_cast<long>(std::ceil(max_lower_bound)) << "\n";
+    if ( cut_value2_improved == static_cast<int>(std::ceil(max_lower_bound))){
       std::cout << "breaking beause primal solution is optimal" << std::endl;
       return true;
     }
@@ -70,7 +71,7 @@ int main(int argc, char *argv[]) {
   });
   std::cout << "dual decomp mem usage: " << dual_decomp_mem.usage_in_gb << "GB\n";
   auto microseconds = mcpd3::time_lambda([&] {
-      dual_decomp->solve(true,primal_decoder);
+      dual_decomp->solve<true>(primal_decoder);
   });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 

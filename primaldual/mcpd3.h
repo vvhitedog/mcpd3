@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
 
 #include <decomp/constraint.h>
 #include <graph/mcgraph.h>
@@ -208,9 +209,11 @@ public:
 
   void solve() {
     if (is_first_iteration_) {
+      shrinkToFitDualDecompositionConstraints(); // memory optimization
       initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                         // complementary slackness conditions
     }
+    cacheLagrangeMultipliers(); // optimization
     updateNodePotentials(); // finds which node based lagrange multiplier
                             // complementary slackness conditions are
                             // violated and sets source and sink capacities
@@ -256,28 +259,36 @@ public:
   void addSourceDualDecompositionConstraint(
       DualDecompositionConstraintArcReference arc_reference) {
     auto index = arc_reference->local_index_source;
-    auto find_iter = dual_decomposition_constraints_map_.find(index);
-    if (find_iter != dual_decomposition_constraints_map_.end()) {
+    auto find_iter =
+      std::find_if(dual_decomposition_constraints_vector_.begin(),
+          dual_decomposition_constraints_vector_.end(),[index](const
+            std::pair<int, DualDecompositionConstraint> &pair )
+          { return pair.first == index; });
+    if (find_iter != dual_decomposition_constraints_vector_.end()) {
       auto &constraint = find_iter->second;
       constraint.source_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
       constraint.source_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_map_.insert({index, constraint});
+      dual_decomposition_constraints_vector_.push_back({index, constraint});
     }
   }
 
   void addTargetDualDecompositionConstraint(
       DualDecompositionConstraintArcReference arc_reference) {
     auto index = arc_reference->local_index_target;
-    auto find_iter = dual_decomposition_constraints_map_.find(index);
-    if (find_iter != dual_decomposition_constraints_map_.end()) {
+    auto find_iter =
+      std::find_if(dual_decomposition_constraints_vector_.begin(),
+          dual_decomposition_constraints_vector_.end(),[index](const
+            std::pair<int, DualDecompositionConstraint> &pair )
+          { return pair.first == index; });
+    if (find_iter != dual_decomposition_constraints_vector_.end()) {
       auto &constraint = find_iter->second;
       constraint.target_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
       constraint.target_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_map_.insert({index, constraint});
+      dual_decomposition_constraints_vector_.push_back({index, constraint});
     }
   }
 
@@ -318,7 +329,7 @@ private:
     }
     // add dual decomposition node potential terms (when/if applicable)
     for (const auto &[index, constraint] :
-         dual_decomposition_constraints_map_) {
+         dual_decomposition_constraints_vector_) {
       int lagrange_multiplier_term = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
         lagrange_multiplier_term -= arc_reference->alpha;
@@ -437,26 +448,22 @@ private:
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
       updateNodeTerminal(i, pos, false);
     }
-    for (const auto &[i, constraint] : dual_decomposition_constraints_map_) {
+    size_t cache_index = 0;
+    for (const auto &[i, _] : dual_decomposition_constraints_vector_) {
       auto source_capacity = terminal_capacities_[2 * i + 0];
       auto sink_capacity = terminal_capacities_[2 * i + 1];
       auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      pos += cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(i, pos, false);
     }
-    updateDualDecompositionNodePotentials();
   }
 
   void updateDualDecompositionNodePotentials() {
     // add dual decomposition node potential terms (when/if applicable)
-    for (const auto &[index, constraint] :
-         dual_decomposition_constraints_map_) {
-      int pos = 0;
-      for (const auto &arc_reference : constraint.source_arc_references) {
-        pos -= arc_reference->alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references) {
-        pos += arc_reference->alpha;
-      }
+    size_t cache_index = 0;
+    for (const auto &[index, _] :
+         dual_decomposition_constraints_vector_) {
+      int pos = cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(index, pos, true);
     }
   }
@@ -477,19 +484,15 @@ private:
 
   void updateMinCutIncremental() {
     // update dual decomposition node potential terms (when/if applicable)
-    for (const auto &[index, constraint] :
-         dual_decomposition_constraints_map_) {
+    size_t cache_index = 0;
+    for (const auto &[index, _] :
+         dual_decomposition_constraints_vector_) {
       auto x_i_new =
           maxflow_graph_.what_segment(index) == MaxflowGraph::SINK ? 1 : 0;
-      int lagrange_multiplier_term = 0;
-      int last_lagrange_multiplier_term = 0;
-      for (const auto &arc_reference : constraint.source_arc_references) {
-        lagrange_multiplier_term -= arc_reference->alpha;
-        last_lagrange_multiplier_term -= arc_reference->last_alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references) {
-        lagrange_multiplier_term += arc_reference->alpha;
-        last_lagrange_multiplier_term += arc_reference->last_alpha;
+      int lagrange_multiplier_term = cached_lagrange_multipliers_[cache_index];
+      int last_lagrange_multiplier_term = cached_last_lagrange_multipliers_[cache_index++];
+      if ( last_lagrange_multiplier_term == lagrange_multiplier_term && x_i_new == x_[index] ) {
+        continue;
       }
       mincut_value_ -= last_lagrange_multiplier_term * (x_[index]);
       mincut_value_ += lagrange_multiplier_term * (x_i_new);
@@ -624,6 +627,34 @@ private:
     }
   }
 
+  void cacheLagrangeMultipliers() {
+    if ( is_first_iteration_ ) {
+      cached_lagrange_multipliers_.resize(dual_decomposition_constraints_vector_.size());
+      cached_last_lagrange_multipliers_.resize(dual_decomposition_constraints_vector_.size());
+    }
+    size_t cache_index = 0;
+    for (const auto &[_, constraint] :
+         dual_decomposition_constraints_vector_) {
+      int lagrange_multiplier_term = 0;
+      int last_lagrange_multiplier_term = 0;
+      for (const auto &arc_reference : constraint.source_arc_references) {
+        lagrange_multiplier_term -= arc_reference->alpha;
+        last_lagrange_multiplier_term -= arc_reference->last_alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references) {
+        lagrange_multiplier_term += arc_reference->alpha;
+        last_lagrange_multiplier_term += arc_reference->last_alpha;
+      }
+      cached_lagrange_multipliers_[cache_index] = lagrange_multiplier_term;
+      cached_last_lagrange_multipliers_[cache_index] = last_lagrange_multiplier_term;
+      cache_index++;
+    }
+  }
+
+  void shrinkToFitDualDecompositionConstraints() {
+    dual_decomposition_constraints_vector_.shrink_to_fit();
+  }
+
   /**
    * data passed into solver
    */
@@ -640,7 +671,6 @@ private:
   std::vector<int> d_flow_; // flow on the nodes
   std::vector<int> x_;      // mincut solution
   using MaxflowGraph =
-      // Graph</*captype=*/long, /*tcaptype=*/long, /*flowtype=*/long>;
       Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
@@ -658,8 +688,11 @@ private:
     std::list<DualDecompositionConstraintArcReference> source_arc_references;
     std::list<DualDecompositionConstraintArcReference> target_arc_references;
   };
-  std::unordered_map</*local_index=*/int, DualDecompositionConstraint>
-      dual_decomposition_constraints_map_;
+  std::vector<std::pair</*local_index=*/int, DualDecompositionConstraint>>
+      dual_decomposition_constraints_vector_;
+
+  std::vector<int> cached_lagrange_multipliers_;
+  std::vector<int> cached_last_lagrange_multipliers_;
 };
 
 } // namespace mcpd3

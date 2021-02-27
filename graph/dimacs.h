@@ -160,6 +160,10 @@ MinCutGraph read_dimacs(const std::string &filename) {
       }
     }
   }
+  g.terminal_capacities.resize(2 * (g.nnode), 0); // ensure size
+  g.arcs.shrink_to_fit();
+  g.terminal_capacities.shrink_to_fit();
+  g.arc_capacities.shrink_to_fit();
   return std::move(g);
 }
 

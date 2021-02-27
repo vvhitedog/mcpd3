@@ -20,6 +20,7 @@
 #include <string>
 #include <unordered_map>
 #include <boost/functional/hash.hpp>
+#include <queue>
 
 #include <graph/dimacs.h>
 #include <graph/partition.h>
@@ -82,7 +83,8 @@ public:
   }
 
   void narrowBandDecode(const std::list<node_index_type> &seeds,
-      node_index_type max_distance = 14 ){
+      node_index_type max_distance = 14,
+      node_index_type node_budget = 100000){
 
     // 1. run bfs to get nodes within proximity of seeds
     std::unordered_map<node_index_type,node_index_type> distance_map;
@@ -100,6 +102,9 @@ public:
       auto current_node = to_visit.front();
       to_visit.pop();
       auto current_dist = distance_map[current_node];
+      if ( visited.size() > node_budget ) {
+        break; // going over the node budget, give up on decoding
+      }
       if ( current_dist >= max_distance ) {
         continue;
       }
@@ -108,11 +113,17 @@ public:
       for ( arc_index_type iarc = arc_start_offset; iarc < arc_end_offset; ++iarc, ++arcs_visited ) {
         auto end_node = (*adjacency_nodes_)[iarc];
         auto [_,success] = visited.insert(end_node);
+        if ( visited.size() > node_budget ) {
+          break; // going over the node budget, give up on decoding
+        }
         if ( success ) { // already visited
           to_visit.push(end_node);
           distance_map[end_node] = current_dist + 1;
         }
       }
+    }
+    if ( visited.size() > node_budget ) { 
+      return;  // went over node budget, give up on decoding
     }
 
     // 2. remap indices

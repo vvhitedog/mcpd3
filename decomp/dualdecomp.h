@@ -145,18 +145,23 @@ public:
     const int num_optimization_scales = 5;
     const int max_cycle_count = 2;
     for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
-      auto status = runOptimizationScale(10000, 1, max_cycle_count, true);
+      OptimizationStatus status;
+      auto ms = time_lambda([&] {
+      status = runOptimizationScale(10000, 1, max_cycle_count, true);
+      });
+      std::cout << " opt scale runtime ms: " << ms.count() << "\n";
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
       }
       if ( attempt_decoding ) { // decoding requested
-        runPrimalSolutionDecodingStep();
         if ( decoder(primal_solution_,max_lower_bound_,disagreeing_global_indices_) ) {
           break;
         }
-        runPrimalSolutionDecodingStep(true); // check against old implementation
       }
+      auto ms2 = time_lambda([&] {
       scaleProblem<scaling_factor>();
+      });
+      std::cout << " scale prob runtime ms: " << ms2.count() << "\n";
     }
   }
 
@@ -354,7 +359,8 @@ private:
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
                                       // original partition
-      auto &constraint_arcs = constraint_arc_map_[global_index];
+      constraint_arc_map_.push_back({global_index,{}});
+      auto &constraint_arcs = constraint_arc_map_.back().second;
       assert(partitions.size() >
              1); // requirement to be a proper constrained node
       for (const auto &partition_source :
@@ -385,6 +391,7 @@ private:
       }
       constrained_nodes_partition_counts.insert(partitions.size());
     }
+    constraint_arc_map_.shrink_to_fit();
     printf("partition counts: ");
     for (const auto &count : constrained_nodes_partition_counts) {
       printf("%d,", count);
@@ -394,10 +401,16 @@ private:
      * step 5: create a min cut problem from the original problem to evaluate
      * the primal objective value
      */
-    primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
-       std::move(arcs_),
-       std::move(arc_capacities_),
-       std::move(terminal_capacities_));
+    //primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
+    //   std::move(arcs_),
+    //   std::move(arc_capacities_),
+    //   std::move(terminal_capacities_));
+    arcs_.clear();
+    arcs_.shrink_to_fit();
+    arc_capacities_.clear();
+    arc_capacities_.shrink_to_fit();
+    terminal_capacities_.clear();
+    terminal_capacities_.shrink_to_fit();
   }
 
   /**
@@ -413,8 +426,8 @@ private:
   /**
    * data structures needed for solving dual decomposition
    */
-  std::unordered_map</*global_index=*/int,
-                     std::list<DualDecompositionConstraintArc>>
+  std::vector<std::pair</*global_index=*/int,
+                     std::list<DualDecompositionConstraintArc>>>
       constraint_arc_map_;
 
   std::vector<std::unique_ptr<PrimalDualMinCutSolver>> solvers_;
