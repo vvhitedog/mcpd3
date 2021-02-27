@@ -38,7 +38,11 @@ else ()
 endif ()
 
 # Required packages
-find_package (Threads)
+find_package (Threads REQUIRED)
+find_package(Boost 1.69.0)
+if(Boost_FOUND)
+  include_directories(${Boost_INCLUDE_DIRS})
+endif(Boost_FOUND)
 
 # Options
 option(GPERF_PROFILER_BUILD "Build with gperftools CPU profiling enabled." OFF )

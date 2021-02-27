@@ -24,20 +24,23 @@
 
 namespace mcpd3 {
 
+namespace _dimacs_implementation {
+
 int remap_index(int original_index, int source_index, int sink_index) {
+  int new_index = original_index;
   if (original_index > source_index) {
-    --original_index;
+    --new_index;
   }
   if (original_index > sink_index) {
-    --original_index;
+    --new_index;
   }
-  return --original_index; // indices in DIMACS start at 1 but we wish for them
-                           // to start at 0
+  return --new_index; // indices in DIMACS start at 1 but we wish for them
+                      // to start at 0
 }
 
-MinCutGraph read_dimacs(const std::string &filename) {
-  MinCutGraph g;
-  std::unordered_map<int, std::unordered_map<int, int>> arc_adjacency;
+template <typename ArcOperator, typename TerminalOperator>
+void read_dimacs_general(const std::string &filename, 
+                         ArcOperator arc_op, TerminalOperator term_op) {
   const int line_length = 1024;
   char line[line_length];
   int n, m, s, t, cap, source, sink, _s, _t;
@@ -57,8 +60,6 @@ MinCutGraph read_dimacs(const std::string &filename) {
             "p line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
       }
-      g.nnode = n - 2;
-      g.terminal_capacities.resize(2 * (g.nnode), 0);
       break;
     case 'a':
       if (source == -1 || sink == -1) {
@@ -81,21 +82,14 @@ MinCutGraph read_dimacs(const std::string &filename) {
       if (s != source && t != sink) { // handle non terminal arc
         _s = remap_index(s, source, sink);
         _t = remap_index(t, source, sink);
-        if (arc_adjacency[_s].find(_t) == arc_adjacency[_s].end()) {
-          arc_adjacency[_s][_t] = cap;
-          if (arc_adjacency[_t].find(_s) == arc_adjacency[_t].end()) {
-            arc_adjacency[_t][_s] = 0;
-          }
-        } else {
-          arc_adjacency[_s][_t] = cap;
-        }
+        arc_op(_s, _t, cap);
       } else { // handle terminal arc
         if (s == source) {
           _t = remap_index(t, source, sink);
-          g.terminal_capacities[2 * _t + 0] += cap;
+          term_op(true, _t, cap);
         } else if (t == sink) {
           _s = remap_index(s, source, sink);
-          g.terminal_capacities[2 * _s + 1] += cap;
+          term_op(false, _s, cap);
         }
       }
       break;
@@ -119,6 +113,41 @@ MinCutGraph read_dimacs(const std::string &filename) {
       break;
     }
   }
+  fclose(stream);
+}
+} // namespace _dimacs_implementation
+
+MinCutGraph read_dimacs(const std::string &filename) {
+  MinCutGraph g;
+  g.nnode = 0;
+  std::unordered_map<int, std::unordered_map<int, int>> arc_adjacency;
+
+  auto arc_op = [&](int s, int t, int cap) {
+    g.nnode = std::max(g.nnode,s+1);
+    g.nnode = std::max(g.nnode,t+1);
+    if (arc_adjacency[s].find(t) == arc_adjacency[s].end()) {
+      arc_adjacency[s][t] = cap;
+      if (arc_adjacency[t].find(s) == arc_adjacency[t].end()) {
+        arc_adjacency[t][s] = 0;
+      }
+    } else {
+      arc_adjacency[s][t] += cap;
+    }
+  };
+
+  auto term_op = [&](bool is_source, int n, int cap) {
+    g.nnode = std::max(g.nnode,n+1);
+    g.terminal_capacities.resize(2 * (g.nnode), 0);
+    if (is_source) {
+      g.terminal_capacities[2 * n + 0] += cap;
+    } else {
+      g.terminal_capacities[2 * n + 1] += cap;
+    }
+  };
+
+  _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
+
+  // process arcs after the fact
   g.narc = 0;
   for (const auto &[s, arc_list] : arc_adjacency) {
     for (const auto &[t, cap] : arc_list) {
@@ -131,7 +160,6 @@ MinCutGraph read_dimacs(const std::string &filename) {
       }
     }
   }
-  fclose(stream);
   return std::move(g);
 }
 

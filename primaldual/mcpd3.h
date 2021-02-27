@@ -283,6 +283,11 @@ public:
 
   int getMinCutSolution(int index) const { return x_[index]; }
 
+  void setMinCutSolution(const std::vector<bool> &new_solution) {
+    std::copy(new_solution.begin(), new_solution.end(), x_.begin());
+    computeMinCutValueInitial();
+  }
+
   void setMinCutSolution(const std::vector<int> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
