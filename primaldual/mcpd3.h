@@ -261,17 +261,17 @@ public:
       DualDecompositionConstraintArcReference arc_reference) {
     auto index = arc_reference->local_index_source;
     auto find_iter =
-      std::find_if(dual_decomposition_constraints_vector_.begin(),
-          dual_decomposition_constraints_vector_.end(),[index](const
-            std::pair<int, DualDecompositionConstraint> &pair )
-          { return pair.first == index; });
-    if (find_iter != dual_decomposition_constraints_vector_.end()) {
-      auto &constraint = find_iter->second;
+      std::find(dual_decomposition_local_indices_.begin(),
+          dual_decomposition_local_indices_.end(),
+          index);
+    if (find_iter != dual_decomposition_local_indices_.end()) {
+      auto &constraint = dual_decomposition_constraints_[std::distance(dual_decomposition_local_indices_.begin(),find_iter)];
       constraint.source_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
       constraint.source_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_vector_.push_back({index, constraint});
+      dual_decomposition_local_indices_.emplace_back(index);
+      dual_decomposition_constraints_.emplace_back(constraint);
     }
   }
 
@@ -279,17 +279,17 @@ public:
       DualDecompositionConstraintArcReference arc_reference) {
     auto index = arc_reference->local_index_target;
     auto find_iter =
-      std::find_if(dual_decomposition_constraints_vector_.begin(),
-          dual_decomposition_constraints_vector_.end(),[index](const
-            std::pair<int, DualDecompositionConstraint> &pair )
-          { return pair.first == index; });
-    if (find_iter != dual_decomposition_constraints_vector_.end()) {
-      auto &constraint = find_iter->second;
+      std::find(dual_decomposition_local_indices_.begin(),
+          dual_decomposition_local_indices_.end(),
+          index);
+    if (find_iter != dual_decomposition_local_indices_.end()) {
+      auto &constraint = dual_decomposition_constraints_[std::distance(dual_decomposition_local_indices_.begin(),find_iter)];
       constraint.target_arc_references.emplace_back(arc_reference);
     } else {
       DualDecompositionConstraint constraint;
       constraint.target_arc_references.emplace_back(arc_reference);
-      dual_decomposition_constraints_vector_.push_back({index, constraint});
+      dual_decomposition_local_indices_.emplace_back(index);
+      dual_decomposition_constraints_.emplace_back(constraint);
     }
   }
 
@@ -328,8 +328,9 @@ private:
       }
     }
     // add dual decomposition node potential terms (when/if applicable)
-    for (const auto &[index, constraint] :
-         dual_decomposition_constraints_vector_) {
+    size_t i = 0;
+    for (const auto &constraint :
+         dual_decomposition_constraints_) {
       int lagrange_multiplier_term = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
         lagrange_multiplier_term -= arc_reference->alpha;
@@ -337,7 +338,7 @@ private:
       for (const auto &arc_reference : constraint.target_arc_references) {
         lagrange_multiplier_term += arc_reference->alpha;
       }
-      mincut_value_ += lagrange_multiplier_term * x_[index];
+      mincut_value_ += lagrange_multiplier_term * x_[dual_decomposition_local_indices_[i++]];
     }
   }
 
@@ -445,7 +446,7 @@ private:
       updateNodeTerminal(i, pos, false);
     }
     size_t cache_index = 0;
-    for (const auto &[i, _] : dual_decomposition_constraints_vector_) {
+    for (const auto &i : dual_decomposition_local_indices_) {
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(i, pos, false);
@@ -455,8 +456,8 @@ private:
   void updateDualDecompositionNodePotentials() {
     // add dual decomposition node potential terms (when/if applicable)
     size_t cache_index = 0;
-    for (const auto &[index, _] :
-         dual_decomposition_constraints_vector_) {
+    for (const auto &index :
+         dual_decomposition_local_indices_) {
       int pos = cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(index, pos, true);
     }
@@ -479,8 +480,8 @@ private:
   void updateMinCutIncremental() {
     // update dual decomposition node potential terms (when/if applicable)
     size_t cache_index = 0;
-    for (const auto &[index, _] :
-         dual_decomposition_constraints_vector_) {
+    for (const auto &index :
+         dual_decomposition_local_indices_) {
       auto x_i_new =
           maxflow_graph_.what_segment(index) == MaxflowGraph::SINK ? 1 : 0;
       int lagrange_multiplier_term = cached_lagrange_multipliers_[cache_index];
@@ -620,12 +621,12 @@ private:
 
   void cacheLagrangeMultipliers() {
     if ( is_first_iteration_ ) {
-      cached_lagrange_multipliers_.resize(dual_decomposition_constraints_vector_.size());
-      cached_last_lagrange_multipliers_.resize(dual_decomposition_constraints_vector_.size());
+      cached_lagrange_multipliers_.resize(dual_decomposition_local_indices_.size());
+      cached_last_lagrange_multipliers_.resize(dual_decomposition_local_indices_.size());
     }
     size_t cache_index = 0;
-    for (const auto &[_, constraint] :
-         dual_decomposition_constraints_vector_) {
+    for (const auto &constraint :
+         dual_decomposition_constraints_) {
       int lagrange_multiplier_term = 0;
       int last_lagrange_multiplier_term = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
@@ -643,8 +644,8 @@ private:
   }
 
   void shrinkToFitDualDecompositionConstraints() {
-    dual_decomposition_constraints_vector_.shrink_to_fit();
-    for ( auto &[_,constraint] : dual_decomposition_constraints_vector_ ) {
+    dual_decomposition_local_indices_.shrink_to_fit();
+    for ( auto &constraint : dual_decomposition_constraints_ ) {
       constraint.source_arc_references.shrink_to_fit();
       constraint.target_arc_references.shrink_to_fit();
     }
@@ -683,8 +684,10 @@ private:
     std::vector<DualDecompositionConstraintArcReference> source_arc_references;
     std::vector<DualDecompositionConstraintArcReference> target_arc_references;
   };
-  std::vector<std::pair</*local_index=*/int, DualDecompositionConstraint>>
-      dual_decomposition_constraints_vector_;
+  std::vector<int>
+      dual_decomposition_local_indices_;
+  std::vector<DualDecompositionConstraint>
+      dual_decomposition_constraints_;
 
   std::vector<int> cached_lagrange_multipliers_;
   std::vector<int> cached_last_lagrange_multipliers_;
