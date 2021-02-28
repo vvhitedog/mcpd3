@@ -144,12 +144,14 @@ public:
     const int scaling_factor = 10;
     const int num_optimization_scales = 5;
     const int max_cycle_count = 2;
+    const int max_iteration_count = 10000;
+    const int step_size = 1; //XXX: unused consider removing
     for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
       OptimizationStatus status;
-      auto ms = time_lambda([&] {
-      status = runOptimizationScale(10000, 1, max_cycle_count, true);
+      auto run_opt_scale_time = time_lambda([&] {
+      status = runOptimizationScale(max_iteration_count, step_size, max_cycle_count, true);
       });
-      std::cout << " opt scale runtime ms: " << ms.count() << "\n";
+      printf("run optimization scale time: %lums\n", run_opt_scale_time.count() );
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
       }
@@ -158,10 +160,10 @@ public:
           break;
         }
       }
-      auto ms2 = time_lambda([&] {
+      auto rescale_problem_time = time_lambda([&] {
       scaleProblem<scaling_factor>();
       });
-      std::cout << " scale prob runtime ms: " << ms2.count() << "\n";
+      printf("rescale problem time: %lums\n",rescale_problem_time.count());
     }
   }
 
@@ -176,7 +178,7 @@ public:
 
   OptimizationStatus runOptimizationScale(int nstep, int step_size,
                                           int max_cycle_count = 2,
-                                          int break_on_small_change = false) {
+                                          int use_momentum = false) {
     OptimizationStatus opt_status = ITERATION_COUNT_EXCEEDED;
     const int num_stats_in_group = 10;
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(
@@ -200,7 +202,7 @@ public:
           std::max(static_cast<long>(lower_bound), max_lower_bound);
 
       disagreeing_global_indices_ =
-          runLagrangeMultipliersUpdateStep(step_size, break_on_small_change);
+          runLagrangeMultipliersUpdateStep(step_size, use_momentum);
       printf("lower_bound : %lf num_disagreeing : %ld\n",
              double(lower_bound) / scale_, disagreeing_global_indices_.size());
 
@@ -211,15 +213,15 @@ public:
         auto [first_group_max, second_group_max] =
             lower_bound_group_stats.getMaximums();
         if (second_group_max <= first_group_max) {
-          std::cout << "breaking because max of this group's interval is less "
-                       "than or qual to max in last last group's interval\n";
+          printf("breaking because max of this group's interval is less "
+                       "than or qual to max in last last group's interval\n");
           opt_status = NO_FURTHER_PROGRESS;
           break;
         }
       }
 
       if (disagreeing_global_indices_.size() == 0) { // optimality condition
-        std::cout << "breaking because of no disagreement\n";
+        printf( "breaking because of no disagreement\n");
         opt_status = OPTIMAL;
         break;
       }
@@ -229,7 +231,7 @@ public:
       if (dual_cycle_list.getMaxCycleCount() >
           max_cycle_count) { // at least one set of configurations likely
                              // repeated more than a specified number of times
-        std::cout << "breaking because cycle detected\n";
+        printf("breaking because cycle detected\n");
         opt_status = NO_FURTHER_PROGRESS;
         break;
       }
@@ -348,8 +350,7 @@ private:
     }
     /**
      * step 4: create a DualDecompositionConstraintArc for each constraint
-     * induced on each constrained node (which should be one less than the
-     * number of partitions the node appears in)
+     * induced on each constrained node 
      */
     std::set<int> constrained_nodes_partition_counts;
     for (auto &[global_index, partitions] : constrained_nodes) {
