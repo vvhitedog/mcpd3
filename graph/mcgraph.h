@@ -27,5 +27,4 @@ struct MinCutGraph {
   std::vector<int> terminal_capacities;
 };
 
-
 } // namespace mcpd3

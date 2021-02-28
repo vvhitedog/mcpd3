@@ -24,10 +24,8 @@
 
 namespace mcpd3 {
 
-std::vector<int> basic_graph_partition(int npartition,
-                                 int narc,
-                                 int nnode,
-                                 const std::vector<int> &arc ) {
+std::vector<int> basic_graph_partition(int npartition, int narc, int nnode,
+                                       const std::vector<int> &arc) {
   std::vector<int> partitions(nnode);
   int nnode_in_each_partition = (nnode + npartition - 1) / npartition;
   for (int i = 0; i < nnode; ++i) {
@@ -38,16 +36,13 @@ std::vector<int> basic_graph_partition(int npartition,
 
 std::vector<int> basic_graph_partition(int npartition,
                                        const mcpd3::MinCutGraph &graph) {
-  return basic_graph_partition(npartition,graph.narc,graph.nnode,graph.arcs);
+  return basic_graph_partition(npartition, graph.narc, graph.nnode, graph.arcs);
 }
 
 #ifdef HAVE_METIS
 
-std::vector<int> metis_partition(int npartition,
-                                 int narc,
-                                 int nnode,
-                                 const std::vector<int> &arc ) {
-
+std::vector<int> metis_partition(int npartition, int narc, int nnode,
+                                 const std::vector<int> &arc) {
 
   std::vector<std::vector<idx_t>> adj(nnode);
 
@@ -84,7 +79,7 @@ std::vector<int> metis_partition(int npartition,
                                 nullptr, &objval, &part[0]);
 
   if (ret != METIS_OK) {
-    throw std::runtime_error( "Something failed while partitioning.\n");
+    throw std::runtime_error("Something failed while partitioning.\n");
   }
 
   std::vector<int> label(nnode, -1);
@@ -97,7 +92,7 @@ std::vector<int> metis_partition(int npartition,
   const auto &narc = graph.narc;
   const auto &arc = graph.arcs;
   const auto &nnode = graph.nnode;
-  return metis_partition(npartition,narc,nnode,arc);
+  return metis_partition(npartition, narc, nnode, arc);
 }
 #endif
-}
+} // namespace mcpd3

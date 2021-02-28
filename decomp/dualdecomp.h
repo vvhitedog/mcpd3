@@ -17,17 +17,17 @@
 #pragma once
 
 #include <cmath>
+#include <iostream>
 #include <list>
 #include <memory>
 #include <queue>
 #include <set>
 #include <unordered_map>
-#include <iostream>
 
 #include <decomp/constraint.h>
-#include <multithread/threadpool.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
+#include <multithread/threadpool.h>
 #include <primaldual/mcpd3.h>
 
 namespace mcpd3 {
@@ -50,22 +50,21 @@ std::chrono::microseconds time_lambda(Lambda lambda) {
 
 class DualDecomposition {
 public:
-  DualDecomposition(int npartition, int nnode, int narc,
-                    std::vector<int> arcs,
+  DualDecomposition(int npartition, int nnode, int narc, std::vector<int> arcs,
                     std::vector<int> arc_capacities,
                     std::vector<int> terminal_capacities)
       : npartition_(npartition), nnode_(nnode), narc_(narc),
-        arcs_(std::move(arcs)),
-        arc_capacities_(std::move(arc_capacities)),
+        arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)),
         min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
-        thread_pool_(std::min<size_t>(npartition_,std::thread::hardware_concurrency()) ), solve_loop_time_(0),
+        thread_pool_(
+            std::min<size_t>(npartition_, std::thread::hardware_concurrency())),
+        solve_loop_time_(0),
         max_lower_bound_(std::numeric_limits<double>::lowest()) {
     initializeDecomposition();
   }
 
-  DualDecomposition(int npartition,
-                    MinCutGraph min_cut_graph)
+  DualDecomposition(int npartition, MinCutGraph min_cut_graph)
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
                           std::move(min_cut_graph.arcs),
                           std::move(min_cut_graph.arc_capacities),
@@ -139,40 +138,42 @@ public:
     ITERATION_COUNT_EXCEEDED
   };
 
-  template<bool attempt_decoding, typename Decoder>
+  template <bool attempt_decoding, typename Decoder>
   void solve(Decoder decoder) {
     const int scaling_factor = 10;
     const int num_optimization_scales = 5;
     const int max_cycle_count = 2;
     const int max_iteration_count = 10000;
-    const int step_size = 1; //XXX: unused consider removing
+    const int step_size = 1; // XXX: unused consider removing
     for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
       OptimizationStatus status;
       auto run_opt_scale_time = time_lambda([&] {
-      status = runOptimizationScale(max_iteration_count, step_size, max_cycle_count, true);
+        status = runOptimizationScale(max_iteration_count, step_size,
+                                      max_cycle_count, true);
       });
-      printf("run optimization scale time: %lums\n", run_opt_scale_time.count() );
+      printf("run optimization scale time: %lums\n",
+             run_opt_scale_time.count());
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
       }
-      if ( attempt_decoding ) { // decoding requested
-        if ( decoder(primal_solution_,max_lower_bound_,disagreeing_global_indices_) ) {
+      if (attempt_decoding) { // decoding requested
+        if (decoder(primal_solution_, max_lower_bound_,
+                    disagreeing_global_indices_)) {
           break;
         }
       }
-      auto rescale_problem_time = time_lambda([&] {
-      scaleProblem<scaling_factor>();
-      });
-      printf("rescale problem time: %lums\n",rescale_problem_time.count());
+      auto rescale_problem_time =
+          time_lambda([&] { scaleProblem<scaling_factor>(); });
+      printf("rescale problem time: %lums\n", rescale_problem_time.count());
     }
   }
 
   void solve() {
-    auto null_decoder = [=](const std::vector<bool> &cut,
-        double max_lower_bound,
-        const std::list<int> &disagreeing_global_indices ) -> bool{
-        return false;
-        };
+    auto null_decoder =
+        [=](const std::vector<bool> &cut, double max_lower_bound,
+            const std::list<int> &disagreeing_global_indices) -> bool {
+      return false;
+    };
     solve<false>(null_decoder);
   }
 
@@ -206,7 +207,8 @@ public:
       printf("lower_bound : %lf num_disagreeing : %ld\n",
              double(lower_bound) / scale_, disagreeing_global_indices_.size());
 
-      max_lower_bound_ = std::max<double>(max_lower_bound_,double(lower_bound)/scale_);
+      max_lower_bound_ =
+          std::max<double>(max_lower_bound_, double(lower_bound) / scale_);
 
       lower_bound_group_stats.addValue(lower_bound);
       if (lower_bound_group_stats.areGroupsPopulated()) {
@@ -214,20 +216,20 @@ public:
             lower_bound_group_stats.getMaximums();
         if (second_group_max <= first_group_max) {
           printf("breaking because max of this group's interval is less "
-                       "than or qual to max in last last group's interval\n");
+                 "than or qual to max in last last group's interval\n");
           opt_status = NO_FURTHER_PROGRESS;
           break;
         }
       }
 
       if (disagreeing_global_indices_.size() == 0) { // optimality condition
-        printf( "breaking because of no disagreement\n");
+        printf("breaking because of no disagreement\n");
         opt_status = OPTIMAL;
         break;
       }
 
-      dual_cycle_list.addNode(getDualSolutionHash(
-          disagreeing_global_indices_, lower_bound));
+      dual_cycle_list.addNode(
+          getDualSolutionHash(disagreeing_global_indices_, lower_bound));
       if (dual_cycle_list.getMaxCycleCount() >
           max_cycle_count) { // at least one set of configurations likely
                              // repeated more than a specified number of times
@@ -243,9 +245,7 @@ public:
   template <int scale> void scaleProblem() {
     scale_ *= scale;
     for (auto &solver : solvers_) {
-      thread_pool_.push([&] {
-      solver->scaleProblem<scale>();
-      });
+      thread_pool_.push([&] { solver->scaleProblem<scale>(); });
     }
     thread_pool_.wait();
     for (auto &[global_index, constraints] : constraint_arc_map_) {
@@ -272,8 +272,7 @@ private:
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
       for (auto &constraint : constraints) {
-        constraint.last_alpha =
-            constraint.alpha; // record alpha before update
+        constraint.last_alpha = constraint.alpha; // record alpha before update
         int diff =
             solvers_[constraint.partition_index_target]->getMinCutSolution(
                 constraint.local_index_target) -
@@ -310,9 +309,9 @@ private:
      */
     std::vector<int> partitions_;
 #ifdef HAVE_METIS
-    partitions_ = metis_partition(npartition_,narc_,nnode_,arcs_);
-#else 
-    partitions_ = basic_graph_partition(npartition_,narc_,nnode_,arcs_);
+    partitions_ = metis_partition(npartition_, narc_, nnode_, arcs_);
+#else
+    partitions_ = basic_graph_partition(npartition_, narc_, nnode_, arcs_);
 #endif
     /**
      * step 1: distribute all arcs into one and only one sub graph
@@ -340,24 +339,26 @@ private:
      * step 2: add source and sink capacities of nodes
      */
     for (int i = 0; i < nnode_; ++i) {
-      min_cut_sub_graphs_[partitions_[i]].insertTerminal(i,terminal_capacities_[i]);
+      min_cut_sub_graphs_[partitions_[i]].insertTerminal(
+          i, terminal_capacities_[i]);
     }
     /**
      * step 3: create solvers
      */
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
-      solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(std::move(min_cut_sub_graph.graph)));
+      solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
+          std::move(min_cut_sub_graph.graph)));
     }
     /**
      * step 4: create a DualDecompositionConstraintArc for each constraint
-     * induced on each constrained node 
+     * induced on each constrained node
      */
     std::set<int> constrained_nodes_partition_counts;
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
                                       // original partition
-      constraint_arc_map_.push_back({global_index,{}});
+      constraint_arc_map_.push_back({global_index, {}});
       auto &constraint_arcs = constraint_arc_map_.back().second;
       assert(partitions.size() >
              1); // requirement to be a proper constrained node
@@ -399,7 +400,7 @@ private:
      * step 5: create a min cut problem from the original problem to evaluate
      * the primal objective value
      */
-    //primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
+    // primal_solver_ = std::make_unique<PrimalDualMinCutSolver>(nnode_,narc_,
     //   std::move(arcs_),
     //   std::move(arc_capacities_),
     //   std::move(terminal_capacities_));
@@ -425,7 +426,7 @@ private:
    * data structures needed for solving dual decomposition
    */
   std::vector<std::pair</*global_index=*/int,
-                     std::list<DualDecompositionConstraintArc>>>
+                        std::list<DualDecompositionConstraintArc>>>
       constraint_arc_map_;
 
   std::vector<std::unique_ptr<PrimalDualMinCutSolver>> solvers_;

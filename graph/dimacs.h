@@ -39,8 +39,8 @@ int remap_index(int original_index, int source_index, int sink_index) {
 }
 
 template <typename ArcOperator, typename TerminalOperator>
-void read_dimacs_general(const std::string &filename, 
-                         ArcOperator arc_op, TerminalOperator term_op) {
+void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
+                         TerminalOperator term_op) {
   const int line_length = 1024;
   char line[line_length];
   int n, m, s, t, cap, source, sink, _s, _t;
@@ -123,8 +123,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
   std::unordered_map<int, std::unordered_map<int, int>> arc_adjacency;
 
   auto arc_op = [&](int s, int t, int cap) {
-    g.nnode = std::max(g.nnode,s+1);
-    g.nnode = std::max(g.nnode,t+1);
+    g.nnode = std::max(g.nnode, s + 1);
+    g.nnode = std::max(g.nnode, t + 1);
     if (arc_adjacency[s].find(t) == arc_adjacency[s].end()) {
       arc_adjacency[s][t] = cap;
       if (arc_adjacency[t].find(s) == arc_adjacency[t].end()) {
@@ -137,18 +137,18 @@ MinCutGraph read_dimacs(const std::string &filename) {
 
   long imbalance = 0;
   auto term_op = [&](bool is_source, int n, int cap) {
-    g.nnode = std::max(g.nnode,n+1);
+    g.nnode = std::max(g.nnode, n + 1);
     g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {
       auto old_cap = g.terminal_capacities[n];
-      if ( old_cap < 0 ) {
-        imbalance += std::min(-old_cap,cap);
+      if (old_cap < 0) {
+        imbalance += std::min(-old_cap, cap);
       }
       g.terminal_capacities[n] += cap;
     } else {
       auto old_cap = g.terminal_capacities[n];
-      if ( old_cap > 0 ) {
-        imbalance += std::min(old_cap,cap);
+      if (old_cap > 0) {
+        imbalance += std::min(old_cap, cap);
       }
       g.terminal_capacities[n] -= cap;
     }
@@ -156,8 +156,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
 
   _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
 
-  if ( imbalance > 0 ) {
-    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance );
+  if (imbalance > 0) {
+    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
   }
 
   // process arcs after the fact

@@ -21,8 +21,8 @@
 #include <io/memory.h>
 
 #include <decomp/dualdecomp.h>
-#include <graph/dimacs.h>
 #include <graph/csrgraph.h>
+#include <graph/dimacs.h>
 #include <iostream>
 
 int main(int argc, char *argv[]) {
@@ -43,20 +43,20 @@ int main(int argc, char *argv[]) {
 
   auto primal_graph2 = mcpd3::read_dimacs_to_csr(argv[1]);
 
-
-  auto primal_decoder = [&](const std::vector<bool> &cut,
-        double max_lower_bound,
-        const std::list<int> &disagreeing_global_indices ) -> bool{
+  auto primal_decoder =
+      [&](const std::vector<bool> &cut, double max_lower_bound,
+          const std::list<int> &disagreeing_global_indices) -> bool {
     return false;
     primal_graph2.setCut(cut);
-    //auto cut_value2 = primal_graph2.getCurrentCutValue();
-    //std::cout << "primal cut value2: " << cut_value2 << "\n";
+    // auto cut_value2 = primal_graph2.getCurrentCutValue();
+    // std::cout << "primal cut value2: " << cut_value2 << "\n";
     primal_graph2.narrowBandDecode(disagreeing_global_indices);
     auto cut_value2_improved = primal_graph2.getCurrentCutValue();
     std::cout << "primal cut value2 improved: " << cut_value2_improved << "\n";
 
-    std::cout << "max_lower_bound : " << static_cast<long>(std::ceil(max_lower_bound)) << "\n";
-    if ( cut_value2_improved == static_cast<int>(std::ceil(max_lower_bound))){
+    std::cout << "max_lower_bound : "
+              << static_cast<long>(std::ceil(max_lower_bound)) << "\n";
+    if (cut_value2_improved == static_cast<int>(std::ceil(max_lower_bound))) {
       std::cout << "breaking beause primal solution is optimal" << std::endl;
       return true;
     }
@@ -64,18 +64,17 @@ int main(int argc, char *argv[]) {
   };
 
   std::unique_ptr<mcpd3::DualDecomposition> dual_decomp;
-  auto dual_decomp_mem = mcpd3::get_resident_memory_usage(
-  [&] {
-  dual_decomp = std::make_unique<mcpd3::DualDecomposition>(npartition, 
-                                       std::move(min_cut_graph_data));
+  auto dual_decomp_mem = mcpd3::get_resident_memory_usage([&] {
+    dual_decomp = std::make_unique<mcpd3::DualDecomposition>(
+        npartition, std::move(min_cut_graph_data));
   });
-  std::cout << "dual decomp mem usage: " << dual_decomp_mem.usage_in_gb << "GB\n";
-  auto microseconds = mcpd3::time_lambda([&] {
-      dual_decomp->solve<true>(primal_decoder);
-  });
+  std::cout << "dual decomp mem usage: " << dual_decomp_mem.usage_in_gb
+            << "GB\n";
+  auto microseconds =
+      mcpd3::time_lambda([&] { dual_decomp->solve<true>(primal_decoder); });
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
-  std::cout << " total solve loop time: " << dual_decomp->getTotalSolveLoopTime()
-            << "\n";
+  std::cout << " total solve loop time: "
+            << dual_decomp->getTotalSolveLoopTime() << "\n";
   return EXIT_SUCCESS;
 }

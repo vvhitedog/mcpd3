@@ -16,11 +16,11 @@
 
 #pragma once
 
+#include <boost/functional/hash.hpp>
 #include <cassert>
+#include <queue>
 #include <string>
 #include <unordered_map>
-#include <boost/functional/hash.hpp>
-#include <queue>
 
 #include <graph/dimacs.h>
 #include <graph/partition.h>
@@ -52,30 +52,29 @@ public:
     create_work_directory(file_dir_prefix_);
   }
 
-  void setCut( const std::vector<bool> &cut ) {
-    cut_ = cut;
-  }
+  void setCut(const std::vector<bool> &cut) { cut_ = cut; }
 
   flow_type getCurrentCutValue() const {
     flow_type cut_value = 0;
-    for ( node_index_type inode = 0; inode < nnode_; ++inode ) {
+    for (node_index_type inode = 0; inode < nnode_; ++inode) {
       // 1. calculate arc contribution
       arc_index_type arc_start_offset = (*adjacency_offsets_)[inode];
-      arc_index_type arc_end_offset = (*adjacency_offsets_)[inode+1];
-      for ( arc_index_type iarc = arc_start_offset; iarc < arc_end_offset; ++iarc ) {
+      arc_index_type arc_end_offset = (*adjacency_offsets_)[inode + 1];
+      for (arc_index_type iarc = arc_start_offset; iarc < arc_end_offset;
+           ++iarc) {
         auto end_node = (*adjacency_nodes_)[iarc];
         auto arc_cap = (*arc_capacities_)[iarc];
-        if ( !cut_[inode] && cut_[end_node] ) {
+        if (!cut_[inode] && cut_[end_node]) {
           cut_value += arc_cap;
         }
       }
-      
+
       // 2. calculate terminal contribution
       auto terminal_cap = (*terminal_capacities_)[inode];
-      if ( terminal_cap > 0 && cut_[inode] ) {
+      if (terminal_cap > 0 && cut_[inode]) {
         cut_value += terminal_cap;
       }
-      if ( terminal_cap < 0 && !cut_[inode] ) {
+      if (terminal_cap < 0 && !cut_[inode]) {
         cut_value += -terminal_cap;
       }
     }
@@ -83,53 +82,54 @@ public:
   }
 
   void narrowBandDecode(const std::list<node_index_type> &seeds,
-      node_index_type max_distance = 14,
-      node_index_type node_budget = 100000){
+                        node_index_type max_distance = 14,
+                        node_index_type node_budget = 100000) {
 
     // 1. run bfs to get nodes within proximity of seeds
-    std::unordered_map<node_index_type,node_index_type> distance_map;
+    std::unordered_map<node_index_type, node_index_type> distance_map;
     std::unordered_set<node_index_type> visited;
     std::queue<node_index_type> to_visit;
     arc_index_type arcs_visited = 0;
 
-    for ( const auto &seed : seeds ) {
+    for (const auto &seed : seeds) {
       distance_map[seed] = 0;
       visited.insert(seed);
       to_visit.push(seed);
     }
 
-    while ( !to_visit.empty() ){
+    while (!to_visit.empty()) {
       auto current_node = to_visit.front();
       to_visit.pop();
       auto current_dist = distance_map[current_node];
-      if ( visited.size() > node_budget ) {
+      if (visited.size() > node_budget) {
         break; // going over the node budget, give up on decoding
       }
-      if ( current_dist >= max_distance ) {
+      if (current_dist >= max_distance) {
         continue;
       }
       arc_index_type arc_start_offset = (*adjacency_offsets_)[current_node];
-      arc_index_type arc_end_offset = (*adjacency_offsets_)[current_node+1];
-      for ( arc_index_type iarc = arc_start_offset; iarc < arc_end_offset; ++iarc, ++arcs_visited ) {
+      arc_index_type arc_end_offset = (*adjacency_offsets_)[current_node + 1];
+      for (arc_index_type iarc = arc_start_offset; iarc < arc_end_offset;
+           ++iarc, ++arcs_visited) {
         auto end_node = (*adjacency_nodes_)[iarc];
-        auto [_,success] = visited.insert(end_node);
-        if ( visited.size() > node_budget ) {
+        auto [_, success] = visited.insert(end_node);
+        if (visited.size() > node_budget) {
           break; // going over the node budget, give up on decoding
         }
-        if ( success ) { // already visited
+        if (success) { // already visited
           to_visit.push(end_node);
           distance_map[end_node] = current_dist + 1;
         }
       }
     }
-    if ( visited.size() > node_budget ) { 
-      return;  // went over node budget, give up on decoding
+    if (visited.size() > node_budget) {
+      return; // went over node budget, give up on decoding
     }
 
     // 2. remap indices
-    std::unordered_map<node_index_type,node_index_type> new_index;
+    std::unordered_map<node_index_type, node_index_type> new_index;
     node_index_type index = 0;
-    for ( const auto &node : visited ) {
+    for (const auto &node : visited) {
       new_index[node] = index++;
     }
     node_index_type node_count = visited.size();
@@ -137,49 +137,54 @@ public:
     // 3. create a subset maxflow graph
 
     // 3 a. gather arcs
-    std::unordered_map<std::pair<node_index_type,node_index_type>,
-      std::pair<cap_type,cap_type>,boost::hash<std::pair<node_index_type,node_index_type>> >
-      arc_to_capacity_map;
-    for ( const auto &start_node: visited ) {
+    std::unordered_map<std::pair<node_index_type, node_index_type>,
+                       std::pair<cap_type, cap_type>,
+                       boost::hash<std::pair<node_index_type, node_index_type>>>
+        arc_to_capacity_map;
+    for (const auto &start_node : visited) {
       arc_index_type arc_start_offset = (*adjacency_offsets_)[start_node];
-      arc_index_type arc_end_offset = (*adjacency_offsets_)[start_node+1];
-      for ( arc_index_type iarc = arc_start_offset; iarc < arc_end_offset; ++iarc ) {
+      arc_index_type arc_end_offset = (*adjacency_offsets_)[start_node + 1];
+      for (arc_index_type iarc = arc_start_offset; iarc < arc_end_offset;
+           ++iarc) {
         auto end_node = (*adjacency_nodes_)[iarc];
-        if ( visited.find(end_node) == visited.end() ) { // skip this arc
+        if (visited.find(end_node) == visited.end()) { // skip this arc
           continue;
         }
         auto arc_cap = (*arc_capacities_)[iarc];
-        if ( start_node > end_node ) {
-          auto key = std::make_pair(end_node,start_node);
+        if (start_node > end_node) {
+          auto key = std::make_pair(end_node, start_node);
           arc_to_capacity_map[key].second = arc_cap;
         } else {
-          auto key = std::make_pair(start_node,end_node);
+          auto key = std::make_pair(start_node, end_node);
           arc_to_capacity_map[key].first = arc_cap;
         }
       }
     }
 
     // 3 b. create maxflow graph and add arcs
-    MaxflowGraph maxflow_graph(node_count,arc_to_capacity_map.size());
+    MaxflowGraph maxflow_graph(node_count, arc_to_capacity_map.size());
     maxflow_graph.add_node(node_count);
-    for ( const auto &[st,caps] : arc_to_capacity_map ) {
-      const auto &[source,target] = st;
-      const auto &[forward_cap,backward_cap] = caps;
-      maxflow_graph.add_edge(new_index[source],new_index[target],forward_cap,backward_cap);
+    for (const auto &[st, caps] : arc_to_capacity_map) {
+      const auto &[source, target] = st;
+      const auto &[forward_cap, backward_cap] = caps;
+      maxflow_graph.add_edge(new_index[source], new_index[target], forward_cap,
+                             backward_cap);
     }
     arc_to_capacity_map.clear();
 
     // 3 c. create terminals nodes
-    for ( const auto &[node,distance] : distance_map ) {
-      if ( distance < max_distance ) {
+    for (const auto &[node, distance] : distance_map) {
+      if (distance < max_distance) {
         auto terminal_cap = (*terminal_capacities_)[node];
-        maxflow_graph.set_trcap(new_index[node],terminal_cap);
+        maxflow_graph.set_trcap(new_index[node], terminal_cap);
       } else {
-        if ( !cut_[node] ) {
-          maxflow_graph.set_trcap(new_index[node],std::numeric_limits<cap_type>::max()/2);
+        if (!cut_[node]) {
+          maxflow_graph.set_trcap(new_index[node],
+                                  std::numeric_limits<cap_type>::max() / 2);
         }
-        if ( cut_[node] ) {
-          maxflow_graph.set_trcap(new_index[node],-std::numeric_limits<cap_type>::max()/2);
+        if (cut_[node]) {
+          maxflow_graph.set_trcap(new_index[node],
+                                  -std::numeric_limits<cap_type>::max() / 2);
         }
       }
     }
@@ -188,10 +193,10 @@ public:
     maxflow_graph.maxflow();
 
     // 5. decode solution for visited nodes
-    for ( const auto &node : visited ) {
-      cut_[node] = maxflow_graph.what_segment(new_index[node]) == MaxflowGraph::SINK;
+    for (const auto &node : visited) {
+      cut_[node] =
+          maxflow_graph.what_segment(new_index[node]) == MaxflowGraph::SINK;
     }
-
   }
 
   template <typename SortedEdgesArray>
@@ -211,7 +216,7 @@ public:
     for (auto edge_it = sorted_edges.begin(); arc_processed_count < narc_;
          ++edge_it) {
       if (edge_it->source != current_node) {
-        for ( auto i = current_node; i < edge_it->source; ++i ) {
+        for (auto i = current_node; i < edge_it->source; ++i) {
           (*adjacency_offsets_)[i + 1] = arc_processed_count;
         }
         current_node = edge_it->source;
@@ -233,23 +238,30 @@ public:
 #ifdef HAVE_METIS
   void partitionWithMetis(node_index_type npartition) {
     {
-    MmapArray<idx_t> adjacency_offsets(nnode_+1,file_dir_prefix_ + "/adjacency_offsets_metis.mmap");
-    MmapArray<idx_t> adjacency_nodes(narc_,file_dir_prefix_ + "/adjacency_nodes_metis.mmap");
-    std::copy(adjacency_offsets_->begin(),adjacency_offsets_->end(),adjacency_offsets.begin());
-    std::copy(adjacency_nodes_->begin(),adjacency_nodes_->end(),adjacency_nodes.begin());
-    MmapArray<idx_t> partitions(nnode_,file_dir_prefix_ + "/partitions_metis.mmap");
+      MmapArray<idx_t> adjacency_offsets(
+          nnode_ + 1, file_dir_prefix_ + "/adjacency_offsets_metis.mmap");
+      MmapArray<idx_t> adjacency_nodes(
+          narc_, file_dir_prefix_ + "/adjacency_nodes_metis.mmap");
+      std::copy(adjacency_offsets_->begin(), adjacency_offsets_->end(),
+                adjacency_offsets.begin());
+      std::copy(adjacency_nodes_->begin(), adjacency_nodes_->end(),
+                adjacency_nodes.begin());
+      MmapArray<idx_t> partitions(nnode_,
+                                  file_dir_prefix_ + "/partitions_metis.mmap");
 
-    idx_t ncon = 1;
-    idx_t _nnode = nnode_;
-    idx_t _npart = npartition;
-    idx_t objval;
-    int ret = METIS_PartGraphKway(&_nnode, &ncon, adjacency_offsets.data(), adjacency_nodes.data(), nullptr,
-        nullptr, nullptr, &_npart, nullptr, nullptr,
-        nullptr, &objval, partitions.data());
+      idx_t ncon = 1;
+      idx_t _nnode = nnode_;
+      idx_t _npart = npartition;
+      idx_t objval;
+      int ret = METIS_PartGraphKway(&_nnode, &ncon, adjacency_offsets.data(),
+                                    adjacency_nodes.data(), nullptr, nullptr,
+                                    nullptr, &_npart, nullptr, nullptr, nullptr,
+                                    &objval, partitions.data());
 
-    parition_labels_ = std::make_unique<MmapArray<cap_type>>(
-        nnode_, file_dir_prefix_ + "/partition_labels.mmap");
-    std::copy(partitions.begin(),partitions.end(),parition_labels_->begin());
+      parition_labels_ = std::make_unique<MmapArray<cap_type>>(
+          nnode_, file_dir_prefix_ + "/partition_labels.mmap");
+      std::copy(partitions.begin(), partitions.end(),
+                parition_labels_->begin());
     }
 
     // clean up unused memmaps
@@ -272,9 +284,8 @@ private:
 
   std::vector<bool> cut_; // stored in memory due to small memory footprint
 
-
-  using MaxflowGraph =
-    Graph</*captype=*/cap_type, /*tcaptype=*/cap_type, /*flowtype=*/flow_type>;
+  using MaxflowGraph = Graph</*captype=*/cap_type, /*tcaptype=*/cap_type,
+                             /*flowtype=*/flow_type>;
 };
 
 template <typename node_index_type = int, typename arc_index_type = long,

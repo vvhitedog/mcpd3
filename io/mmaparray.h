@@ -16,76 +16,61 @@
 
 #pragma once
 
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <stdexcept>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <string>
 
 namespace mcpd3 {
 
-  template<typename T>
-  class MmapArray {
-    static_assert(std::is_pod<T>::value,"MmapArray only supports POD types");
-    public:
-      MmapArray(size_t num_elements, const std::string &filename):num_elements_(num_elements),
-      filename_(filename) {
-        file_descriptor_ = open(filename_.c_str(),O_CREAT|O_RDWR,FILE_MODE);
-        if ( file_descriptor_ == -1 ) {
-          throw std::runtime_error("failed to open file '" + filename_ + "'");
-        }
-        ftruncate(file_descriptor_, num_elements_*sizeof(T));
-        mem_map_ = reinterpret_cast<T*>(mmap(NULL,num_elements_*sizeof(T),PROT_READ|PROT_WRITE,MAP_SHARED,file_descriptor_,0));
-      }
+template <typename T> class MmapArray {
+  static_assert(std::is_pod<T>::value, "MmapArray only supports POD types");
 
-      ~MmapArray() {
-        munmap( mem_map_,sizeof(T)*num_elements_ );
-        close(file_descriptor_);
-      }
+public:
+  MmapArray(size_t num_elements, const std::string &filename)
+      : num_elements_(num_elements), filename_(filename) {
+    file_descriptor_ = open(filename_.c_str(), O_CREAT | O_RDWR, FILE_MODE);
+    if (file_descriptor_ == -1) {
+      throw std::runtime_error("failed to open file '" + filename_ + "'");
+    }
+    ftruncate(file_descriptor_, num_elements_ * sizeof(T));
+    mem_map_ = reinterpret_cast<T *>(mmap(NULL, num_elements_ * sizeof(T),
+                                          PROT_READ | PROT_WRITE, MAP_SHARED,
+                                          file_descriptor_, 0));
+  }
 
-      T& operator[] (size_t index) {
-        return mem_map_[index];
-      }
+  ~MmapArray() {
+    munmap(mem_map_, sizeof(T) * num_elements_);
+    close(file_descriptor_);
+  }
 
-      const T& operator[] (size_t index) const {
-        return mem_map_[index];
-      }
+  T &operator[](size_t index) { return mem_map_[index]; }
 
-      T* data() {
-        return mem_map_;
-      }
+  const T &operator[](size_t index) const { return mem_map_[index]; }
 
-      const T* data() const {
-        return mem_map_;
-      }
+  T *data() { return mem_map_; }
 
-      T* begin() {
-        return data();
-      }
+  const T *data() const { return mem_map_; }
 
-      const T* begin() const {
-        return data();
-      }
+  T *begin() { return data(); }
 
-      T* end() {
-        return data() + num_elements_;
-      }
+  const T *begin() const { return data(); }
 
-      const T* end() const {
-        return data() + num_elements_;
-      }
+  T *end() { return data() + num_elements_; }
 
-    private:
-      size_t num_elements_;
-      std::string filename_;
-      int file_descriptor_;
+  const T *end() const { return data() + num_elements_; }
 
-      T* mem_map_;
+private:
+  size_t num_elements_;
+  std::string filename_;
+  int file_descriptor_;
 
-      const mode_t FILE_MODE = 0666;
+  T *mem_map_;
 
-  };
-}
+  const mode_t FILE_MODE = 0666;
+};
+} // namespace mcpd3

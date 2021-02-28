@@ -251,7 +251,7 @@ public:
   //			g->maxflow(true, changed_list);
   //			G::node_id* ptr;
   //			for (ptr=changed_list->ScanFirst(); ptr;
-  //ptr=changed_list->ScanNext())
+  // ptr=changed_list->ScanNext())
   //			{
   //				G::node_id i = *ptr; assert(i>=0 && i<nodeNum);
   //				g->remove_from_changed_list(i);
