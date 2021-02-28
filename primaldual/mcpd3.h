@@ -113,9 +113,12 @@ public:
       }
       num_nodes_in_decoding++;
       if (dist[i] < rad) {
-        auto source_capacity = terminal_capacities_[2 * i + 0];
-        auto sink_capacity = terminal_capacities_[2 * i + 1];
-        maxflow_graph_.add_tweights(i, source_capacity, sink_capacity);
+        auto terminal_capacity = terminal_capacities_[i];
+        if ( terminal_capacity > 0 ) {
+          maxflow_graph_.add_tweights(i, terminal_capacity, 0);
+        } else {
+          maxflow_graph_.add_tweights(i, 0, -terminal_capacity);
+        }
       } else {
         if (x_[i] == 0) {
           maxflow_graph_.set_trcap(i, std::numeric_limits<int>::max() / 2);
@@ -148,10 +151,7 @@ public:
 
   template <int scale> void scaleProblem() {
     for (int i = 0; i < nnode_; ++i) {
-      auto &source_capacity = terminal_capacities_[2 * i + 0];
-      auto &sink_capacity = terminal_capacities_[2 * i + 1];
-      source_capacity *= scale;
-      sink_capacity *= scale;
+      terminal_capacities_[i] *= scale;
       auto &flow = d_flow_[i];
       flow *= scale;
     }
@@ -197,9 +197,12 @@ public:
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      maxflow_graph_.add_tweights(i, source_capacity, sink_capacity);
+      auto terminal_capacity = terminal_capacities_[i];
+      if ( terminal_capacity > 0 ) {
+        maxflow_graph_.add_tweights(i, terminal_capacity, 0);
+      } else {
+        maxflow_graph_.add_tweights(i, 0, -terminal_capacity);
+      }
     }
     auto maxflow = maxflow_graph_.maxflow();
     maxflow_graph_.reset();
@@ -245,9 +248,7 @@ public:
       if (node_balance[i] > 0) {
         maxflow += node_balance[i];
       }
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      maxflow += std::min(source_capacity, sink_capacity);
+      // TODO: the imbalance needs to be accounted for
     }
     return maxflow;
   }
@@ -319,12 +320,11 @@ private:
       }
     }
     for (int i = 0; i < nnode_; ++i) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      if (x_[i] == 0) {
-        mincut_value_ += sink_capacity;
-      } else {
-        mincut_value_ += source_capacity;
+      auto terminal_capacity = terminal_capacities_[i];
+      if (x_[i] == 0 && terminal_capacity < 0 ) {
+        mincut_value_ += -terminal_capacity;
+      } else if ( x_[i] == 1 && terminal_capacity > 0) {
+        mincut_value_ += terminal_capacity;
       }
     }
     // add dual decomposition node potential terms (when/if applicable)
@@ -357,8 +357,8 @@ private:
     return {pos, neg};
   }
 
-  int nodeGradient(int source_capacity, int sink_capacity, int flow) const {
-    return flow + source_capacity - sink_capacity;
+  int nodeGradient(int terminal_capacity, int flow) const {
+    return flow + terminal_capacity;
   }
 
   void initializeFlow() {
@@ -432,9 +432,7 @@ private:
   void updateNodePotentialsInitial() {
     // add mincut node potential terms
     for (int i = 0; i < nnode_; ++i) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       updateNodeTerminal(i, pos, false);
     }
     updateDualDecompositionNodePotentials();
@@ -443,16 +441,12 @@ private:
   void updateNodePotentialsIncremental() {
     // add mincut node potential terms
     for (const int i : incremental_mincut_nodes_) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       updateNodeTerminal(i, pos, false);
     }
     size_t cache_index = 0;
     for (const auto &[i, _] : dual_decomposition_constraints_vector_) {
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      auto pos = nodeGradient(source_capacity, sink_capacity, d_flow_[i]);
+      auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(i, pos, false);
     }
@@ -510,15 +504,12 @@ private:
       }
 
       // process terminals
-      auto source_capacity = terminal_capacities_[2 * i + 0];
-      auto sink_capacity = terminal_capacities_[2 * i + 1];
-      if (x_[i] == 0 && !(x_i_new == 0)) {
-        mincut_value_ += source_capacity;
-        mincut_value_ -= sink_capacity;
+      auto terminal_capacity = terminal_capacities_[i];
+      if (x_[i] == 0 && x_i_new == 1) {
+        mincut_value_ += terminal_capacity;
       }
-      if (x_[i] == 1 && !(x_i_new == 1)) {
-        mincut_value_ -= source_capacity;
-        mincut_value_ += sink_capacity;
+      if (x_[i] == 1 && x_i_new == 0) {
+        mincut_value_ -= terminal_capacity;
       }
 
       // processes each possible arc
@@ -653,6 +644,10 @@ private:
 
   void shrinkToFitDualDecompositionConstraints() {
     dual_decomposition_constraints_vector_.shrink_to_fit();
+    for ( auto &[_,constraint] : dual_decomposition_constraints_vector_ ) {
+      constraint.source_arc_references.shrink_to_fit();
+      constraint.target_arc_references.shrink_to_fit();
+    }
   }
 
   /**
@@ -685,8 +680,8 @@ private:
    * specific to dual decomposition
    */
   struct DualDecompositionConstraint {
-    std::list<DualDecompositionConstraintArcReference> source_arc_references;
-    std::list<DualDecompositionConstraintArcReference> target_arc_references;
+    std::vector<DualDecompositionConstraintArcReference> source_arc_references;
+    std::vector<DualDecompositionConstraintArcReference> target_arc_references;
   };
   std::vector<std::pair</*local_index=*/int, DualDecompositionConstraint>>
       dual_decomposition_constraints_vector_;

@@ -338,10 +338,7 @@ private:
      * step 2: add source and sink capacities of nodes
      */
     for (int i = 0; i < nnode_; ++i) {
-      int source_capacity = terminal_capacities_[2 * i + 0];
-      int sink_capacity = terminal_capacities_[2 * i + 1];
-      min_cut_sub_graphs_[partitions_[i]].insertTerminal(i, source_capacity,
-                                                         sink_capacity);
+      min_cut_sub_graphs_[partitions_[i]].insertTerminal(i,terminal_capacities_[i]);
     }
     /**
      * step 3: create solvers
@@ -473,12 +470,10 @@ private:
       graph.narc++;
     }
 
-    void insertTerminal(int global_index, int source_capacity,
-                        int sink_capacity) {
+    void insertTerminal(int global_index, int terminal_capacity) {
       int s = getOrInsertNode(global_index);
-      graph.terminal_capacities.resize(2 * graph.nnode, 0);
-      graph.terminal_capacities[2 * s + 0] = source_capacity;
-      graph.terminal_capacities[2 * s + 1] = sink_capacity;
+      graph.terminal_capacities.resize(graph.nnode, 0);
+      graph.terminal_capacities[s] = terminal_capacity;
     }
   };
 

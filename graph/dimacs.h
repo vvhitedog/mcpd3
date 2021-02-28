@@ -135,17 +135,30 @@ MinCutGraph read_dimacs(const std::string &filename) {
     }
   };
 
+  long imbalance = 0;
   auto term_op = [&](bool is_source, int n, int cap) {
     g.nnode = std::max(g.nnode,n+1);
-    g.terminal_capacities.resize(2 * (g.nnode), 0);
+    g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {
-      g.terminal_capacities[2 * n + 0] += cap;
+      auto old_cap = g.terminal_capacities[n];
+      if ( old_cap < 0 ) {
+        imbalance += std::min(-old_cap,cap);
+      }
+      g.terminal_capacities[n] += cap;
     } else {
-      g.terminal_capacities[2 * n + 1] += cap;
+      auto old_cap = g.terminal_capacities[n];
+      if ( old_cap > 0 ) {
+        imbalance += std::min(old_cap,cap);
+      }
+      g.terminal_capacities[n] -= cap;
     }
   };
 
   _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
+
+  if ( imbalance > 0 ) {
+    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance );
+  }
 
   // process arcs after the fact
   g.narc = 0;
@@ -160,7 +173,7 @@ MinCutGraph read_dimacs(const std::string &filename) {
       }
     }
   }
-  g.terminal_capacities.resize(2 * (g.nnode), 0); // ensure size
+  g.terminal_capacities.resize(g.nnode, 0); // ensure size
   g.arcs.shrink_to_fit();
   g.terminal_capacities.shrink_to_fit();
   g.arc_capacities.shrink_to_fit();
