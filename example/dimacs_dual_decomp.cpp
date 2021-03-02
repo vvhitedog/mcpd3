@@ -41,12 +41,19 @@ int main(int argc, char *argv[]) {
       [&] { min_cut_graph_data = mcpd3::read_dimacs(argv[1]); });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
 
+  for ( auto &cap : min_cut_graph_data.arc_capacities ) {
+    cap *= 10000;
+  }
+  for ( auto &cap : min_cut_graph_data.terminal_capacities ) {
+    cap *= 10000;
+  }
+
   auto primal_graph2 = mcpd3::read_dimacs_to_csr(argv[1]);
 
   auto primal_decoder =
       [&](const std::vector<bool> &cut, double max_lower_bound,
           const std::list<int> &disagreeing_global_indices) -> bool {
-    return false;
+    //return false;
     primal_graph2.setCut(cut);
     // auto cut_value2 = primal_graph2.getCurrentCutValue();
     // std::cout << "primal cut value2: " << cut_value2 << "\n";

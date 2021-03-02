@@ -82,7 +82,7 @@ public:
   }
 
   void narrowBandDecode(const std::list<node_index_type> &seeds,
-                        node_index_type max_distance = 14,
+                        node_index_type max_distance = 10,
                         node_index_type node_budget = 100000) {
 
     // 1. run bfs to get nodes within proximity of seeds

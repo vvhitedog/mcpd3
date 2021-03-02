@@ -24,29 +24,15 @@
 #include <set>
 #include <unordered_map>
 
+#include <measure/timer.h>
 #include <decomp/constraint.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
 #include <primaldual/mcpd3.h>
 
-namespace mcpd3 {
 
-/**
- * @brief Time a lambda function.
- *
- * @param lambda - the function to execute and time
- *
- * @return the number of microseconds elapsed while executing lambda
- */
-template <typename Lambda>
-std::chrono::microseconds time_lambda(Lambda lambda) {
-  auto start_time = std::chrono::high_resolution_clock::now();
-  lambda();
-  auto end_time = std::chrono::high_resolution_clock::now();
-  return std::chrono::duration_cast<std::chrono::microseconds>(end_time -
-                                                               start_time);
-}
+namespace mcpd3 {
 
 class DualDecomposition {
 public:
@@ -141,10 +127,11 @@ public:
   template <bool attempt_decoding, typename Decoder>
   void solve(Decoder decoder) {
     const int scaling_factor = 10;
-    const int num_optimization_scales = 5;
+    const int num_optimization_scales = 15;
     const int max_cycle_count = 2;
     const int max_iteration_count = 10000;
-    const int step_size = 1; // XXX: unused consider removing
+    int step_size = 10000; // XXX: unused consider removing
+    scale_ = step_size;
     for (int iscale = 0; iscale < num_optimization_scales; ++iscale) {
       OptimizationStatus status;
       auto run_opt_scale_time = time_lambda([&] {
@@ -156,15 +143,17 @@ public:
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
       }
-      if (attempt_decoding) { // decoding requested
+      if (attempt_decoding && iscale > 0) { // decoding requested
+        runPrimalSolutionDecodingStep();
         if (decoder(primal_solution_, max_lower_bound_,
                     disagreeing_global_indices_)) {
           break;
         }
       }
-      auto rescale_problem_time =
-          time_lambda([&] { scaleProblem<scaling_factor>(); });
-      printf("rescale problem time: %lums\n", rescale_problem_time.count());
+      step_size /= 10;
+      //auto rescale_problem_time =
+      //    time_lambda([&] { scaleProblem<scaling_factor>(); });
+      //printf("rescale problem time: %lums\n", rescale_problem_time.count());
     }
   }
 
@@ -185,7 +174,9 @@ public:
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(
         num_stats_in_group);
     CycleCountingList dual_cycle_list;
-    long max_lower_bound = 0;
+    long max_lower_bound = std::numeric_limits<long>::min();
+    int last_max_i = 0;
+    const int iter_since_last_max = 15;
     for (int i = 0; i < nstep; ++i) {
 
       std::atomic<long> lower_bound = 0;
@@ -199,16 +190,29 @@ public:
         thread_pool_.wait();
       });
       solve_loop_time_ += solve_loop_time.count();
-      max_lower_bound =
-          std::max(static_cast<long>(lower_bound), max_lower_bound);
 
+      auto lagrange_update_time = time_lambda([&] {
       disagreeing_global_indices_ =
           runLagrangeMultipliersUpdateStep(step_size, use_momentum);
-      printf("lower_bound : %lf num_disagreeing : %ld\n",
-             double(lower_bound) / scale_, disagreeing_global_indices_.size());
+          });
+
+      printf("lower_bound : %8.6lf num_disagreeing : %6ld solve_loop_time: %8ldms lagrange_update_time: %8ldms\n",
+             double(lower_bound) / scale_, disagreeing_global_indices_.size(),solve_loop_time.count(),lagrange_update_time.count());
 
       max_lower_bound_ =
           std::max<double>(max_lower_bound_, double(lower_bound) / scale_);
+
+      if ( lower_bound > max_lower_bound ) {
+        max_lower_bound = lower_bound;
+        if ( i - last_max_i >= iter_since_last_max ) {
+          printf("breaking because >= %d iters since last max\n", iter_since_last_max);
+          opt_status = NO_FURTHER_PROGRESS;
+          break;
+        }
+        last_max_i = i;
+      }
+
+
 
       lower_bound_group_stats.addValue(lower_bound);
       if (lower_bound_group_stats.areGroupsPopulated()) {
@@ -228,15 +232,15 @@ public:
         break;
       }
 
-      dual_cycle_list.addNode(
-          getDualSolutionHash(disagreeing_global_indices_, lower_bound));
-      if (dual_cycle_list.getMaxCycleCount() >
-          max_cycle_count) { // at least one set of configurations likely
-                             // repeated more than a specified number of times
-        printf("breaking because cycle detected\n");
-        opt_status = NO_FURTHER_PROGRESS;
-        break;
-      }
+      //dual_cycle_list.addNode(
+      //    getDualSolutionHash(disagreeing_global_indices_, lower_bound));
+      //if (dual_cycle_list.getMaxCycleCount() >
+      //    max_cycle_count) { // at least one set of configurations likely
+      //                       // repeated more than a specified number of times
+      //  printf("breaking because cycle detected\n");
+      //  opt_status = NO_FURTHER_PROGRESS;
+      //  break;
+      //}
     }
     printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
     return opt_status;

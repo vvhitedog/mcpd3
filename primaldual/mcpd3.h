@@ -26,6 +26,7 @@
 #include <decomp/constraint.h>
 #include <graph/mcgraph.h>
 #include <maxflow/graph.h>
+#include <measure/timer.h>
 
 namespace mcpd3 {
 
@@ -212,9 +213,12 @@ public:
 
   void solve() {
     if (is_first_iteration_) {
+      auto init_time = time_lambda([&]{
       shrinkToFitDualDecompositionConstraints(); // memory optimization
       initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
                         // complementary slackness conditions
+      });
+      printf("init_time: %ldms\n",init_time.count());
     }
     cacheLagrangeMultipliers(); // optimization
     updateNodePotentials();     // finds which node based lagrange multiplier
@@ -438,11 +442,18 @@ private:
   void updateNodePotentialsIncremental() {
     // add mincut node potential terms
     for (const int i : incremental_mincut_nodes_) {
+      if ( dual_decomposition_local_indices_set_.find(i) != dual_decomposition_local_indices_set_.end() ){
+        continue; // will be handled separately below
+      }
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       updateNodeTerminal(i, pos, false);
     }
     size_t cache_index = 0;
     for (const auto &i : dual_decomposition_local_indices_) {
+      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] ) {
+        cache_index++;
+        continue;
+      }
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(i, pos, false);
@@ -453,7 +464,7 @@ private:
     // add dual decomposition node potential terms (when/if applicable)
     size_t cache_index = 0;
     for (const auto &index : dual_decomposition_local_indices_) {
-      int pos = cached_lagrange_multipliers_[cache_index++];
+      auto pos = cached_lagrange_multipliers_[cache_index++];
       updateNodeTerminal(index, pos, true);
     }
   }
@@ -480,10 +491,13 @@ private:
           maxflow_graph_.what_segment(index) == MaxflowGraph::SINK ? 1 : 0;
       int lagrange_multiplier_term = cached_lagrange_multipliers_[cache_index];
       int last_lagrange_multiplier_term =
-          cached_last_lagrange_multipliers_[cache_index++];
+          cached_last_lagrange_multipliers_[cache_index];
       if (last_lagrange_multiplier_term == lagrange_multiplier_term &&
           x_i_new == x_[index]) {
+        cache_index++;
         continue;
+      } else {
+        cache_index++;
       }
       mincut_value_ -= last_lagrange_multiplier_term * (x_[index]);
       mincut_value_ += lagrange_multiplier_term * (x_i_new);
@@ -647,6 +661,9 @@ private:
       constraint.source_arc_references.shrink_to_fit();
       constraint.target_arc_references.shrink_to_fit();
     }
+    for ( const auto &i : dual_decomposition_local_indices_ ) {
+      dual_decomposition_local_indices_set_.insert(i);
+    }
   }
 
   /**
@@ -683,6 +700,7 @@ private:
     std::vector<DualDecompositionConstraintArcReference> target_arc_references;
   };
   std::vector<int> dual_decomposition_local_indices_;
+  std::unordered_set<int> dual_decomposition_local_indices_set_;
   std::vector<DualDecompositionConstraint> dual_decomposition_constraints_;
 
   std::vector<int> cached_lagrange_multipliers_;
