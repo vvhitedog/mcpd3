@@ -23,6 +23,7 @@
 #include <queue>
 #include <set>
 #include <unordered_map>
+#include <numeric>
 
 #include <measure/timer.h>
 #include <decomp/constraint.h>
@@ -127,7 +128,7 @@ public:
   template <bool attempt_decoding, typename Decoder>
   void solve(Decoder decoder) {
     const int scaling_factor = 10;
-    const int num_optimization_scales = 15;
+    const int num_optimization_scales = 5;
     const int max_cycle_count = 2;
     const int max_iteration_count = 10000;
     int step_size = 10000; // XXX: unused consider removing
@@ -176,7 +177,11 @@ public:
     CycleCountingList dual_cycle_list;
     long max_lower_bound = std::numeric_limits<long>::min();
     int last_max_i = 0;
-    const int iter_since_last_max = 15;
+    const int iter_since_last_max = 10;
+    for (auto &solver : solvers_) {
+      int regularization_str = step_size <= 10 ? step_size : 0;
+      solver->setRegularizationStrength(regularization_str);
+    }
     for (int i = 0; i < nstep; ++i) {
 
       std::atomic<long> lower_bound = 0;
@@ -211,8 +216,6 @@ public:
         }
         last_max_i = i;
       }
-
-
 
       lower_bound_group_stats.addValue(lower_bound);
       if (lower_bound_group_stats.areGroupsPopulated()) {
@@ -358,6 +361,7 @@ private:
      * induced on each constrained node
      */
     std::set<int> constrained_nodes_partition_counts;
+    std::vector<int> constrained_nodes_count_in_each_partition(npartition_,0);
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
@@ -390,6 +394,8 @@ private:
               arc_reference);
           solvers_[partition_target]->addTargetDualDecompositionConstraint(
               arc_reference);
+          constrained_nodes_count_in_each_partition[partition_source]++;
+          constrained_nodes_count_in_each_partition[partition_target]++;
         }
       }
       constrained_nodes_partition_counts.insert(partitions.size());
@@ -400,6 +406,14 @@ private:
       printf("%d,", count);
     }
     printf("\n");
+    printf("max count of constrainted nodes in any one partition: %d\n",
+        *std::max_element(constrained_nodes_count_in_each_partition.begin(),
+          constrained_nodes_count_in_each_partition.end()));
+    printf("mean count of constrainted nodes in any one partition: %lf\n",
+           std::accumulate(constrained_nodes_count_in_each_partition.begin(),
+                           constrained_nodes_count_in_each_partition.end(), 0) /
+               (static_cast<double>(
+                   constrained_nodes_count_in_each_partition.size())));
     /**
      * step 5: create a min cut problem from the original problem to evaluate
      * the primal objective value

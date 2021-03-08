@@ -185,6 +185,10 @@ public:
     is_first_iteration_of_new_scale_ = true;
   }
 
+  void setRegularizationStrength(int str) {
+    regularization_str_ = str;
+  }
+
   long maxflow() {
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
@@ -449,6 +453,7 @@ private:
       updateNodeTerminal(i, pos, false);
     }
     size_t cache_index = 0;
+    int regularization_budget = 0;
     for (const auto &i : dual_decomposition_local_indices_) {
       if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] ) {
         cache_index++;
@@ -456,7 +461,14 @@ private:
       }
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
+      if ( x_[i] ) { // only add a regularization term if needed
+        pos += regularization_str_;
+        regularization_budget += regularization_str_;
+      }
       updateNodeTerminal(i, pos, false);
+    }
+    if ( regularization_budget > 10000 ) {
+      printf("warning: regularization_budget is exceeding 10000, the hardcoded maximum scale, lower bound constraint may not be enforced.\n");
     }
   }
 
@@ -465,6 +477,7 @@ private:
     size_t cache_index = 0;
     for (const auto &index : dual_decomposition_local_indices_) {
       auto pos = cached_lagrange_multipliers_[cache_index++];
+      //pos += regularization_str_; // XXX: this is only used at first scale, regularization_str_ should always be zero
       updateNodeTerminal(index, pos, true);
     }
   }
@@ -705,6 +718,8 @@ private:
 
   std::vector<int> cached_lagrange_multipliers_;
   std::vector<int> cached_last_lagrange_multipliers_;
+
+  int regularization_str_;
 };
 
 } // namespace mcpd3
