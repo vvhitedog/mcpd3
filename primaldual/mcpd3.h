@@ -40,7 +40,10 @@ public:
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
         d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
-        maxflow_changed_list_(128) {
+        maxflow_changed_list_(128), regularization_str_(0),
+        last_regularization_budget_(0), last_regularization_contribution_(0),
+        last_regularization_anchor_sink_count_(0),
+        last_regularization_active_sink_count_(0) {
     initializeMaxflowGraph();
   }
 
@@ -262,6 +265,17 @@ public:
   }
 
   long getMinCutValue() const { return mincut_value_; }
+  int getRegularizationStrength() const { return regularization_str_; }
+  long getLastRegularizationBudget() const { return last_regularization_budget_; }
+  long getLastRegularizationContribution() const {
+    return last_regularization_contribution_;
+  }
+  long getLastRegularizationAnchorSinkCount() const {
+    return last_regularization_anchor_sink_count_;
+  }
+  long getLastRegularizationActiveSinkCount() const {
+    return last_regularization_active_sink_count_;
+  }
 
   void addSourceDualDecompositionConstraint(
       DualDecompositionConstraintArcReference arc_reference) {
@@ -444,6 +458,10 @@ private:
   }
 
   void updateNodePotentialsIncremental() {
+    last_regularization_budget_ = 0;
+    last_regularization_anchor_sink_count_ = 0;
+    last_regularization_anchor_sink_.assign(
+        dual_decomposition_local_indices_.size(), 0);
     // add mincut node potential terms
     for (const int i : incremental_mincut_nodes_) {
       if ( dual_decomposition_local_indices_set_.find(i) != dual_decomposition_local_indices_set_.end() ){
@@ -455,15 +473,18 @@ private:
     size_t cache_index = 0;
     int regularization_budget = 0;
     for (const auto &i : dual_decomposition_local_indices_) {
-      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] ) {
+      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] && regularization_str_ == 0 ) {
         cache_index++;
         continue;
       }
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
-      if ( x_[i] ) { // only add a regularization term if needed
+      if ( regularization_str_ != 0 && x_[i] ) { // only add a regularization term if needed
         pos += regularization_str_;
         regularization_budget += regularization_str_;
+        last_regularization_budget_ += regularization_str_;
+        last_regularization_anchor_sink_count_++;
+        last_regularization_anchor_sink_[cache_index - 1] = 1;
       }
       updateNodeTerminal(i, pos, false);
     }
@@ -487,6 +508,23 @@ private:
       updateMinCutInitial();
     } else {
       updateMinCutIncremental();
+    }
+    updateRegularizationContribution();
+  }
+
+  void updateRegularizationContribution() {
+    last_regularization_contribution_ = 0;
+    last_regularization_active_sink_count_ = 0;
+    if (regularization_str_ == 0 ||
+        last_regularization_anchor_sink_.empty()) {
+      return;
+    }
+    for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
+      const int local_index = dual_decomposition_local_indices_[i];
+      if (last_regularization_anchor_sink_[i] && x_[local_index]) {
+        last_regularization_contribution_ += regularization_str_;
+        last_regularization_active_sink_count_++;
+      }
     }
   }
 
@@ -720,6 +758,11 @@ private:
   std::vector<int> cached_last_lagrange_multipliers_;
 
   int regularization_str_;
+  long last_regularization_budget_ = 0;
+  long last_regularization_contribution_ = 0;
+  long last_regularization_anchor_sink_count_ = 0;
+  long last_regularization_active_sink_count_ = 0;
+  std::vector<unsigned char> last_regularization_anchor_sink_;
 };
 
 } // namespace mcpd3
