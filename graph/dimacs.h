@@ -236,4 +236,205 @@ MinCutGraph read_dimacs(const std::string &filename) {
   return std::move(g);
 }
 
+MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
+  const int line_length = 1024;
+  char line[line_length];
+  int declared_nodes = 0;
+  int declared_arcs = 0;
+  int source = -1;
+  int sink = -1;
+
+  {
+    FILE *stream = fopen(filename.c_str(), "r");
+    if (!stream) {
+      throw std::runtime_error("failed to open file for reading: " + filename);
+    }
+    while (fgets(line, line_length, stream)) {
+      switch (*line) {
+      case 'p': {
+        const char *p = line + 1;
+        p = _dimacs_implementation::skip_token(p); // max
+        if (!_dimacs_implementation::parse_int_token(p, declared_nodes) ||
+            !_dimacs_implementation::parse_int_token(p, declared_arcs)) {
+          fclose(stream);
+          throw std::runtime_error("malformed p line in DIMACS file: " +
+                                   filename);
+        }
+        break;
+      }
+      case 'n': {
+        int node = 0;
+        char terminal = '\0';
+        const char *p = line + 1;
+        if (!_dimacs_implementation::parse_int_token(p, node) ||
+            !_dimacs_implementation::parse_char_token(p, terminal)) {
+          fclose(stream);
+          throw std::runtime_error("malformed n line in DIMACS file: " +
+                                   filename);
+        }
+        if (terminal == 's') {
+          source = node;
+        } else if (terminal == 't') {
+          sink = node;
+        }
+        break;
+      }
+      default:
+        break;
+      }
+      if (declared_nodes > 0 && declared_arcs > 0 && source > 0 && sink > 0) {
+        break;
+      }
+    }
+    fclose(stream);
+  }
+
+  if (declared_nodes <= 0 || declared_arcs <= 0 || source <= 0 || sink <= 0) {
+    throw std::runtime_error("missing DIMACS header/source/sink in file: " +
+                             filename);
+  }
+
+  long internal_pair_count = 0;
+  long terminal_arc_count = 0;
+  bool has_pending = false;
+  int pending_s = 0;
+  int pending_t = 0;
+  int pending_cap = 0;
+
+  {
+    FILE *stream = fopen(filename.c_str(), "r");
+    if (!stream) {
+      throw std::runtime_error("failed to open file for reading: " + filename);
+    }
+    while (fgets(line, line_length, stream)) {
+      if (*line != 'a') {
+        continue;
+      }
+      int s = 0;
+      int t = 0;
+      int cap = 0;
+      const char *p = line + 1;
+      if (!_dimacs_implementation::parse_int_token(p, s) ||
+          !_dimacs_implementation::parse_int_token(p, t) ||
+          !_dimacs_implementation::parse_int_token(p, cap)) {
+        fclose(stream);
+        throw std::runtime_error("malformed a line in DIMACS file: " +
+                                 filename);
+      }
+      if (t == source || s == sink) {
+        fclose(stream);
+        throw std::runtime_error(
+            "DIMACS source/sink appears in invalid arc orientation: " +
+            filename);
+      }
+      const bool terminal_arc = (s == source || t == sink);
+      if (terminal_arc) {
+        if (has_pending) {
+          fclose(stream);
+          throw std::runtime_error(
+              "terminal arc encountered between an internal arc and its "
+              "adjacent reverse arc in DIMACS file: " +
+              filename);
+        }
+        ++terminal_arc_count;
+        continue;
+      }
+      if (!has_pending) {
+        pending_s = s;
+        pending_t = t;
+        pending_cap = cap;
+        has_pending = true;
+      } else {
+        if (s != pending_t || t != pending_s) {
+          fclose(stream);
+          throw std::runtime_error(
+              "non-terminal arcs are not adjacent reverse pairs in DIMACS "
+              "file: " +
+              filename);
+        }
+        (void)pending_cap;
+        ++internal_pair_count;
+        has_pending = false;
+      }
+    }
+    fclose(stream);
+  }
+  if (has_pending) {
+    throw std::runtime_error("DIMACS file ended with an unmatched internal arc: " +
+                             filename);
+  }
+
+  MinCutGraph g;
+  g.nnode = declared_nodes - 2;
+  g.narc = static_cast<int>(internal_pair_count);
+  g.arcs.reserve(static_cast<size_t>(2) * internal_pair_count);
+  g.arc_capacities.reserve(static_cast<size_t>(2) * internal_pair_count);
+  g.terminal_capacities.resize(g.nnode, 0);
+
+  long imbalance = 0;
+  has_pending = false;
+  FILE *stream = fopen(filename.c_str(), "r");
+  if (!stream) {
+    throw std::runtime_error("failed to open file for reading: " + filename);
+  }
+  while (fgets(line, line_length, stream)) {
+    if (*line != 'a') {
+      continue;
+    }
+    int s = 0;
+    int t = 0;
+    int cap = 0;
+    const char *p = line + 1;
+    if (!_dimacs_implementation::parse_int_token(p, s) ||
+        !_dimacs_implementation::parse_int_token(p, t) ||
+        !_dimacs_implementation::parse_int_token(p, cap)) {
+      fclose(stream);
+      throw std::runtime_error("malformed a line in DIMACS file: " + filename);
+    }
+    const bool terminal_arc = (s == source || t == sink);
+    if (terminal_arc) {
+      const int n = (s == source)
+                        ? _dimacs_implementation::remap_index(t, source, sink)
+                        : _dimacs_implementation::remap_index(s, source, sink);
+      if (s == source) {
+        auto old_cap = g.terminal_capacities[n];
+        if (old_cap < 0) {
+          imbalance += std::min(-old_cap, cap);
+        }
+        g.terminal_capacities[n] += cap;
+      } else if (t == sink) {
+        auto old_cap = g.terminal_capacities[n];
+        if (old_cap > 0) {
+          imbalance += std::min(old_cap, cap);
+        }
+        g.terminal_capacities[n] -= cap;
+      }
+      continue;
+    }
+
+    if (!has_pending) {
+      pending_s = s;
+      pending_t = t;
+      pending_cap = cap;
+      has_pending = true;
+    } else {
+      const int remapped_s =
+          _dimacs_implementation::remap_index(pending_s, source, sink);
+      const int remapped_t =
+          _dimacs_implementation::remap_index(pending_t, source, sink);
+      g.arcs.push_back(remapped_s);
+      g.arcs.push_back(remapped_t);
+      g.arc_capacities.push_back(pending_cap);
+      g.arc_capacities.push_back(cap);
+      has_pending = false;
+    }
+  }
+  fclose(stream);
+
+  if (imbalance > 0) {
+    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
+  }
+  return std::move(g);
+}
+
 } // namespace mcpd3

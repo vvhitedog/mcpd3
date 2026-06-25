@@ -24,8 +24,10 @@
 #include <graph/csrgraph.h>
 #include <graph/dimacs.h>
 #include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -49,6 +51,7 @@ int main(int argc, char *argv[]) {
 
   int npartition = 10;
   std::string dimacs_path;
+  bool stream_symmetric_input = false;
   mcpd3::DualDecompositionOptions options;
   if (argc < 2) {
     std::cout << "usage: " << argv[0]
@@ -91,6 +94,8 @@ int main(int argc, char *argv[]) {
       options.track_primal_upper_bound = false;
     } else if (arg == "--quiet") {
       options.verbose = false;
+    } else if (arg == "--stream-symmetric-input") {
+      stream_symmetric_input = true;
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--min-step")) != "") {
       options.min_step_size = std::atol(value.c_str());
@@ -119,7 +124,12 @@ int main(int argc, char *argv[]) {
   }
   mcpd3::MinCutGraph min_cut_graph_data;
   auto read_graph_mem = mcpd3::get_resident_memory_usage(
-      [&] { min_cut_graph_data = mcpd3::read_dimacs(dimacs_path); });
+      [&] {
+        min_cut_graph_data = stream_symmetric_input
+                                 ? mcpd3::read_dimacs_symmetric_streaming(
+                                       dimacs_path)
+                                 : mcpd3::read_dimacs(dimacs_path);
+      });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
 
   for ( auto &cap : min_cut_graph_data.arc_capacities ) {

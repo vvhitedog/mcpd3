@@ -71,8 +71,14 @@ public:
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)),
-        original_arcs_(arcs_), original_arc_capacities_(arc_capacities_),
-        original_terminal_capacities_(terminal_capacities_),
+        original_arcs_(options.track_primal_upper_bound ? arcs_
+                                                        : std::vector<int>()),
+        original_arc_capacities_(options.track_primal_upper_bound
+                                     ? arc_capacities_
+                                     : std::vector<int>()),
+        original_terminal_capacities_(options.track_primal_upper_bound
+                                          ? terminal_capacities_
+                                          : std::vector<int>()),
         min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
         options_(options),
         thread_pool_(
@@ -135,8 +141,10 @@ public:
     for (int i = 0; i < npartition_; ++i) {
       const auto &min_cut_sub_graph = min_cut_sub_graphs_[i];
       const auto &solver = solvers_[i];
-      for (const auto &[global_index, local_index] :
-           min_cut_sub_graph.global_to_local_map) {
+      for (int local_index = 0;
+           local_index < static_cast<int>(min_cut_sub_graph.local_to_global.size());
+           ++local_index) {
+        const int global_index = min_cut_sub_graph.local_to_global[local_index];
         primal_solution_[global_index] = solver->getMinCutSolution(local_index);
       }
     }
@@ -595,8 +603,10 @@ private:
     for (int i = 0; i < npartition_; ++i) {
       const auto &min_cut_sub_graph = min_cut_sub_graphs_[i];
       const auto &solver = solvers_[i];
-      for (const auto &[global_index, local_index] :
-           min_cut_sub_graph.global_to_local_map) {
+      for (int local_index = 0;
+           local_index < static_cast<int>(min_cut_sub_graph.local_to_global.size());
+           ++local_index) {
+        const int global_index = min_cut_sub_graph.local_to_global[local_index];
         ++vote_count[global_index];
         sink_vote_count[global_index] +=
             solver->getMinCutSolution(local_index) ? 1 : 0;
@@ -629,6 +639,9 @@ private:
 #else
     partitions_ = basic_graph_partition(npartition_, narc_, nnode_, arcs_);
 #endif
+    for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
+      min_cut_sub_graph.initializeMapping(nnode_);
+    }
     /**
      * step 1: distribute all arcs into one and only one sub graph
      */
@@ -651,13 +664,25 @@ private:
         constrained_nodes[t].insert(arc_partition);
       }
     }
+    arcs_.clear();
+    arcs_.shrink_to_fit();
+    arc_capacities_.clear();
+    arc_capacities_.shrink_to_fit();
     /**
      * step 2: add source and sink capacities of nodes
      */
     for (int i = 0; i < nnode_; ++i) {
+      if (terminal_capacities_[i] == 0) {
+        continue;
+      }
       min_cut_sub_graphs_[partitions_[i]].insertTerminal(
           i, terminal_capacities_[i]);
     }
+    for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
+      min_cut_sub_graph.finalizeTerminals();
+    }
+    terminal_capacities_.clear();
+    terminal_capacities_.shrink_to_fit();
     /**
      * step 3: create solvers
      */
@@ -709,7 +734,15 @@ private:
       }
       constrained_nodes_partition_counts.insert(partitions.size());
     }
+    constrained_nodes.clear();
     constraint_arc_map_.shrink_to_fit();
+    if (!options_.track_primal_upper_bound) {
+      for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
+        min_cut_sub_graph.releaseConstructionMaps();
+      }
+    }
+    partitions_.clear();
+    partitions_.shrink_to_fit();
     printf("partition counts: ");
     for (const auto &count : constrained_nodes_partition_counts) {
       printf("%d,", count);
@@ -731,12 +764,6 @@ private:
     //   std::move(arcs_),
     //   std::move(arc_capacities_),
     //   std::move(terminal_capacities_));
-    arcs_.clear();
-    arcs_.shrink_to_fit();
-    arc_capacities_.clear();
-    arc_capacities_.shrink_to_fit();
-    terminal_capacities_.clear();
-    terminal_capacities_.shrink_to_fit();
   }
 
   /**
@@ -765,30 +792,39 @@ private:
 
   struct MinCutSubGraph {
     MinCutGraph graph;
-    std::unordered_map</*global_index=*/int, /*local_index=*/int>
-        global_to_local_map;
+    std::vector</*local_index -> global_index*/ int> local_to_global;
+    std::vector</*global_index -> local_index*/ int> global_to_local_map;
 
     MinCutSubGraph() {
       graph.nnode = 0;
       graph.narc = 0;
     }
 
+    void initializeMapping(int global_node_count) {
+      global_to_local_map.assign(global_node_count, -1);
+      local_to_global.clear();
+    }
+
     int getOrInsertNode(int global_index) {
-      auto find_iter = global_to_local_map.find(global_index);
-      if (find_iter == global_to_local_map.end()) {
-        auto [insert_iter, exists] =
-            global_to_local_map.insert({global_index, graph.nnode++});
-        return insert_iter->second;
+      if (global_index < 0 ||
+          global_index >= static_cast<int>(global_to_local_map.size())) {
+        throw std::runtime_error("global node index out of range");
       }
-      return find_iter->second;
+      int &local_index = global_to_local_map[global_index];
+      if (local_index < 0) {
+        local_index = graph.nnode++;
+        local_to_global.push_back(global_index);
+      }
+      return local_index;
     }
 
     int getNode(int global_index) const {
-      auto find_iter = global_to_local_map.find(global_index);
-      if (find_iter == global_to_local_map.end()) {
+      if (global_index < 0 ||
+          global_index >= static_cast<int>(global_to_local_map.size()) ||
+          global_to_local_map[global_index] < 0) {
         throw std::runtime_error("Node not found");
       }
-      return find_iter->second;
+      return global_to_local_map[global_index];
     }
 
     void insertArc(int global_source_index, int global_target_index,
@@ -804,8 +840,21 @@ private:
 
     void insertTerminal(int global_index, int terminal_capacity) {
       int s = getOrInsertNode(global_index);
-      graph.terminal_capacities.resize(graph.nnode, 0);
+      if (static_cast<int>(graph.terminal_capacities.size()) < graph.nnode) {
+        graph.terminal_capacities.resize(graph.nnode, 0);
+      }
       graph.terminal_capacities[s] = terminal_capacity;
+    }
+
+    void finalizeTerminals() {
+      graph.terminal_capacities.resize(graph.nnode, 0);
+    }
+
+    void releaseConstructionMaps() {
+      local_to_global.clear();
+      local_to_global.shrink_to_fit();
+      global_to_local_map.clear();
+      global_to_local_map.shrink_to_fit();
     }
   };
 
