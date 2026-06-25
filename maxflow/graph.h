@@ -321,6 +321,12 @@ private:
       *node_max; // node_last = nodes+node_num, node_max = nodes+node_num_max;
   arc *arcs, *arc_last,
       *arc_max; // arc_last = arcs+2*edge_num, arc_max = arcs+2*edge_num_max;
+  bool nodes_mmap_backed;
+  bool arcs_mmap_backed;
+  int nodes_mmap_fd;
+  int arcs_mmap_fd;
+  size_t nodes_mmap_bytes;
+  size_t arcs_mmap_bytes;
 
   int node_num;
 

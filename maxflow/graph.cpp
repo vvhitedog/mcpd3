@@ -1,9 +1,16 @@
 /* graph.cpp */
 
 #include "graph.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /*
         special constants for node->parent. Duplicated in maxflow.cpp, both
@@ -12,17 +19,76 @@
 #define TERMINAL ((arc *)1) /* to terminal */
 #define ORPHAN ((arc *)2)   /* orphan */
 
+namespace {
+
+void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
+                        bool &is_mmap_backed) {
+  fd = -1;
+  is_mmap_backed = false;
+  const char *mmap_dir = getenv("MCPD3_BK_MMAP_DIR");
+  if (!mmap_dir || mmap_dir[0] == '\0') {
+    return malloc(bytes);
+  }
+
+  std::string pattern = std::string(mmap_dir) + "/mcpd3_bk_" + kind + "_XXXXXX";
+  fd = mkstemp(pattern.data());
+  if (fd == -1) {
+    fprintf(stderr, "failed to create BK mmap file %s: %s\n", pattern.c_str(),
+            strerror(errno));
+    return nullptr;
+  }
+  unlink(pattern.c_str());
+  if (ftruncate(fd, bytes) != 0) {
+    fprintf(stderr, "failed to size BK mmap file %s to %zu bytes: %s\n",
+            pattern.c_str(), bytes, strerror(errno));
+    close(fd);
+    fd = -1;
+    return nullptr;
+  }
+  void *ptr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (ptr == MAP_FAILED) {
+    fprintf(stderr, "failed to mmap BK %s array of %zu bytes: %s\n", kind,
+            bytes, strerror(errno));
+    close(fd);
+    fd = -1;
+    return nullptr;
+  }
+  is_mmap_backed = true;
+  return ptr;
+}
+
+void free_bk_array(void *ptr, size_t bytes, int fd, bool is_mmap_backed) {
+  if (is_mmap_backed) {
+    if (ptr) {
+      munmap(ptr, bytes);
+    }
+    if (fd != -1) {
+      close(fd);
+    }
+  } else {
+    free(ptr);
+  }
+}
+
+} // namespace
+
 template <typename captype, typename tcaptype, typename flowtype>
 Graph<captype, tcaptype, flowtype>::Graph(int node_num_max, int edge_num_max,
                                           void (*err_function)(const char *))
-    : node_num(0), nodeptr_block(NULL), error_function(err_function) {
+    : nodes_mmap_backed(false), arcs_mmap_backed(false), nodes_mmap_fd(-1),
+      arcs_mmap_fd(-1), nodes_mmap_bytes(0), arcs_mmap_bytes(0), node_num(0),
+      nodeptr_block(NULL), error_function(err_function) {
   if (node_num_max < 16)
     node_num_max = 16;
   if (edge_num_max < 16)
     edge_num_max = 16;
 
-  nodes = (node *)malloc(node_num_max * sizeof(node));
-  arcs = (arc *)malloc(2 * edge_num_max * sizeof(arc));
+  nodes_mmap_bytes = node_num_max * sizeof(node);
+  arcs_mmap_bytes = 2 * edge_num_max * sizeof(arc);
+  nodes = (node *)allocate_bk_array(nodes_mmap_bytes, "nodes", nodes_mmap_fd,
+                                    nodes_mmap_backed);
+  arcs = (arc *)allocate_bk_array(arcs_mmap_bytes, "arcs", arcs_mmap_fd,
+                                  arcs_mmap_backed);
   if (!nodes || !arcs) {
     if (error_function)
       (*error_function)("Not enough memory!");
@@ -44,8 +110,8 @@ Graph<captype, tcaptype, flowtype>::~Graph() {
     delete nodeptr_block;
     nodeptr_block = NULL;
   }
-  free(nodes);
-  free(arcs);
+  free_bk_array(nodes, nodes_mmap_bytes, nodes_mmap_fd, nodes_mmap_backed);
+  free_bk_array(arcs, arcs_mmap_bytes, arcs_mmap_fd, arcs_mmap_backed);
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
@@ -65,6 +131,11 @@ void Graph<captype, tcaptype, flowtype>::reset() {
 
 template <typename captype, typename tcaptype, typename flowtype>
 void Graph<captype, tcaptype, flowtype>::reallocate_nodes(int num) {
+  if (nodes_mmap_backed) {
+    if (error_function)
+      (*error_function)("BK mmap mode does not support node reallocation");
+    exit(1);
+  }
   int node_num_max = (int)(node_max - nodes);
   node *nodes_old = nodes;
 
@@ -98,6 +169,11 @@ void Graph<captype, tcaptype, flowtype>::reallocate_nodes(int num) {
 
 template <typename captype, typename tcaptype, typename flowtype>
 void Graph<captype, tcaptype, flowtype>::reallocate_arcs() {
+  if (arcs_mmap_backed) {
+    if (error_function)
+      (*error_function)("BK mmap mode does not support arc reallocation");
+    exit(1);
+  }
   int arc_num_max = (int)(arc_max - arcs);
   int arc_num = (int)(arc_last - arcs);
   arc *arcs_old = arcs;
