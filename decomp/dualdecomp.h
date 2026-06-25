@@ -53,6 +53,7 @@ struct DualDecompositionOptions {
   bool use_momentum = true;
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
+  bool verbose = true;
   DualDecompositionStepPolicy step_policy =
       DualDecompositionStepPolicy::FixedScaleSchedule;
   double theta = 1.0;
@@ -86,7 +87,8 @@ public:
         last_regularization_budget_(0),
         last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
-        last_regularization_active_sink_count_(0) {
+        last_regularization_active_sink_count_(0),
+        total_optimization_iterations_(0) {
     initializeDecomposition();
   }
 
@@ -124,6 +126,9 @@ public:
   }
   long getLastRegularizationActiveSinkCount() const {
     return last_regularization_active_sink_count_;
+  }
+  long getTotalOptimizationIterations() const {
+    return total_optimization_iterations_;
   }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
@@ -197,6 +202,7 @@ public:
     const int scaling_factor = 10;
     long step_size = options_.initial_step_size;
     scale_ = step_size;
+    total_optimization_iterations_ = 0;
     for (int iscale = 0; iscale < options_.num_optimization_scales; ++iscale) {
       OptimizationStatus status;
       auto run_opt_scale_time = time_lambda([&] {
@@ -204,8 +210,10 @@ public:
                                       options_.max_cycle_count,
                                       options_.use_momentum);
       });
-      printf("run optimization scale time: %lums\n",
-             run_opt_scale_time.count());
+      if (options_.verbose) {
+        printf("run optimization scale time: %lums\n",
+               run_opt_scale_time.count());
+      }
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
       }
@@ -254,6 +262,7 @@ public:
       solver_uptr->setRegularizationStrength(regularization_str);
     }
     for (int i = 0; i < nstep; ++i) {
+      ++total_optimization_iterations_;
 
       std::vector<long> lower_bound_terms(solvers_.size(), 0);
       std::vector<long> regularization_budget_terms(solvers_.size(), 0);
@@ -328,24 +337,26 @@ public:
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
 
       const int regularization_strength = step_size <= 10 ? step_size : 0;
-      printf("iter : %6d lower_bound : %8.6lf best_lower_bound : %8.6lf upper_bound : %8.6lf gap : %8.6lf num_disagreeing : %6ld disagreement_norm_sq : %8.1lf step_size : %8ld regularization_strength : %6d regularization_budget : %8.6lf regularization_contribution : %8.6lf regularization_anchor_sink_count : %6ld regularization_active_sink_count : %6ld iters_since_improvement : %6d solve_loop_time: %8ldms lagrange_update_time: %8ldms\n",
-             i, double(lower_bound) / scale_,
-             double(std::max(max_lower_bound, lower_bound)) / scale_,
-             current_upper_bound_ == std::numeric_limits<long>::max()
-                 ? std::numeric_limits<double>::infinity()
-                 : double(current_upper_bound_) / scale_,
-             current_upper_bound_ == std::numeric_limits<long>::max()
-                 ? std::numeric_limits<double>::infinity()
-                 : double(current_upper_bound_ - lower_bound) / scale_,
-             disagreeing_global_indices_.size(),
-             update_stats.disagreement_norm_sq, update_stats.effective_step_size,
-             regularization_strength,
-             double(last_regularization_budget_) / scale_,
-             double(last_regularization_contribution_) / scale_,
-             last_regularization_anchor_sink_count_,
-             last_regularization_active_sink_count_,
-             i - last_improvement_iter, solve_loop_time.count(),
-             lagrange_update_time.count());
+      if (options_.verbose) {
+        printf("iter : %6d lower_bound : %8.6lf best_lower_bound : %8.6lf upper_bound : %8.6lf gap : %8.6lf num_disagreeing : %6ld disagreement_norm_sq : %8.1lf step_size : %8ld regularization_strength : %6d regularization_budget : %8.6lf regularization_contribution : %8.6lf regularization_anchor_sink_count : %6ld regularization_active_sink_count : %6ld iters_since_improvement : %6d solve_loop_time: %8ldms lagrange_update_time: %8ldms\n",
+               i, double(lower_bound) / scale_,
+               double(std::max(max_lower_bound, lower_bound)) / scale_,
+               current_upper_bound_ == std::numeric_limits<long>::max()
+                   ? std::numeric_limits<double>::infinity()
+                   : double(current_upper_bound_) / scale_,
+               current_upper_bound_ == std::numeric_limits<long>::max()
+                   ? std::numeric_limits<double>::infinity()
+                   : double(current_upper_bound_ - lower_bound) / scale_,
+               disagreeing_global_indices_.size(),
+               update_stats.disagreement_norm_sq, update_stats.effective_step_size,
+               regularization_strength,
+               double(last_regularization_budget_) / scale_,
+               double(last_regularization_contribution_) / scale_,
+               last_regularization_anchor_sink_count_,
+               last_regularization_active_sink_count_,
+               i - last_improvement_iter, solve_loop_time.count(),
+               lagrange_update_time.count());
+      }
 
       max_lower_bound_ =
           std::max<double>(max_lower_bound_, double(lower_bound) / scale_);
@@ -355,16 +366,20 @@ public:
         max_lower_bound = lower_bound;
         if (options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
-          printf("breaking because >= %d iters since last max\n",
-                 options_.patience);
+          if (options_.verbose) {
+            printf("breaking because >= %d iters since last max\n",
+                   options_.patience);
+          }
           opt_status = NO_FURTHER_PROGRESS;
           break;
         }
         last_improvement_iter = i;
       } else if (!options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
-        printf("breaking because no lower-bound improvement for >= %d iters\n",
-               options_.patience);
+        if (options_.verbose) {
+          printf("breaking because no lower-bound improvement for >= %d iters\n",
+                 options_.patience);
+        }
         opt_status = NO_FURTHER_PROGRESS;
         break;
       }
@@ -372,16 +387,20 @@ public:
       if (best_upper_bound_ != std::numeric_limits<long>::max() &&
           max_lower_bound >= best_upper_bound_) {
         if (regularization_strength == 0) {
-          printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
-                 double(max_lower_bound) / scale_,
-                 double(best_upper_bound_) / scale_);
+          if (options_.verbose) {
+            printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
+                   double(max_lower_bound) / scale_,
+                   double(best_upper_bound_) / scale_);
+          }
           opt_status = OPTIMAL;
           break;
         }
-        printf("breaking because regularized reported value closed primal upper bound; not an unregularized certificate: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
-               double(max_lower_bound) / scale_,
-               double(best_upper_bound_) / scale_,
-               regularization_strength);
+        if (options_.verbose) {
+          printf("breaking because regularized reported value closed primal upper bound; not an unregularized certificate: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
+                 double(max_lower_bound) / scale_,
+                 double(best_upper_bound_) / scale_,
+                 regularization_strength);
+        }
         opt_status = NO_FURTHER_PROGRESS;
         break;
       }
@@ -392,8 +411,10 @@ public:
         auto [first_group_max, second_group_max] =
             lower_bound_group_stats.getMaximums();
         if (second_group_max <= first_group_max) {
-          printf("breaking because max of this group's interval is less "
-                 "than or qual to max in last last group's interval\n");
+          if (options_.verbose) {
+            printf("breaking because max of this group's interval is less "
+                   "than or qual to max in last last group's interval\n");
+          }
           opt_status = NO_FURTHER_PROGRESS;
           break;
         }
@@ -401,11 +422,15 @@ public:
 
       if (disagreeing_global_indices_.size() == 0) { // optimality condition
         if (regularization_strength == 0) {
-          printf("breaking because of no disagreement\n");
+          if (options_.verbose) {
+            printf("breaking because of no disagreement\n");
+          }
           opt_status = OPTIMAL;
         } else {
-          printf("breaking because regularized subproblems agree; not an unregularized certificate: regularization_strength=%d\n",
-                 regularization_strength);
+          if (options_.verbose) {
+            printf("breaking because regularized subproblems agree; not an unregularized certificate: regularization_strength=%d\n",
+                   regularization_strength);
+          }
           opt_status = NO_FURTHER_PROGRESS;
         }
         break;
@@ -421,7 +446,9 @@ public:
       //  break;
       //}
     }
-    printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
+    if (options_.verbose) {
+      printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
+    }
     return opt_status;
   }
 
@@ -799,6 +826,7 @@ private:
   long last_regularization_contribution_;
   long last_regularization_anchor_sink_count_;
   long last_regularization_active_sink_count_;
+  long total_optimization_iterations_;
   std::list<int> disagreeing_global_indices_;
 
   template <typename T> class ScalarStatisticsTracker {

@@ -17,6 +17,8 @@
 #pragma once
 
 #include <cassert>
+#include <cctype>
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 
@@ -25,6 +27,49 @@
 namespace mcpd3 {
 
 namespace _dimacs_implementation {
+
+inline const char *skip_space(const char *p) {
+  while (*p != '\0' && std::isspace(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  return p;
+}
+
+inline const char *skip_token(const char *p) {
+  p = skip_space(p);
+  while (*p != '\0' && !std::isspace(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  return p;
+}
+
+inline bool parse_int_token(const char *&p, int &value) {
+  p = skip_space(p);
+  bool negative = false;
+  if (*p == '-') {
+    negative = true;
+    ++p;
+  }
+  if (!std::isdigit(static_cast<unsigned char>(*p))) {
+    return false;
+  }
+  int parsed = 0;
+  while (std::isdigit(static_cast<unsigned char>(*p))) {
+    parsed = parsed * 10 + (*p - '0');
+    ++p;
+  }
+  value = negative ? -parsed : parsed;
+  return true;
+}
+
+inline bool parse_char_token(const char *&p, char &value) {
+  p = skip_space(p);
+  if (*p == '\0') {
+    return false;
+  }
+  value = *p++;
+  return true;
+}
 
 int remap_index(int original_index, int source_index, int sink_index) {
   int new_index = original_index;
@@ -55,10 +100,14 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
   while (fgets(line, line_length, stream)) {
     switch (*line) {
     case 'p':
-      if (sscanf(line, "%*c %*s %d %d", &n, &m) != 2) {
+      {
+      const char *p = line + 1;
+      p = skip_token(p); // max
+      if (!parse_int_token(p, n) || !parse_int_token(p, m)) {
         std::string err_msg =
             "p line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
+      }
       }
       break;
     case 'a':
@@ -68,10 +117,14 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
             filename + "\n";
         throw std::runtime_error(err_msg.c_str());
       }
-      if (sscanf(line, "%*c %d %d %d", &s, &t, &cap) != 3) {
+      {
+      const char *p = line + 1;
+      if (!parse_int_token(p, s) || !parse_int_token(p, t) ||
+          !parse_int_token(p, cap)) {
         std::string err_msg =
             "'a' line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
+      }
       }
       if (t == source || s == sink) {
         std::string err_msg =
@@ -94,10 +147,13 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
       }
       break;
     case 'n':
-      if (sscanf(line, "%*c %d %c", &s, &c) != 2) {
+      {
+      const char *p = line + 1;
+      if (!parse_int_token(p, s) || !parse_char_token(p, c)) {
         std::string err_msg =
             "'n' line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
+      }
       }
       if (c == 's') {
         source = s;

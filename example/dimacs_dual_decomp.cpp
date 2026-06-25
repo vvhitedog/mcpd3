@@ -56,7 +56,8 @@ int main(int argc, char *argv[]) {
               << "       " << argv[0]
               << " DIMACS_MAXFLOW_FILE --partitions N "
                  "--step-policy fixed|polyak [--theta X] [--patience N] "
-                 "[--max-iterations N] [--threads N]\n";
+                 "[--max-iterations N] [--threads N] "
+                 "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
   }
   for (int i = 1; i < argc; ++i) {
@@ -86,6 +87,10 @@ int main(int argc, char *argv[]) {
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--threads")) != "") {
       options.thread_count = static_cast<size_t>(std::atoll(value.c_str()));
+    } else if (arg == "--disable-primal-upper-bound") {
+      options.track_primal_upper_bound = false;
+    } else if (arg == "--quiet") {
+      options.verbose = false;
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--min-step")) != "") {
       options.min_step_size = std::atol(value.c_str());
@@ -136,27 +141,13 @@ int main(int argc, char *argv[]) {
             << " threads=" << options.thread_count
             << " legacy_patience=" << options.legacy_patience
             << " group_stopping=" << options.enable_group_stopping
+            << " primal_upper_bound=" << options.track_primal_upper_bound
+            << " verbose=" << options.verbose
             << " momentum=" << options.use_momentum << "\n";
-
-  auto primal_graph2 = mcpd3::read_dimacs_to_csr(dimacs_path);
 
   auto primal_decoder =
       [&](const std::vector<bool> &cut, double max_lower_bound,
           const std::list<int> &disagreeing_global_indices) -> bool {
-    return false;
-    primal_graph2.setCut(cut);
-    // auto cut_value2 = primal_graph2.getCurrentCutValue();
-    // std::cout << "primal cut value2: " << cut_value2 << "\n";
-    primal_graph2.narrowBandDecode(disagreeing_global_indices);
-    auto cut_value2_improved = primal_graph2.getCurrentCutValue();
-    std::cout << "primal cut value2 improved: " << cut_value2_improved << "\n";
-
-    std::cout << "max_lower_bound : "
-              << static_cast<long>(std::ceil(max_lower_bound)) << "\n";
-    if (cut_value2_improved == static_cast<int>(std::ceil(max_lower_bound))) {
-      std::cout << "breaking beause primal solution is optimal" << std::endl;
-      return true;
-    }
     return false;
   };
 
@@ -173,9 +164,25 @@ int main(int argc, char *argv[]) {
 
   std::cout << " total solve loop time: "
             << dual_decomp->getTotalSolveLoopTime() << "\n";
+  std::cout << " iteration_count : "
+            << dual_decomp->getTotalOptimizationIterations() << "\n";
   std::cout << " best_lower_bound : " << dual_decomp->getBestLowerBound()
             << "\n";
+  std::cout << " best_lower_bound_raw : "
+            << dual_decomp->getBestLowerBoundRaw() << "\n";
+  std::cout << " best_lower_bound_unscaled : "
+            << dual_decomp->getBestLowerBoundRaw() / dual_decomp->getScale()
+            << "\n";
   std::cout << " best_upper_bound : " << dual_decomp->getBestUpperBound()
+            << "\n";
+  std::cout << " best_upper_bound_raw : "
+            << dual_decomp->getBestUpperBoundRaw() << "\n";
+  std::cout << " best_upper_bound_unscaled : "
+            << (dual_decomp->getBestUpperBoundRaw() ==
+                        std::numeric_limits<long>::max()
+                    ? dual_decomp->getBestUpperBoundRaw()
+                    : dual_decomp->getBestUpperBoundRaw() /
+                          dual_decomp->getScale())
             << "\n";
   std::cout << " best_gap : "
             << (dual_decomp->getBestUpperBoundRaw() ==
