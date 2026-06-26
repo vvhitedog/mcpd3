@@ -16,8 +16,11 @@
 
 #pragma once
 
-#include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <list>
 #include <limits>
@@ -25,6 +28,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <numeric>
 
@@ -37,6 +41,40 @@
 
 
 namespace mcpd3 {
+
+inline bool dualdecomp_progress_enabled() {
+  const char *value = std::getenv("MCPD3_PROGRESS");
+  return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+inline void dualdecomp_progress_report(
+    const char *stage, long done, long total,
+    std::chrono::steady_clock::time_point start) {
+  if (!dualdecomp_progress_enabled()) {
+    return;
+  }
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  const double pct = total > 0 ? 100.0 * static_cast<double>(done) / total : 0;
+  const double rate = elapsed > 0 ? static_cast<double>(done) / elapsed : 0;
+  const double eta = rate > 0 && total > done
+                         ? static_cast<double>(total - done) / rate
+                         : 0;
+  std::fprintf(stderr,
+               "mcpd3_progress stage=%s done=%ld total=%ld pct=%.2f "
+               "elapsed_sec=%.1f eta_sec=%.1f rate=%.0f_per_sec\n",
+               stage, done, total, pct, elapsed, eta, rate);
+  std::fflush(stderr);
+}
+
+inline void dualdecomp_progress_message(const std::string &message) {
+  if (!dualdecomp_progress_enabled()) {
+    return;
+  }
+  std::fprintf(stderr, "%s\n", message.c_str());
+  std::fflush(stderr);
+}
 
 enum class DualDecompositionStepPolicy {
   FixedScaleSchedule,
@@ -259,6 +297,8 @@ public:
                                           int max_cycle_count = 2,
                                           int use_momentum = false) {
     OptimizationStatus opt_status = ITERATION_COUNT_EXCEEDED;
+    const bool report_progress = dualdecomp_progress_enabled();
+    const auto scale_start = std::chrono::steady_clock::now();
     const int num_stats_in_group = 10;
     TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(
         num_stats_in_group);
@@ -345,6 +385,49 @@ public:
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
 
       const int regularization_strength = step_size <= 10 ? step_size : 0;
+      if (report_progress) {
+        const long best_lower_bound =
+            std::max(max_lower_bound, lower_bound);
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          scale_start)
+                .count();
+        const double iter_rate = elapsed > 0 ? double(i + 1) / elapsed : 0.0;
+        const double eta = iter_rate > 0 && nstep > i + 1
+                               ? double(nstep - i - 1) / iter_rate
+                               : 0.0;
+        std::fprintf(
+            stderr,
+            "mcpd3_progress stage=dd_solve_iter scale=%ld iter=%d "
+            "total_iter=%ld max_iter=%d lower_bound=%.6lf "
+            "best_lower_bound=%.6lf upper_bound=%.6lf gap=%.6lf "
+            "num_disagreeing=%ld disagreement_norm_sq=%.1lf "
+            "step_size=%ld effective_step_size=%ld "
+            "regularization_strength=%d regularization_budget=%.6lf "
+            "regularization_contribution=%.6lf "
+            "regularization_anchor_sink_count=%ld "
+            "regularization_active_sink_count=%ld "
+            "iters_since_improvement=%d solve_loop_us=%ld "
+            "lagrange_update_us=%ld elapsed_sec=%.1f eta_sec=%.1f\n",
+            scale_, i, total_optimization_iterations_, nstep,
+            double(lower_bound) / scale_, double(best_lower_bound) / scale_,
+            current_upper_bound_ == std::numeric_limits<long>::max()
+                ? std::numeric_limits<double>::infinity()
+                : double(current_upper_bound_) / scale_,
+            current_upper_bound_ == std::numeric_limits<long>::max()
+                ? std::numeric_limits<double>::infinity()
+                : double(current_upper_bound_ - lower_bound) / scale_,
+            static_cast<long>(disagreeing_global_indices_.size()),
+            update_stats.disagreement_norm_sq, step_size,
+            update_stats.effective_step_size, regularization_strength,
+            double(last_regularization_budget_) / scale_,
+            double(last_regularization_contribution_) / scale_,
+            last_regularization_anchor_sink_count_,
+            last_regularization_active_sink_count_,
+            i - last_improvement_iter, solve_loop_time.count(),
+            lagrange_update_time.count(), elapsed, eta);
+        std::fflush(stderr);
+      }
       if (options_.verbose) {
         printf("iter : %6d lower_bound : %8.6lf best_lower_bound : %8.6lf upper_bound : %8.6lf gap : %8.6lf num_disagreeing : %6ld disagreement_norm_sq : %8.1lf step_size : %8ld regularization_strength : %6d regularization_budget : %8.6lf regularization_contribution : %8.6lf regularization_anchor_sink_count : %6ld regularization_active_sink_count : %6ld iters_since_improvement : %6d solve_loop_time: %8ldms lagrange_update_time: %8ldms\n",
                i, double(lower_bound) / scale_,
@@ -374,6 +457,13 @@ public:
         max_lower_bound = lower_bound;
         if (options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
+          if (report_progress) {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop reason=legacy_"
+                         "patience iter=%d patience=%d\n",
+                         i, options_.patience);
+            std::fflush(stderr);
+          }
           if (options_.verbose) {
             printf("breaking because >= %d iters since last max\n",
                    options_.patience);
@@ -384,6 +474,14 @@ public:
         last_improvement_iter = i;
       } else if (!options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
+        if (report_progress) {
+          std::fprintf(stderr,
+                       "mcpd3_progress stage=dd_solve_stop "
+                       "reason=no_lower_bound_improvement iter=%d "
+                       "patience=%d\n",
+                       i, options_.patience);
+          std::fflush(stderr);
+        }
         if (options_.verbose) {
           printf("breaking because no lower-bound improvement for >= %d iters\n",
                  options_.patience);
@@ -395,6 +493,15 @@ public:
       if (best_upper_bound_ != std::numeric_limits<long>::max() &&
           max_lower_bound >= best_upper_bound_) {
         if (regularization_strength == 0) {
+          if (report_progress) {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop "
+                         "reason=lower_bound_closed_upper lower=%.6lf "
+                         "upper=%.6lf\n",
+                         double(max_lower_bound) / scale_,
+                         double(best_upper_bound_) / scale_);
+            std::fflush(stderr);
+          }
           if (options_.verbose) {
             printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
                    double(max_lower_bound) / scale_,
@@ -402,6 +509,16 @@ public:
           }
           opt_status = OPTIMAL;
           break;
+        }
+        if (report_progress) {
+          std::fprintf(stderr,
+                       "mcpd3_progress stage=dd_solve_stop "
+                       "reason=regularized_closed_upper lower=%.6lf "
+                       "upper=%.6lf regularization_strength=%d\n",
+                       double(max_lower_bound) / scale_,
+                       double(best_upper_bound_) / scale_,
+                       regularization_strength);
+          std::fflush(stderr);
         }
         if (options_.verbose) {
           printf("breaking because regularized reported value closed primal upper bound; not an unregularized certificate: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
@@ -419,6 +536,15 @@ public:
         auto [first_group_max, second_group_max] =
             lower_bound_group_stats.getMaximums();
         if (second_group_max <= first_group_max) {
+          if (report_progress) {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop "
+                         "reason=group_stopping first_group_max=%.6lf "
+                         "second_group_max=%.6lf\n",
+                         double(first_group_max) / scale_,
+                         double(second_group_max) / scale_);
+            std::fflush(stderr);
+          }
           if (options_.verbose) {
             printf("breaking because max of this group's interval is less "
                    "than or qual to max in last last group's interval\n");
@@ -430,11 +556,27 @@ public:
 
       if (disagreeing_global_indices_.size() == 0) { // optimality condition
         if (regularization_strength == 0) {
+          if (report_progress) {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop "
+                         "reason=no_disagreement iter=%d lower=%.6lf\n",
+                         i, double(lower_bound) / scale_);
+            std::fflush(stderr);
+          }
           if (options_.verbose) {
             printf("breaking because of no disagreement\n");
           }
           opt_status = OPTIMAL;
         } else {
+          if (report_progress) {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop "
+                         "reason=regularized_no_disagreement "
+                         "regularization_strength=%d iter=%d lower=%.6lf\n",
+                         regularization_strength, i,
+                         double(lower_bound) / scale_);
+            std::fflush(stderr);
+          }
           if (options_.verbose) {
             printf("breaking because regularized subproblems agree; not an unregularized certificate: regularization_strength=%d\n",
                    regularization_strength);
@@ -456,6 +598,18 @@ public:
     }
     if (options_.verbose) {
       printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
+    }
+    if (report_progress) {
+      const double elapsed =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        scale_start)
+              .count();
+      std::fprintf(stderr,
+                   "mcpd3_progress stage=dd_solve_scale_done scale=%ld "
+                   "status=%d best_lower_bound=%.6lf elapsed_sec=%.1f\n",
+                   scale_, static_cast<int>(opt_status),
+                   double(max_lower_bound) / scale_, elapsed);
+      std::fflush(stderr);
     }
     return opt_status;
   }
@@ -626,7 +780,94 @@ private:
     return upper_bound;
   }
 
+  void validateAndReportPartition(const std::vector<int> &partitions) const {
+    if (static_cast<int>(partitions.size()) != nnode_) {
+      throw std::runtime_error("partition vector size does not match node count");
+    }
+
+    std::vector<long> part_node_counts(npartition_, 0);
+    std::vector<long> part_arc_counts(npartition_, 0);
+    std::vector<unsigned char> boundary_nodes(nnode_, 0);
+    std::vector<unsigned char> constrained_nodes(nnode_, 0);
+
+    for (int node = 0; node < nnode_; ++node) {
+      const int part = partitions[node];
+      if (part < 0 || part >= npartition_) {
+        throw std::runtime_error("partition label out of range");
+      }
+      ++part_node_counts[part];
+    }
+
+    long crossing_edges = 0;
+    long boundary_node_count = 0;
+    long constrained_node_count = 0;
+    for (int aid = 0; aid < narc_; ++aid) {
+      int s = arcs_[2 * aid + 0];
+      int t = arcs_[2 * aid + 1];
+      if (s < 0 || s >= nnode_ || t < 0 || t >= nnode_) {
+        throw std::runtime_error("arc endpoint out of range");
+      }
+      if (s > t) {
+        std::swap(s, t);
+      }
+      const int s_part = partitions[s];
+      const int t_part = partitions[t];
+      ++part_arc_counts[s_part];
+      if (s_part != t_part) {
+        ++crossing_edges;
+        if (!boundary_nodes[s]) {
+          boundary_nodes[s] = 1;
+          ++boundary_node_count;
+        }
+        if (!boundary_nodes[t]) {
+          boundary_nodes[t] = 1;
+          ++boundary_node_count;
+        }
+        // This mirrors initializeDecomposition(): after endpoint ordering, the
+        // arc belongs to s_part and t becomes the constrained clone node.
+        if (!constrained_nodes[t]) {
+          constrained_nodes[t] = 1;
+          ++constrained_node_count;
+        }
+      }
+    }
+
+    const auto [min_nodes_it, max_nodes_it] =
+        std::minmax_element(part_node_counts.begin(), part_node_counts.end());
+    const auto [min_arcs_it, max_arcs_it] =
+        std::minmax_element(part_arc_counts.begin(), part_arc_counts.end());
+    const double mean_nodes =
+        std::accumulate(part_node_counts.begin(), part_node_counts.end(), 0.0) /
+        static_cast<double>(std::max(1, npartition_));
+    const double mean_arcs =
+        std::accumulate(part_arc_counts.begin(), part_arc_counts.end(), 0.0) /
+        static_cast<double>(std::max(1, npartition_));
+    const double node_imbalance =
+        mean_nodes > 0.0 ? static_cast<double>(*max_nodes_it) / mean_nodes
+                         : 0.0;
+    const double arc_imbalance =
+        mean_arcs > 0.0 ? static_cast<double>(*max_arcs_it) / mean_arcs : 0.0;
+
+    if (dualdecomp_progress_enabled()) {
+      std::fprintf(
+          stderr,
+          "mcpd3_progress stage=partition_validation nnode=%d narc=%d "
+          "partitions=%d crossing_edges=%ld boundary_nodes=%ld "
+          "constrained_nodes=%ld min_part_nodes=%ld max_part_nodes=%ld "
+          "mean_part_nodes=%.1f node_imbalance=%.3f min_part_arcs=%ld "
+          "max_part_arcs=%ld mean_part_arcs=%.1f arc_imbalance=%.3f\n",
+          nnode_, narc_, npartition_, crossing_edges, boundary_node_count,
+          constrained_node_count, *min_nodes_it, *max_nodes_it, mean_nodes,
+          node_imbalance, *min_arcs_it, *max_arcs_it, mean_arcs,
+          arc_imbalance);
+      std::fflush(stderr);
+    }
+  }
+
   void initializeDecomposition() {
+    const bool report_progress = dualdecomp_progress_enabled();
+    const long progress_interval = 10000000;
+    const auto init_start = std::chrono::steady_clock::now();
     std::unordered_map</*global_index=*/int,
                        /*exists_in_partitions=*/std::set<int>>
         constrained_nodes;
@@ -634,17 +875,22 @@ private:
      * step 0: parition graph into npartition_ partitions
      */
     std::vector<int> partitions_;
-#ifdef HAVE_METIS
-    partitions_ = metis_partition(npartition_, narc_, nnode_, arcs_);
-#else
-    partitions_ = basic_graph_partition(npartition_, narc_, nnode_, arcs_);
-#endif
+    partitions_ = configured_graph_partition(npartition_, narc_, nnode_, arcs_,
+                                             &arc_capacities_);
+    validateAndReportPartition(partitions_);
+    dualdecomp_progress_report("dd_partition_done", 1, 1, init_start);
+    auto mapping_start = std::chrono::steady_clock::now();
+    int mapping_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
       min_cut_sub_graph.initializeMapping(nnode_);
+      ++mapping_done;
+      dualdecomp_progress_report("dd_initialize_mapping", mapping_done,
+                                 npartition_, mapping_start);
     }
     /**
      * step 1: distribute all arcs into one and only one sub graph
      */
+    auto arc_start = std::chrono::steady_clock::now();
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
@@ -663,7 +909,12 @@ private:
                                              // needs to be constrained
         constrained_nodes[t].insert(arc_partition);
       }
+      if (report_progress && (i + 1) % progress_interval == 0) {
+        dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
+                                   arc_start);
+      }
     }
+    dualdecomp_progress_report("dd_distribute_arcs", narc_, narc_, arc_start);
     arcs_.clear();
     arcs_.shrink_to_fit();
     arc_capacities_.clear();
@@ -671,24 +922,45 @@ private:
     /**
      * step 2: add source and sink capacities of nodes
      */
+    auto terminal_start = std::chrono::steady_clock::now();
     for (int i = 0; i < nnode_; ++i) {
       if (terminal_capacities_[i] == 0) {
+        if (report_progress && (i + 1) % progress_interval == 0) {
+          dualdecomp_progress_report("dd_distribute_terminals", i + 1, nnode_,
+                                     terminal_start);
+        }
         continue;
       }
       min_cut_sub_graphs_[partitions_[i]].insertTerminal(
           i, terminal_capacities_[i]);
+      if (report_progress && (i + 1) % progress_interval == 0) {
+        dualdecomp_progress_report("dd_distribute_terminals", i + 1, nnode_,
+                                   terminal_start);
+      }
     }
+    dualdecomp_progress_report("dd_distribute_terminals", nnode_, nnode_,
+                               terminal_start);
+    auto finalize_start = std::chrono::steady_clock::now();
+    int finalize_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
       min_cut_sub_graph.finalizeTerminals();
+      ++finalize_done;
+      dualdecomp_progress_report("dd_finalize_terminals", finalize_done,
+                                 npartition_, finalize_start);
     }
     terminal_capacities_.clear();
     terminal_capacities_.shrink_to_fit();
     /**
      * step 3: create solvers
      */
+    auto solver_start = std::chrono::steady_clock::now();
+    int solver_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
       solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
           std::move(min_cut_sub_graph.graph)));
+      ++solver_done;
+      dualdecomp_progress_report("dd_create_solvers", solver_done, npartition_,
+                                 solver_start);
     }
     /**
      * step 4: create a DualDecompositionConstraintArc for each constraint
@@ -696,6 +968,9 @@ private:
      */
     std::set<int> constrained_nodes_partition_counts;
     std::vector<int> constrained_nodes_count_in_each_partition(npartition_,0);
+    auto constraint_start = std::chrono::steady_clock::now();
+    long constrained_done = 0;
+    const long constrained_total = static_cast<long>(constrained_nodes.size());
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
@@ -733,16 +1008,30 @@ private:
         }
       }
       constrained_nodes_partition_counts.insert(partitions.size());
+      ++constrained_done;
+      if (report_progress && constrained_done % 1000000 == 0) {
+        dualdecomp_progress_report("dd_create_constraints", constrained_done,
+                                   constrained_total, constraint_start);
+      }
     }
+    dualdecomp_progress_report("dd_create_constraints", constrained_done,
+                               constrained_total, constraint_start);
     constrained_nodes.clear();
     constraint_arc_map_.shrink_to_fit();
     if (!options_.track_primal_upper_bound) {
+      auto release_start = std::chrono::steady_clock::now();
+      int release_done = 0;
       for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
         min_cut_sub_graph.releaseConstructionMaps();
+        ++release_done;
+        dualdecomp_progress_report("dd_release_construction_maps",
+                                   release_done, npartition_, release_start);
       }
     }
     partitions_.clear();
     partitions_.shrink_to_fit();
+    dualdecomp_progress_report("dd_initialize_decomposition_total", 1, 1,
+                               init_start);
     printf("partition counts: ");
     for (const auto &count : constrained_nodes_partition_counts) {
       printf("%d,", count);

@@ -17,8 +17,10 @@
 #pragma once
 
 #include <cassert>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
@@ -27,6 +29,31 @@
 namespace mcpd3 {
 
 namespace _dimacs_implementation {
+
+inline bool progress_enabled() {
+  const char *value = std::getenv("MCPD3_PROGRESS");
+  return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+inline void progress_report(const char *stage, long done, long total,
+                            std::chrono::steady_clock::time_point start) {
+  if (!progress_enabled()) {
+    return;
+  }
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  const double pct = total > 0 ? 100.0 * static_cast<double>(done) / total : 0;
+  const double rate = elapsed > 0 ? static_cast<double>(done) / elapsed : 0;
+  const double eta = rate > 0 && total > done
+                         ? static_cast<double>(total - done) / rate
+                         : 0;
+  std::fprintf(stderr,
+               "mcpd3_progress stage=%s done=%ld total=%ld pct=%.2f "
+               "elapsed_sec=%.1f eta_sec=%.1f rate=%.0f_per_sec\n",
+               stage, done, total, pct, elapsed, eta, rate);
+  std::fflush(stderr);
+}
 
 inline const char *skip_space(const char *p) {
   while (*p != '\0' && std::isspace(static_cast<unsigned char>(*p))) {
@@ -300,8 +327,12 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
   int pending_s = 0;
   int pending_t = 0;
   int pending_cap = 0;
+  const bool report_progress = _dimacs_implementation::progress_enabled();
+  const long progress_interval = 10000000;
 
   {
+    auto pass_start = std::chrono::steady_clock::now();
+    long arcs_seen = 0;
     FILE *stream = fopen(filename.c_str(), "r");
     if (!stream) {
       throw std::runtime_error("failed to open file for reading: " + filename);
@@ -309,6 +340,11 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
     while (fgets(line, line_length, stream)) {
       if (*line != 'a') {
         continue;
+      }
+      ++arcs_seen;
+      if (report_progress && arcs_seen % progress_interval == 0) {
+        _dimacs_implementation::progress_report(
+            "dimacs_stream_count", arcs_seen, declared_arcs, pass_start);
       }
       int s = 0;
       int t = 0;
@@ -358,6 +394,8 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
       }
     }
     fclose(stream);
+    _dimacs_implementation::progress_report("dimacs_stream_count", arcs_seen,
+                                            declared_arcs, pass_start);
   }
   if (has_pending) {
     throw std::runtime_error("DIMACS file ended with an unmatched internal arc: " +
@@ -373,6 +411,8 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
 
   long imbalance = 0;
   has_pending = false;
+  auto build_start = std::chrono::steady_clock::now();
+  long arcs_seen = 0;
   FILE *stream = fopen(filename.c_str(), "r");
   if (!stream) {
     throw std::runtime_error("failed to open file for reading: " + filename);
@@ -380,6 +420,11 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
   while (fgets(line, line_length, stream)) {
     if (*line != 'a') {
       continue;
+    }
+    ++arcs_seen;
+    if (report_progress && arcs_seen % progress_interval == 0) {
+      _dimacs_implementation::progress_report(
+          "dimacs_stream_build", arcs_seen, declared_arcs, build_start);
     }
     int s = 0;
     int t = 0;
@@ -430,6 +475,8 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
     }
   }
   fclose(stream);
+  _dimacs_implementation::progress_report("dimacs_stream_build", arcs_seen,
+                                          declared_arcs, build_start);
 
   if (imbalance > 0) {
     printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
