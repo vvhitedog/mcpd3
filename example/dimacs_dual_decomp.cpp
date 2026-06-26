@@ -23,6 +23,7 @@
 #include <decomp/dualdecomp.h>
 #include <graph/csrgraph.h>
 #include <graph/dimacs.h>
+#include <measure/timer.h>
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
@@ -123,21 +124,30 @@ int main(int argc, char *argv[]) {
     return EXIT_FAILURE;
   }
   mcpd3::MinCutGraph min_cut_graph_data;
-  auto read_graph_mem = mcpd3::get_resident_memory_usage(
-      [&] {
-        min_cut_graph_data = stream_symmetric_input
-                                 ? mcpd3::read_dimacs_symmetric_streaming(
-                                       dimacs_path)
-                                 : mcpd3::read_dimacs(dimacs_path);
-      });
+  mcpd3::ResidentMemoryUsage read_graph_mem{0, 0, 0};
+  auto read_graph_microseconds = mcpd3::time_lambda([&] {
+    read_graph_mem = mcpd3::get_resident_memory_usage(
+        [&] {
+          min_cut_graph_data = stream_symmetric_input
+                                   ? mcpd3::read_dimacs_symmetric_streaming(
+                                         dimacs_path)
+                                   : mcpd3::read_dimacs(dimacs_path);
+        });
+  });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
+  std::cout << "read_graph_time_us : " << read_graph_microseconds.count()
+            << "\n";
 
-  for ( auto &cap : min_cut_graph_data.arc_capacities ) {
-    cap *= 10000;
-  }
-  for ( auto &cap : min_cut_graph_data.terminal_capacities ) {
-    cap *= 10000;
-  }
+  auto scale_graph_microseconds = mcpd3::time_lambda([&] {
+    for ( auto &cap : min_cut_graph_data.arc_capacities ) {
+      cap *= 10000;
+    }
+    for ( auto &cap : min_cut_graph_data.terminal_capacities ) {
+      cap *= 10000;
+    }
+  });
+  std::cout << "scale_graph_time_us : " << scale_graph_microseconds.count()
+            << "\n";
 
   std::cout << "dd_options partitions=" << npartition
             << " step_policy="
@@ -162,14 +172,20 @@ int main(int argc, char *argv[]) {
   };
 
   std::unique_ptr<mcpd3::DualDecomposition> dual_decomp;
-  auto dual_decomp_mem = mcpd3::get_resident_memory_usage([&] {
-    dual_decomp = std::make_unique<mcpd3::DualDecomposition>(
-        npartition, std::move(min_cut_graph_data), options);
+  mcpd3::ResidentMemoryUsage dual_decomp_mem{0, 0, 0};
+  auto dual_decomp_construct_microseconds = mcpd3::time_lambda([&] {
+    dual_decomp_mem = mcpd3::get_resident_memory_usage([&] {
+      dual_decomp = std::make_unique<mcpd3::DualDecomposition>(
+          npartition, std::move(min_cut_graph_data), options);
+    });
   });
   std::cout << "dual decomp mem usage: " << dual_decomp_mem.usage_in_gb
             << "GB\n";
+  std::cout << "dual_decomp_construct_time_us : "
+            << dual_decomp_construct_microseconds.count() << "\n";
   auto microseconds =
       mcpd3::time_lambda([&] { dual_decomp->solve<true>(primal_decoder); });
+  std::cout << "solve_time_us : " << microseconds.count() << "\n";
   std::cout << " full loop time : " << microseconds.count() << "ms\n";
 
   std::cout << " total solve loop time: "
