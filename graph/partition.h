@@ -44,30 +44,27 @@ std::vector<int> basic_graph_partition(int npartition,
 std::vector<int> metis_partition(int npartition, int narc, int nnode,
                                  const std::vector<int> &arc) {
 
-  std::vector<std::vector<idx_t>> adj(nnode);
-
-  // map an arc list to adjacency type that metis supports
-  for (size_t aid = 0; aid < narc; ++aid) {
-    int32_t s, t;
-    s = arc[2 * aid + 0];
-    t = arc[2 * aid + 1];
-    adj[s].push_back(t);
-    adj[t].push_back(s);
-  }
-
   std::vector<idx_t> xadj(nnode + 1);
-  std::vector<idx_t> adjv(narc * 2);
-
-  size_t j = 0;
-  size_t cumsum = 0;
-  xadj[0] = cumsum;
-  for (size_t inode = 0; inode < nnode; ++inode) {
-    for (size_t i = 0; i < adj[inode].size(); ++i) {
-      adjv[j++] = adj[inode][i];
-    }
-    cumsum += adj[inode].size();
-    xadj[inode + 1] = cumsum;
+  for (size_t aid = 0; aid < static_cast<size_t>(narc); ++aid) {
+    const int32_t s = arc[2 * aid + 0];
+    const int32_t t = arc[2 * aid + 1];
+    ++xadj[s + 1];
+    ++xadj[t + 1];
   }
+  for (int inode = 0; inode < nnode; ++inode) {
+    xadj[inode + 1] += xadj[inode];
+  }
+
+  std::vector<idx_t> adjv(static_cast<size_t>(xadj[nnode]));
+  std::vector<idx_t> cursor = xadj;
+  for (size_t aid = 0; aid < static_cast<size_t>(narc); ++aid) {
+    const int32_t s = arc[2 * aid + 0];
+    const int32_t t = arc[2 * aid + 1];
+    adjv[cursor[s]++] = t;
+    adjv[cursor[t]++] = s;
+  }
+  cursor.clear();
+  cursor.shrink_to_fit();
 
   std::vector<idx_t> part(nnode);
   idx_t ncon = 1;
