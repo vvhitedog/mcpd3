@@ -21,13 +21,103 @@
 
 namespace {
 
+enum class BKStorageMode {
+  Malloc,
+  FileMmap,
+  AnonymousMmap,
+};
+
+BKStorageMode get_bk_storage_mode() {
+  const char *mode = getenv("MCPD3_BK_STORAGE");
+  if (mode && mode[0] != '\0') {
+    if (strcmp(mode, "malloc") == 0) {
+      return BKStorageMode::Malloc;
+    }
+    if (strcmp(mode, "file_mmap") == 0) {
+      return BKStorageMode::FileMmap;
+    }
+    if (strcmp(mode, "anon_mmap") == 0 || strcmp(mode, "anonymous_mmap") == 0) {
+      return BKStorageMode::AnonymousMmap;
+    }
+    fprintf(stderr, "unknown MCPD3_BK_STORAGE=%s; using malloc\n", mode);
+    return BKStorageMode::Malloc;
+  }
+
+  const char *mmap_dir = getenv("MCPD3_BK_MMAP_DIR");
+  if (mmap_dir && mmap_dir[0] != '\0') {
+    return BKStorageMode::FileMmap;
+  }
+  return BKStorageMode::Malloc;
+}
+
+void advise_bk_mapping(void *ptr, size_t bytes, const char *kind) {
+  const char *advise = getenv("MCPD3_BK_MMAP_ADVISE");
+  if (!advise || advise[0] == '\0' || strcmp(advise, "none") == 0) {
+    return;
+  }
+  int rc = 0;
+  if (strcmp(advise, "willneed") == 0) {
+    rc = madvise(ptr, bytes, MADV_WILLNEED);
+#ifdef MAP_POPULATE
+  } else if (strcmp(advise, "populate") == 0) {
+    // MAP_POPULATE is applied at mmap time. Keep this spelling accepted so
+    // users can combine one environment interface with both mmap sites.
+    rc = madvise(ptr, bytes, MADV_WILLNEED);
+#endif
+#ifdef MLOCK_ONFAULT
+  } else if (strcmp(advise, "lock_onfault") == 0) {
+    rc = mlock2(ptr, bytes, MLOCK_ONFAULT);
+#endif
+  } else if (strcmp(advise, "lock") == 0) {
+    rc = mlock(ptr, bytes);
+  } else if (strcmp(advise, "dontdump") == 0) {
+#ifdef MADV_DONTDUMP
+    rc = madvise(ptr, bytes, MADV_DONTDUMP);
+#endif
+  } else {
+    fprintf(stderr, "unknown MCPD3_BK_MMAP_ADVISE=%s; ignoring\n", advise);
+    return;
+  }
+  if (rc != 0) {
+    fprintf(stderr, "BK mmap advise %s failed for %s array of %zu bytes: %s\n",
+            advise, kind, bytes, strerror(errno));
+  }
+}
+
 void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
                         bool &is_mmap_backed) {
   fd = -1;
   is_mmap_backed = false;
+  const BKStorageMode mode = get_bk_storage_mode();
+  if (mode == BKStorageMode::Malloc) {
+    return malloc(bytes);
+  }
+
+  int mmap_flags = MAP_SHARED;
+  if (mode == BKStorageMode::AnonymousMmap) {
+    mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_POPULATE
+    const char *advise = getenv("MCPD3_BK_MMAP_ADVISE");
+    if (advise && strcmp(advise, "populate") == 0) {
+      mmap_flags |= MAP_POPULATE;
+    }
+#endif
+    void *ptr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+    if (ptr == MAP_FAILED) {
+      fprintf(stderr, "failed to anonymous mmap BK %s array of %zu bytes: %s\n",
+              kind, bytes, strerror(errno));
+      return nullptr;
+    }
+    is_mmap_backed = true;
+    advise_bk_mapping(ptr, bytes, kind);
+    return ptr;
+  }
+
   const char *mmap_dir = getenv("MCPD3_BK_MMAP_DIR");
   if (!mmap_dir || mmap_dir[0] == '\0') {
-    return malloc(bytes);
+    fprintf(stderr,
+            "MCPD3_BK_STORAGE=file_mmap requires MCPD3_BK_MMAP_DIR\n");
+    return nullptr;
   }
 
   std::string pattern = std::string(mmap_dir) + "/mcpd3_bk_" + kind + "_XXXXXX";
@@ -54,6 +144,7 @@ void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
     return nullptr;
   }
   is_mmap_backed = true;
+  advise_bk_mapping(ptr, bytes, kind);
   return ptr;
 }
 
