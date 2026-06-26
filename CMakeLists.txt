@@ -60,6 +60,10 @@ if (TRAP_SIGNED_INTEGER_OVERFLOW)
 endif (TRAP_SIGNED_INTEGER_OVERFLOW)
 if (METIS_ENABLED)
   find_package(METIS REQUIRED)
+  include_directories(${METIS_INCLUDE_DIRS})
+  find_library(GKLIB_LIBRARY
+    NAMES GKlib
+    HINTS ${METIS_LIB_DIR} ${METIS_DIR}/lib ${METIS_LIBRARY_DIRS})
   SET(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -DHAVE_METIS")
 endif (METIS_ENABLED)
 
@@ -77,3 +81,6 @@ target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD
 ## DIMACS maxflow format example for dual decomposition
 add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
 target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
+if (METIS_ENABLED AND GKLIB_LIBRARY)
+  target_link_libraries(dimacs_dual_decomp_example PUBLIC ${GKLIB_LIBRARY} m)
+endif ()
