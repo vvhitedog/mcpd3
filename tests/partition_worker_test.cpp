@@ -379,6 +379,39 @@ std::vector<mcpd3::PartitionPackage> makeTieBreakRegularizationPackages() {
   return {source, target};
 }
 
+std::vector<mcpd3::PartitionPackage> makeOppositeDirectionCyclePackages(
+    int target_terminal_capacity = 8) {
+  mcpd3::PartitionPackage source;
+  source.partition_id = 0;
+  source.local_node_count = 1;
+  source.terminal_capacities = {-10};
+  source.local_to_global = {11};
+  source.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
+                                        /*global_node_id=*/11,
+                                        /*local_index=*/0,
+                                        /*is_source=*/true,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+
+  mcpd3::PartitionPackage target;
+  target.partition_id = 1;
+  target.local_node_count = 1;
+  target.terminal_capacities = {target_terminal_capacity};
+  target.local_to_global = {11};
+  target.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
+                                        /*global_node_id=*/11,
+                                        /*local_index=*/0,
+                                        /*is_source=*/false,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+
+  return {source, target};
+}
+
 mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
     std::deque<ScriptedRound> source_script,
     std::deque<ScriptedRound> target_script,
@@ -661,6 +694,141 @@ void fullSolveUsesLexicographicRegularizationToReachAgreement() {
           "second low-scale round should reach agreement");
 }
 
+void unitScaleResolvesOppositeDirectionCycle() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+  options.min_step_size = 1;
+  options.max_step_size = 10;
+
+  auto make_coordinator = [&]() {
+    auto packages = makeOppositeDirectionCyclePackages();
+    return mcpd3::PartitionWorkerCoordinator(
+        packages, makeInProcessWorkers(packages.size()), options);
+  };
+
+  auto scale_ten = make_coordinator();
+  for (int round = 1; round <= 4; ++round) {
+    const auto stats = scale_ten.runRound(
+        /*round_id=*/round, /*scale=*/10, /*step_size=*/10,
+        /*regularization_strength=*/10);
+    require(stats.disagreement_count == 1,
+            "opposite-direction cycle should not agree at scale 10 alone");
+    require(stats.lower_bound == (round % 2 == 0 ? 8 : 0),
+            "scale 10 cycle lower-bound pattern mismatch");
+  }
+
+  auto unregularized_schedule = make_coordinator();
+  long round_id = 1;
+  for (int round = 0; round < 10; ++round) {
+    const auto stats = unregularized_schedule.runRound(
+        /*round_id=*/round_id++, /*scale=*/10, /*step_size=*/10,
+        /*regularization_strength=*/0);
+    require(stats.disagreement_count == 1,
+            "scale 10 unregularized prefix should keep cycling");
+  }
+
+  mcpd3::PartitionWorkerRoundStats unit_stats;
+  for (int round = 0; round < 10; ++round) {
+    unit_stats = unregularized_schedule.runRound(
+        /*round_id=*/round_id++, /*scale=*/10, /*step_size=*/1,
+        /*regularization_strength=*/0);
+  }
+  require(unit_stats.disagreement_count == 0,
+          "unit scale should resolve the cycle even without regularization");
+  require(unit_stats.regularization_budget == 0,
+          "forced-unregularized unit scale should report no budget");
+
+  const auto packages = makeOppositeDirectionCyclePackages();
+  mcpd3::PartitionWorkerCoordinatorOptions solve_options;
+  solve_options.initial_step_size = 10;
+  solve_options.max_iteration_count = 10;
+  solve_options.num_optimization_scales = 2;
+  solve_options.patience = 99;
+  solve_options.enable_group_stopping = false;
+  solve_options.use_momentum = false;
+  solve_options.min_step_size = 1;
+  solve_options.max_step_size = 10;
+  mcpd3::PartitionWorkerCoordinator solver(
+      packages, makeInProcessWorkers(packages.size()), solve_options);
+  const auto result = solver.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "full 10-to-1 scale schedule should resolve the cycle");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "full scale schedule should report low-scale regularized agreement");
+  require(result.final_disagreement_count == 0,
+          "full scale schedule should finish with agreement");
+  require(result.progress_records.back().step_size == 1,
+          "cycle should resolve at unit scale");
+  require(result.progress_records.back().disagreement_count == 0,
+          "last progress record should be agreeing");
+}
+
+void symmetricAlphaShiftResolvesScaleTenCycle() {
+  for (const int target_terminal_capacity : {2, 5, 8}) {
+    const auto packages =
+        makeOppositeDirectionCyclePackages(target_terminal_capacity);
+
+    mcpd3::PartitionWorkerCoordinatorOptions baseline_options;
+    baseline_options.initial_step_size = 10;
+    baseline_options.max_iteration_count = 2;
+    baseline_options.num_optimization_scales = 1;
+    baseline_options.patience = 99;
+    baseline_options.enable_group_stopping = false;
+    baseline_options.use_momentum = false;
+    baseline_options.min_step_size = 1;
+    baseline_options.max_step_size = 10;
+    mcpd3::PartitionWorkerCoordinator baseline(
+        packages, makeInProcessWorkers(packages.size()), baseline_options);
+    const auto baseline_result = baseline.solve();
+    require(baseline_result.status ==
+                mcpd3::PartitionWorkerOptimizationStatus::
+                    ITERATION_COUNT_EXCEEDED,
+            "local lexicographic scheme should not resolve this at scale 10");
+    require(baseline_result.final_disagreement_count == 1,
+            "baseline scale 10 run should remain disagreeing");
+
+    mcpd3::PartitionWorkerCoordinatorOptions options;
+    options.initial_step_size = 10;
+    options.max_iteration_count = 2;
+    options.num_optimization_scales = 1;
+    options.patience = 99;
+    options.enable_group_stopping = false;
+    options.use_momentum = false;
+    options.min_step_size = 1;
+    options.max_step_size = 10;
+    options.regularization_scheme =
+        mcpd3::PartitionWorkerRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
+    options.symmetric_alpha_shift = 1;
+
+    mcpd3::PartitionWorkerCoordinator solver(
+        packages, makeInProcessWorkers(packages.size()), options);
+    const auto result = solver.solve();
+    require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+            "symmetric alpha shift should resolve scale 10 cycles");
+    require(result.stop_reason ==
+                mcpd3::PartitionWorkerStopReason::NO_DISAGREEMENT,
+            "symmetric alpha shift is an exact DD alpha update");
+    require(result.total_iterations == 2,
+            "symmetric alpha shift should agree on the second round");
+    require(result.final_disagreement_count == 0,
+            "symmetric alpha shift should finish with agreement");
+    require(result.final_regularization_budget == 0,
+            "symmetric alpha shift should not use local regularization budget");
+    require(result.progress_records.size() == 2,
+            "symmetric alpha shift should record both rounds");
+    require(result.progress_records[0].regularization_strength == 0,
+            "symmetric alpha shift should disable local lexicographic reg");
+    require(result.progress_records[1].regularization_strength == 0,
+            "symmetric alpha shift should keep local reg disabled");
+    require(result.progress_records[0].disagreement_count == 1,
+            "first symmetric alpha-shift round should expose disagreement");
+    require(result.progress_records[1].disagreement_count == 0,
+            "second symmetric alpha-shift round should reach agreement");
+  }
+}
+
 void fullSolveStopsAtIterationLimit() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 100;
@@ -860,6 +1028,8 @@ int main() {
     fullSolveStopsOptimalOnUnregularizedAgreement();
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesLexicographicRegularizationToReachAgreement();
+    unitScaleResolvesOppositeDirectionCycle();
+    symmetricAlphaShiftResolvesScaleTenCycle();
     fullSolveStopsAtIterationLimit();
     fullSolveStopsOnPatienceNoProgress();
     fullSolveStopsOnLegacyPatienceAfterDelayedImprovement();

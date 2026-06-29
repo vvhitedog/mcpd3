@@ -38,6 +38,11 @@ enum class PartitionWorkerStopReason {
   GROUP_STOPPING
 };
 
+enum class PartitionWorkerRegularizationScheme {
+  LOCAL_LEXICOGRAPHIC,
+  SYMMETRIC_ALPHA_SHIFT
+};
+
 struct PartitionWorkerCoordinatorOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
@@ -48,6 +53,9 @@ struct PartitionWorkerCoordinatorOptions {
   long max_step_size = 10000;
   bool use_momentum = true;
   bool enable_group_stopping = true;
+  PartitionWorkerRegularizationScheme regularization_scheme =
+      PartitionWorkerRegularizationScheme::LOCAL_LEXICOGRAPHIC;
+  long symmetric_alpha_shift = 1;
 };
 
 struct PartitionWorkerRoundStats {
@@ -343,7 +351,7 @@ private:
       ++scale_result.iterations;
 
       const int regularization_strength =
-          step_size <= 10 ? static_cast<int>(step_size) : 0;
+          localRegularizationStrength(step_size);
       const auto round_stats =
           runRound(result->total_iterations, scale, step_size,
                    regularization_strength);
@@ -534,13 +542,38 @@ private:
         const int momentum_scale = 10;
         constraint.alpha_momentum =
             beta * constraint.alpha_momentum * beta + (1 - beta) * diff;
-        constraint.alpha +=
+        const long alpha_update =
             stats->effective_step_size *
             static_cast<int>(momentum_scale * constraint.alpha_momentum);
+        constraint.alpha += applySymmetricAlphaShift(alpha_update);
       } else {
-        constraint.alpha += stats->effective_step_size * diff;
+        constraint.alpha +=
+            applySymmetricAlphaShift(stats->effective_step_size * diff);
       }
     }
+  }
+
+  long applySymmetricAlphaShift(long alpha_update) const {
+    if (options_.regularization_scheme !=
+        PartitionWorkerRegularizationScheme::SYMMETRIC_ALPHA_SHIFT) {
+      return alpha_update;
+    }
+    const long magnitude = alpha_update < 0 ? -alpha_update : alpha_update;
+    if (magnitude <= 1) {
+      return alpha_update;
+    }
+    const long shift =
+        std::clamp(options_.symmetric_alpha_shift, static_cast<long>(0),
+                   magnitude - 1);
+    return alpha_update > 0 ? alpha_update - shift : alpha_update + shift;
+  }
+
+  int localRegularizationStrength(long step_size) const {
+    if (options_.regularization_scheme !=
+        PartitionWorkerRegularizationScheme::LOCAL_LEXICOGRAPHIC) {
+      return 0;
+    }
+    return step_size <= 10 ? static_cast<int>(step_size) : 0;
   }
 
   std::vector<PartitionPackage> packages_;
