@@ -86,6 +86,7 @@ int main(int argc, char *argv[]) {
   int npartition = 10;
   std::string dimacs_path;
   bool stream_symmetric_input = false;
+  bool stream_directed_input = false;
   mcpd3::DualDecompositionOptions options;
   if (argc < 2) {
     std::cout << "usage: " << argv[0]
@@ -99,6 +100,7 @@ int main(int argc, char *argv[]) {
                  "[--symmetric-alpha-shift N] "
                  "[--random-initial-alpha-radius N] "
                  "[--random-initial-alpha-seed N] "
+                 "[--stream-directed-input] "
                  "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
   }
@@ -122,6 +124,8 @@ int main(int argc, char *argv[]) {
       options.verbose = false;
     } else if (arg == "--stream-symmetric-input") {
       stream_symmetric_input = true;
+    } else if (arg == "--stream-directed-input") {
+      stream_directed_input = true;
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--min-step")) != "") {
       options.min_step_size = std::atol(value.c_str());
@@ -175,10 +179,19 @@ int main(int argc, char *argv[]) {
   auto read_graph_microseconds = mcpd3::time_lambda([&] {
     read_graph_mem = mcpd3::get_resident_memory_usage(
         [&] {
-          min_cut_graph_data = stream_symmetric_input
-                                   ? mcpd3::read_dimacs_symmetric_streaming(
-                                         dimacs_path)
-                                   : mcpd3::read_dimacs(dimacs_path);
+          if (stream_symmetric_input && stream_directed_input) {
+            throw std::runtime_error(
+                "cannot combine symmetric and directed streaming input");
+          }
+          if (stream_symmetric_input) {
+            min_cut_graph_data =
+                mcpd3::read_dimacs_symmetric_streaming(dimacs_path);
+          } else if (stream_directed_input) {
+            min_cut_graph_data =
+                mcpd3::read_dimacs_directed_streaming(dimacs_path);
+          } else {
+            min_cut_graph_data = mcpd3::read_dimacs(dimacs_path);
+          }
         });
   });
   std::cout << "read graph mem usage: " << read_graph_mem.usage_in_gb << "GB\n";
@@ -206,6 +219,8 @@ int main(int argc, char *argv[]) {
             << " primal_upper_bound=" << options.track_primal_upper_bound
             << " verbose=" << options.verbose
             << " momentum=" << options.use_momentum
+            << " stream_directed_input=" << stream_directed_input
+            << " stream_symmetric_input=" << stream_symmetric_input
             << " regularization="
             << regularization_scheme_name(options.regularization_scheme)
             << " symmetric_alpha_shift=" << options.symmetric_alpha_shift

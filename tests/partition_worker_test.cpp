@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <iostream>
 #include <list>
 #include <map>
@@ -20,6 +21,7 @@
 #include <decomp/dualdecomp.h>
 #include <decomp/partition_coordinator.h>
 #include <decomp/partition_worker.h>
+#include <graph/dimacs.h>
 #include <primaldual/mcpd3.h>
 
 namespace {
@@ -268,6 +270,36 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
   require(worker_stats.disagreement_norm_sq ==
               reference.getLastDisagreementNormSq(),
           "coordinator disagreement norm differs from DualDecomposition");
+}
+
+void directedStreamingDimacsMatchesGeneralReaderValue() {
+  const std::string path = "/tmp/mcpd3-directed-streaming-dimacs-test.max";
+  {
+    std::ofstream out(path);
+    out << "c directed streaming reader test\n";
+    out << "p max 4 4\n";
+    out << "n 1 s\n";
+    out << "n 4 t\n";
+    out << "a 1 2 5\n";
+    out << "a 2 3 7\n";
+    out << "a 3 2 11\n";
+    out << "a 3 4 17\n";
+  }
+
+  auto general = mcpd3::read_dimacs(path);
+  auto directed_streaming = mcpd3::read_dimacs_directed_streaming(path);
+  require(general.nnode == directed_streaming.nnode,
+          "directed streaming reader should preserve node count");
+  require(general.terminal_capacities ==
+              directed_streaming.terminal_capacities,
+          "directed streaming reader should preserve terminal capacities");
+
+  mcpd3::PrimalDualMinCutSolver general_solver(std::move(general));
+  mcpd3::PrimalDualMinCutSolver directed_streaming_solver(
+      std::move(directed_streaming));
+  require(general_solver.maxflow() == directed_streaming_solver.maxflow(),
+          "directed streaming reader should preserve maxflow value");
+  std::remove(path.c_str());
 }
 
 void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
@@ -1261,6 +1293,7 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
+    directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     lexicographicRegularizationOnlyBreaksLocalTies();

@@ -263,6 +263,53 @@ MinCutGraph read_dimacs(const std::string &filename) {
   return std::move(g);
 }
 
+MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
+  MinCutGraph g;
+  g.nnode = 0;
+  g.narc = 0;
+
+  auto arc_op = [&](int s, int t, int cap) {
+    g.nnode = std::max(g.nnode, s + 1);
+    g.nnode = std::max(g.nnode, t + 1);
+    g.arc_capacities.push_back(cap);
+    g.arc_capacities.push_back(0);
+    g.arcs.push_back(s);
+    g.arcs.push_back(t);
+    ++g.narc;
+  };
+
+  long imbalance = 0;
+  auto term_op = [&](bool is_source, int n, int cap) {
+    g.nnode = std::max(g.nnode, n + 1);
+    g.terminal_capacities.resize(g.nnode, 0);
+    if (is_source) {
+      auto old_cap = g.terminal_capacities[n];
+      if (old_cap < 0) {
+        imbalance += std::min(-old_cap, cap);
+      }
+      g.terminal_capacities[n] += cap;
+    } else {
+      auto old_cap = g.terminal_capacities[n];
+      if (old_cap > 0) {
+        imbalance += std::min(old_cap, cap);
+      }
+      g.terminal_capacities[n] -= cap;
+    }
+  };
+
+  _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
+
+  if (imbalance > 0) {
+    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
+  }
+
+  g.terminal_capacities.resize(g.nnode, 0);
+  g.arcs.shrink_to_fit();
+  g.terminal_capacities.shrink_to_fit();
+  g.arc_capacities.shrink_to_fit();
+  return std::move(g);
+}
+
 MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
   const int line_length = 1024;
   char line[line_length];
