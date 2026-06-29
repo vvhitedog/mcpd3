@@ -10,11 +10,14 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <decomp/dualdecomp.h>
+#include <decomp/partition_coordinator.h>
 #include <decomp/partition_worker.h>
 #include <primaldual/mcpd3.h>
 
@@ -209,12 +212,70 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
           "worker disagreement count differs from DualDecomposition");
 }
 
+mcpd3::DualDecomposition makeTinyDualDecomposition() {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+
+  return mcpd3::DualDecomposition(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+}
+
+void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  auto package_source = makeTinyDualDecomposition();
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  for (size_t i = 0; i < package_source.getPartitionPackages().size(); ++i) {
+    workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  }
+
+  mcpd3::PartitionWorkerCoordinatorOptions coordinator_options;
+  coordinator_options.min_step_size = 1;
+  coordinator_options.max_step_size = 10000;
+  coordinator_options.use_momentum = false;
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      package_source.getPartitionPackages(), std::move(workers),
+      coordinator_options);
+
+  long best_worker_lower_bound = std::numeric_limits<long>::min();
+  mcpd3::PartitionWorkerRoundStats worker_stats;
+  for (long round = 1; round <= 2; ++round) {
+    worker_stats = coordinator.runRound(
+        /*round_id=*/round, /*scale=*/100, /*step_size=*/100,
+        /*regularization_strength=*/0);
+    best_worker_lower_bound =
+        std::max(best_worker_lower_bound, worker_stats.lower_bound);
+  }
+
+  auto reference = makeTinyDualDecomposition();
+  reference.runOptimizationScale(
+      /*nstep=*/2, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+
+  require(best_worker_lower_bound == reference.getBestLowerBoundRaw(),
+          "coordinator best lower bound differs from DualDecomposition");
+  require(worker_stats.disagreement_count ==
+              reference.getLastDisagreementCount(),
+          "coordinator disagreement count differs from DualDecomposition");
+  require(worker_stats.disagreement_norm_sq ==
+              reference.getLastDisagreementNormSq(),
+          "coordinator disagreement norm differs from DualDecomposition");
+}
+
 } // namespace
 
 int main() {
   try {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
+    partitionWorkerCoordinatorMatchesDualDecompositionRounds();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;
