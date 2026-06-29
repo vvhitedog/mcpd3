@@ -28,6 +28,7 @@ set(PROJECT_AUTHOR_EMAIL gara.matt@gmail.com )
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 include(GNUInstallDirs)
+include(CTest)
 
 # Set standard to c++11
 if (${CMAKE_VERSION} VERSION_GREATER 3.0)
@@ -83,4 +84,10 @@ add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFL
 target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
 if (METIS_ENABLED AND GKLIB_LIBRARY)
   target_link_libraries(dimacs_dual_decomp_example PUBLIC ${GKLIB_LIBRARY} m)
+endif ()
+
+if (BUILD_TESTING)
+  add_executable(partition_worker_test tests/partition_worker_test.cpp ${MAXFLOW_SRC})
+  target_link_libraries(partition_worker_test PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
+  add_test(NAME partition_worker_test COMMAND partition_worker_test)
 endif ()

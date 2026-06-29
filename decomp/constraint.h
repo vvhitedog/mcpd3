@@ -30,7 +30,7 @@ struct DualDecompositionConstraintArc {
   int local_index_source;     /* index within sub-problem of source */
   int local_index_target;     /* index within sub-problem of target */
 
-  DualDecompositionConstraintArc(int alpha, int last_alpha,
+  DualDecompositionConstraintArc(long alpha, long last_alpha,
                                  float alpha_momentum,
                                  int partition_index_source,
                                  int partition_index_target,
