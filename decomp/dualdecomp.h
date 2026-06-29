@@ -34,6 +34,7 @@
 
 #include <measure/timer.h>
 #include <decomp/constraint.h>
+#include <decomp/partition_worker.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
@@ -109,7 +110,8 @@ public:
         original_terminal_capacities_(options.track_primal_upper_bound
                                           ? terminal_capacities_
                                           : std::vector<int>()),
-        min_cut_sub_graphs_(npartition_), primal_solution_(nnode_), scale_(1),
+        min_cut_sub_graphs_(npartition_), partition_packages_(npartition_),
+        primal_solution_(nnode_), scale_(1),
         options_(options),
         thread_pool_(
             resolveThreadCount(npartition_, options_.thread_count)),
@@ -165,6 +167,9 @@ public:
   }
   long getTotalOptimizationIterations() const {
     return total_optimization_iterations_;
+  }
+  const std::vector<PartitionPackage> &getPartitionPackages() const {
+    return partition_packages_;
   }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
@@ -926,7 +931,17 @@ private:
      */
     auto solver_start = std::chrono::steady_clock::now();
     int solver_done = 0;
-    for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
+    for (int partition = 0; partition < npartition_; ++partition) {
+      auto &min_cut_sub_graph = min_cut_sub_graphs_[partition];
+      auto &package = partition_packages_[partition];
+      package.partition_id = partition;
+      package.local_node_count = min_cut_sub_graph.graph.nnode;
+      package.arcs = min_cut_sub_graph.graph.arcs;
+      package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
+      package.terminal_capacities = min_cut_sub_graph.graph.terminal_capacities;
+      package.local_to_global = min_cut_sub_graph.local_to_global;
+      package.constraint_endpoints.clear();
+
       solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
           std::move(min_cut_sub_graph.graph)));
       ++solver_done;
@@ -939,6 +954,7 @@ private:
      */
     std::set<int> constrained_nodes_partition_counts;
     std::vector<int> constrained_nodes_count_in_each_partition(npartition_,0);
+    int next_constraint_id = 0;
     auto constraint_start = std::chrono::steady_clock::now();
     long constrained_done = 0;
     const long constrained_total = static_cast<long>(constrained_nodes.size());
@@ -961,6 +977,7 @@ private:
               min_cut_sub_graphs_[partition_source].getNode(global_index);
           int local_index_target =
               min_cut_sub_graphs_[partition_target].getNode(global_index);
+          const int constraint_id = next_constraint_id++;
           constraint_arcs.emplace_back(
               /*alpha=*/0,
               /*last_alpha=*/0,
@@ -974,6 +991,22 @@ private:
               arc_reference);
           solvers_[partition_target]->addTargetDualDecompositionConstraint(
               arc_reference);
+          partition_packages_[partition_source].constraint_endpoints.push_back(
+              ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                        /*global_node_id=*/global_index,
+                                        /*local_index=*/local_index_source,
+                                        /*is_source=*/true,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+          partition_packages_[partition_target].constraint_endpoints.push_back(
+              ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                        /*global_node_id=*/global_index,
+                                        /*local_index=*/local_index_target,
+                                        /*is_source=*/false,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
           constrained_nodes_count_in_each_partition[partition_source]++;
           constrained_nodes_count_in_each_partition[partition_target]++;
         }
@@ -1119,6 +1152,7 @@ private:
   };
 
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
+  std::vector<PartitionPackage> partition_packages_;
   std::vector<bool> primal_solution_;
   std::vector<bool> best_primal_solution_;
   long scale_;

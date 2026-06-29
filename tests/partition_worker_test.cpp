@@ -9,10 +9,12 @@
 #include <cstdlib>
 #include <iostream>
 #include <list>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <decomp/dualdecomp.h>
 #include <decomp/partition_worker.h>
 #include <primaldual/mcpd3.h>
 
@@ -144,11 +146,75 @@ void inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate() {
   requireMatchesDirect(worker_second, direct_second, second_request.round_id);
 }
 
+long countWorkerDisagreements(
+    const std::vector<mcpd3::PartitionSolveResult> &results) {
+  std::map<int, std::vector<int>> labels_by_constraint;
+  for (const auto &result : results) {
+    for (const auto &label : result.constrained_labels) {
+      labels_by_constraint[label.constraint_id].push_back(label.label);
+    }
+  }
+
+  long disagreement_count = 0;
+  for (const auto &entry : labels_by_constraint) {
+    const auto &labels = entry.second;
+    require(labels.size() == 2, "expected pairwise constraint labels");
+    disagreement_count += std::abs(labels[1] - labels[0]);
+  }
+  return disagreement_count;
+}
+
+void exportedPartitionPackagesMatchDualDecompositionRound() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  const auto &packages = dual_decomp.getPartitionPackages();
+  require(packages.size() == 2, "expected two exported partition packages");
+
+  std::vector<mcpd3::PartitionSolveResult> worker_results;
+  long worker_lower_bound = 0;
+  for (const auto &package : packages) {
+    mcpd3::InProcessPartitionWorker worker;
+    worker.loadPartition(package);
+
+    mcpd3::PartitionSolveRequest request;
+    request.round_id = 1;
+    request.scale = 100;
+    request.regularization_strength = 0;
+    auto result = worker.solveRound(request);
+    worker_lower_bound += result.lower_bound;
+    worker_results.push_back(result);
+  }
+
+  dual_decomp.runOptimizationScale(
+      /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+
+  require(worker_lower_bound == dual_decomp.getBestLowerBoundRaw(),
+          "worker lower bound differs from DualDecomposition");
+  require(countWorkerDisagreements(worker_results) ==
+              dual_decomp.getLastDisagreementCount(),
+          "worker disagreement count differs from DualDecomposition");
+}
+
 } // namespace
 
 int main() {
   try {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
+    exportedPartitionPackagesMatchDualDecompositionRound();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;
