@@ -16,11 +16,15 @@
 
 #pragma once
 
-#include <boost/functional/hash.hpp>
 #include <cassert>
+#include <functional>
+#include <limits>
+#include <memory>
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 #include <graph/dimacs.h>
 #include <graph/partition.h>
@@ -29,6 +33,16 @@
 #include <maxflow/graph.h>
 
 namespace mcpd3 {
+
+struct PairHash {
+  template <typename First, typename Second>
+  std::size_t operator()(const std::pair<First, Second> &value) const {
+    std::size_t seed = std::hash<First>{}(value.first);
+    seed ^= std::hash<Second>{}(value.second) + 0x9e3779b97f4a7c15ULL +
+            (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
 
 template <typename node_index_type, typename arc_index_type, typename cap_type>
 struct Edge {
@@ -139,7 +153,7 @@ public:
     // 3 a. gather arcs
     std::unordered_map<std::pair<node_index_type, node_index_type>,
                        std::pair<cap_type, cap_type>,
-                       boost::hash<std::pair<node_index_type, node_index_type>>>
+                       PairHash>
         arc_to_capacity_map;
     for (const auto &start_node : visited) {
       arc_index_type arc_start_offset = (*adjacency_offsets_)[start_node];
