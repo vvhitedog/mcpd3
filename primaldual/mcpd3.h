@@ -17,7 +17,9 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,7 +42,8 @@ public:
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
         d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
-        maxflow_changed_list_(128), regularization_str_(0),
+        has_solution_(false), maxflow_changed_list_(128),
+        regularization_str_(0),
         last_regularization_budget_(0), last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
         last_regularization_active_sink_count_(0) {
@@ -219,6 +222,11 @@ public:
   }
 
   void solve() {
+    resetRegularizationDiagnostics();
+    if (trySolveLexicographicRegularized()) {
+      return;
+    }
+
     if (is_first_iteration_) {
       auto init_time = time_lambda([&]{
       shrinkToFitDualDecompositionConstraints(); // memory optimization
@@ -235,6 +243,7 @@ public:
     computeMaxflow();           // compute maxflow
     updateFlow();               // get updated flow
     updateMinCut();             // get updated min cut solution
+    has_solution_ = true;
 
     // set flag indicating that incremental methods should be used hereafter
     if (is_first_iteration_ || is_first_iteration_of_new_scale_) {
@@ -316,14 +325,151 @@ public:
   void setMinCutSolution(const std::vector<bool> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
+    has_solution_ = true;
   }
 
   void setMinCutSolution(const std::vector<int> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
+    has_solution_ = true;
   }
 
 private:
+  static long checkedAdd(long lhs, long rhs) {
+    if ((rhs > 0 && lhs > std::numeric_limits<long>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<long>::min() - rhs)) {
+      throw std::overflow_error("lexicographic regularization capacity overflow");
+    }
+    return lhs + rhs;
+  }
+
+  static long checkedMultiply(long lhs, long rhs) {
+    if (lhs == 0 || rhs == 0) {
+      return 0;
+    }
+    if (lhs == -1 && rhs == std::numeric_limits<long>::min()) {
+      throw std::overflow_error("lexicographic regularization capacity overflow");
+    }
+    if (rhs == -1 && lhs == std::numeric_limits<long>::min()) {
+      throw std::overflow_error("lexicographic regularization capacity overflow");
+    }
+    const long result = lhs * rhs;
+    if (result / rhs != lhs) {
+      throw std::overflow_error("lexicographic regularization capacity overflow");
+    }
+    return result;
+  }
+
+  void resetRegularizationDiagnostics() {
+    last_regularization_budget_ = 0;
+    last_regularization_contribution_ = 0;
+    last_regularization_anchor_sink_count_ = 0;
+    last_regularization_active_sink_count_ = 0;
+    last_regularization_anchor_sink_.assign(
+        dual_decomposition_local_indices_.size(), 0);
+  }
+
+  long lagrangeMultiplierTerm(size_t constraint_index) const {
+    const auto &constraint = dual_decomposition_constraints_[constraint_index];
+    long lagrange_multiplier_term = 0;
+    for (const auto &arc_reference : constraint.source_arc_references) {
+      lagrange_multiplier_term -= arc_reference->alpha;
+    }
+    for (const auto &arc_reference : constraint.target_arc_references) {
+      lagrange_multiplier_term += arc_reference->alpha;
+    }
+    return lagrange_multiplier_term;
+  }
+
+  long markRegularizationAnchorsFromCurrentSolution() {
+    if (regularization_str_ <= 0 || !has_solution_) {
+      return 0;
+    }
+    long budget = 0;
+    for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
+      const int local_index = dual_decomposition_local_indices_[i];
+      if (x_[local_index]) {
+        budget = checkedAdd(budget, regularization_str_);
+        last_regularization_anchor_sink_count_++;
+        last_regularization_anchor_sink_[i] = 1;
+      }
+    }
+    last_regularization_budget_ = budget;
+    return budget;
+  }
+
+  void resetIncrementalStateAfterExternalSolve() {
+    std::fill(v_flow_.begin(), v_flow_.end(), 0);
+    std::fill(d_flow_.begin(), d_flow_.end(), 0);
+    incremental_mincut_nodes_.clear();
+    incremental_arcs_.clear();
+    maxflow_changed_list_.Reset();
+    maxflow_graph_.reset();
+    initializeMaxflowGraph();
+    is_first_iteration_ = true;
+    is_first_iteration_of_new_scale_ = true;
+  }
+
+  bool trySolveLexicographicRegularized() {
+    const long regularization_budget =
+        markRegularizationAnchorsFromCurrentSolution();
+    if (regularization_budget == 0) {
+      return false;
+    }
+
+    // M > max(R) makes the one-sided regularizer a lexicographic tie-break:
+    // every one-unit change in the unregularized objective dominates R.
+    const long objective_multiplier = checkedAdd(regularization_budget, 1);
+    using ExactGraph = Graph<long, long, long>;
+    ExactGraph graph(nnode_, narc_);
+    graph.add_node(nnode_);
+
+    for (int i = 0; i < narc_; ++i) {
+      const int s = arcs_[2 * i + 0];
+      const int t = arcs_[2 * i + 1];
+      const long forward_capacity =
+          checkedMultiply(arc_capacities_[2 * i + 0], objective_multiplier);
+      const long backward_capacity =
+          checkedMultiply(arc_capacities_[2 * i + 1], objective_multiplier);
+      graph.add_edge(s, t, forward_capacity, backward_capacity);
+    }
+
+    std::vector<long> terminal_terms(nnode_, 0);
+    for (int i = 0; i < nnode_; ++i) {
+      terminal_terms[i] =
+          checkedMultiply(terminal_capacities_[i], objective_multiplier);
+    }
+    for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
+      const int local_index = dual_decomposition_local_indices_[i];
+      terminal_terms[local_index] = checkedAdd(
+          terminal_terms[local_index],
+          checkedMultiply(lagrangeMultiplierTerm(i), objective_multiplier));
+      if (last_regularization_anchor_sink_[i]) {
+        terminal_terms[local_index] =
+            checkedAdd(terminal_terms[local_index], regularization_str_);
+      }
+    }
+
+    for (int i = 0; i < nnode_; ++i) {
+      const long terminal_capacity = terminal_terms[i];
+      if (terminal_capacity > 0) {
+        graph.add_tweights(i, terminal_capacity, 0);
+      } else {
+        graph.add_tweights(i, 0, -terminal_capacity);
+      }
+    }
+
+    graph.maxflow();
+    for (int i = 0; i < nnode_; ++i) {
+      x_[i] = graph.what_segment(i) == ExactGraph::SINK ? 1 : 0;
+    }
+    updateRegularizationContribution();
+    computeMinCutValueInitial();
+    has_solution_ = true;
+    resetIncrementalStateAfterExternalSolve();
+    return true;
+  }
+
   void computeMinCutValueInitial() {
     mincut_value_ = 0;
     for (int i = 0; i < narc_; ++i) {
@@ -348,7 +494,7 @@ private:
     // add dual decomposition node potential terms (when/if applicable)
     size_t i = 0;
     for (const auto &constraint : dual_decomposition_constraints_) {
-      int lagrange_multiplier_term = 0;
+      long lagrange_multiplier_term = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
         lagrange_multiplier_term -= arc_reference->alpha;
       }
@@ -458,10 +604,6 @@ private:
   }
 
   void updateNodePotentialsIncremental() {
-    last_regularization_budget_ = 0;
-    last_regularization_anchor_sink_count_ = 0;
-    last_regularization_anchor_sink_.assign(
-        dual_decomposition_local_indices_.size(), 0);
     // add mincut node potential terms
     for (const int i : incremental_mincut_nodes_) {
       if ( dual_decomposition_local_indices_set_.find(i) != dual_decomposition_local_indices_set_.end() ){
@@ -471,25 +613,14 @@ private:
       updateNodeTerminal(i, pos, false);
     }
     size_t cache_index = 0;
-    int regularization_budget = 0;
     for (const auto &i : dual_decomposition_local_indices_) {
-      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] && regularization_str_ == 0 ) {
+      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] ) {
         cache_index++;
         continue;
       }
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       pos += cached_lagrange_multipliers_[cache_index++];
-      if ( regularization_str_ != 0 && x_[i] ) { // only add a regularization term if needed
-        pos += regularization_str_;
-        regularization_budget += regularization_str_;
-        last_regularization_budget_ += regularization_str_;
-        last_regularization_anchor_sink_count_++;
-        last_regularization_anchor_sink_[cache_index - 1] = 1;
-      }
       updateNodeTerminal(i, pos, false);
-    }
-    if ( regularization_budget > 10000 ) {
-      printf("warning: regularization_budget is exceeding 10000, the hardcoded maximum scale, lower bound constraint may not be enforced.\n");
     }
   }
 
@@ -737,6 +868,7 @@ private:
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;
+  bool has_solution_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
   std::list<int> incremental_mincut_nodes_;

@@ -347,6 +347,38 @@ std::vector<mcpd3::PartitionPackage> makeCoordinatorPackages() {
           makeCoordinatorPackage(/*partition_id=*/1, /*is_source=*/false)};
 }
 
+std::vector<mcpd3::PartitionPackage> makeTieBreakRegularizationPackages() {
+  mcpd3::PartitionPackage source;
+  source.partition_id = 0;
+  source.local_node_count = 1;
+  source.terminal_capacities = {-10};
+  source.local_to_global = {11};
+  source.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
+                                        /*global_node_id=*/11,
+                                        /*local_index=*/0,
+                                        /*is_source=*/true,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+
+  mcpd3::PartitionPackage target;
+  target.partition_id = 1;
+  target.local_node_count = 1;
+  target.terminal_capacities = {10};
+  target.local_to_global = {11};
+  target.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
+                                        /*global_node_id=*/11,
+                                        /*local_index=*/0,
+                                        /*is_source=*/false,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+
+  return {source, target};
+}
+
 mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
     std::deque<ScriptedRound> source_script,
     std::deque<ScriptedRound> target_script,
@@ -368,6 +400,144 @@ mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
   workers.push_back(std::move(target));
   return mcpd3::PartitionWorkerCoordinator(makeCoordinatorPackages(),
                                            std::move(workers), options);
+}
+
+std::vector<std::unique_ptr<mcpd3::PartitionWorker>> makeInProcessWorkers(
+    size_t count) {
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  for (size_t i = 0; i < count; ++i) {
+    workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  }
+  return workers;
+}
+
+struct OneNodeSourceSolveResult {
+  long lower_bound = 0;
+  int label = 0;
+  long regularization_budget = 0;
+  long regularization_contribution = 0;
+  long regularization_anchor_sink_count = 0;
+  long regularization_active_sink_count = 0;
+};
+
+OneNodeSourceSolveResult solveOneNodeSourceProblem(
+    long alpha, int terminal_capacity, int regularization_strength,
+    bool seed_sink_anchor) {
+  std::list<mcpd3::DualDecompositionConstraintArc> constraints;
+  constraints.emplace_back(alpha, alpha, /*alpha_momentum=*/0,
+                           /*partition_index_source=*/0,
+                           /*partition_index_target=*/1,
+                           /*local_index_source=*/0,
+                           /*local_index_target=*/-1);
+  auto ref = --constraints.end();
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{terminal_capacity});
+  solver.addSourceDualDecompositionConstraint(ref);
+  if (seed_sink_anchor) {
+    solver.setMinCutSolution(std::vector<int>{1});
+  }
+  solver.setRegularizationStrength(regularization_strength);
+  solver.solve();
+  return OneNodeSourceSolveResult{
+      solver.getMinCutValue(),
+      solver.getMinCutSolution(/*index=*/0),
+      solver.getLastRegularizationBudget(),
+      solver.getLastRegularizationContribution(),
+      solver.getLastRegularizationAnchorSinkCount(),
+      solver.getLastRegularizationActiveSinkCount()};
+}
+
+void lexicographicRegularizationOnlyBreaksLocalTies() {
+  const auto no_anchor =
+      solveOneNodeSourceProblem(/*alpha=*/-10, /*terminal_capacity=*/-10,
+                                /*regularization_strength=*/10,
+                                /*seed_sink_anchor=*/false);
+  require(no_anchor.regularization_budget == 0,
+          "regularization should not apply without an existing anchor");
+  require(no_anchor.lower_bound == 10,
+          "unanchored tie lower bound should be unregularized");
+
+  const auto strict =
+      solveOneNodeSourceProblem(/*alpha=*/-9, /*terminal_capacity=*/-10,
+                                /*regularization_strength=*/10,
+                                /*seed_sink_anchor=*/true);
+  require(strict.label == 1,
+          "lexicographic regularization must preserve strict optima");
+  require(strict.lower_bound == 9,
+          "strict optimum lower bound should exclude regularization");
+  require(strict.regularization_budget == 10,
+          "strict anchored solve should report the lexicographic budget");
+  require(strict.regularization_contribution == 10,
+          "strict anchored sink solution should pay the regularizer");
+  require(strict.regularization_anchor_sink_count == 1,
+          "strict anchored solve should count the sink anchor");
+  require(strict.regularization_active_sink_count == 1,
+          "strict anchored sink solution should count active regularization");
+
+  const auto tied =
+      solveOneNodeSourceProblem(/*alpha=*/-10, /*terminal_capacity=*/-10,
+                                /*regularization_strength=*/10,
+                                /*seed_sink_anchor=*/true);
+  require(tied.label == 0,
+          "lexicographic regularization should select source on ties");
+  require(tied.lower_bound == 10,
+          "tie-broken lower bound should remain the unregularized optimum");
+  require(tied.regularization_budget == 10,
+          "tie-broken solve should report the lexicographic budget");
+  require(tied.regularization_contribution == 0,
+          "tie-broken source solution should not pay regularization");
+  require(tied.regularization_anchor_sink_count == 1,
+          "tie-broken solve should count the sink anchor");
+  require(tied.regularization_active_sink_count == 0,
+          "tie-broken source solution should not count active regularization");
+}
+
+void lowScaleLexicographicRegularizationHandlesBoundaryTie() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+  options.min_step_size = 1;
+  options.max_step_size = 10;
+
+  const auto packages = makeTieBreakRegularizationPackages();
+  mcpd3::PartitionWorkerCoordinator unregularized_coordinator(
+      packages, makeInProcessWorkers(packages.size()), options);
+  const auto initial_unregularized = unregularized_coordinator.runRound(
+      /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/0);
+  require(initial_unregularized.disagreement_count == 1,
+          "initial unregularized round should disagree");
+  require(initial_unregularized.regularization_budget == 0,
+          "unregularized round should not report regularization budget");
+
+  const auto tied_unregularized = unregularized_coordinator.runRound(
+      /*round_id=*/2, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/0);
+  require(tied_unregularized.disagreement_count == 0,
+          "current unregularized maxflow tie-break should choose source");
+  require(tied_unregularized.regularization_budget == 0,
+          "unregularized tie should not report regularization budget");
+
+  mcpd3::PartitionWorkerCoordinator regularized_coordinator(
+      packages, makeInProcessWorkers(packages.size()), options);
+  const auto regularized_initial = regularized_coordinator.runRound(
+      /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/10);
+  require(regularized_initial.disagreement_count == 1,
+          "first low-scale round should still disagree before anchors exist");
+  require(regularized_initial.regularization_budget == 0,
+          "first low-scale round should not regularize without anchors");
+
+  const auto regularized = regularized_coordinator.runRound(
+      /*round_id=*/2, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/10);
+  require(regularized.disagreement_count == 0,
+          "lexicographic regularization should select agreeing tied labels");
+  require(regularized.regularization_budget == 10,
+          "regularized round should anchor the source-side sink label");
+  require(regularized.regularization_contribution == 0,
+          "agreeing solution should not pay regularization");
 }
 
 void fullSolveStopsOptimalOnUnregularizedAgreement() {
@@ -406,32 +576,89 @@ void fullSolveStopsOptimalOnUnregularizedAgreement() {
           "progress record regularization strength mismatch");
 }
 
-void fullSolveStopsNoProgressOnRegularizedAgreement() {
+void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 10;
   options.max_iteration_count = 5;
   options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
   auto coordinator = makeScriptedCoordinator(
       std::deque<ScriptedRound>{{10, 0, 2, 1, 3, 1}},
-      std::deque<ScriptedRound>{{15, 0, 4, 2, 5, 2}}, options);
+      std::deque<ScriptedRound>{{15, 0, 4, 2, 5, 2}}, options,
+      &source_worker, &target_worker);
 
   const auto result = coordinator.solve();
   require(result.status ==
-              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
-          "regularized agreement should not be exact optimality");
+              mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "lexicographic regularized agreement should certify optimality");
   require(result.stop_reason ==
               mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
-          "regularized agreement should report regularized stop");
+          "regularized agreement should report its stop reason");
+  require(result.total_iterations == 1,
+          "solve should not run an unregularized confirmation round");
+  require(result.progress_records.size() == 1,
+          "regularized agreement should record one progress row");
+  require(result.progress_records[0].regularization_strength == 10,
+          "regularized round should use regularization");
+  require(result.progress_records[0].regularization_budget == 6,
+          "regularized round should report regularization budget");
+  require(result.progress_records[0].disagreement_count == 0,
+          "regularized round should reach agreement");
   require(result.final_regularization_budget == 6,
-          "regularization budget should be accumulated");
-  require(result.final_regularization_contribution == 3,
-          "regularization contribution should be accumulated");
-  require(result.final_regularization_anchor_sink_count == 8,
-          "regularization anchor count should be accumulated");
-  require(result.final_regularization_active_sink_count == 3,
-          "regularization active count should be accumulated");
-  require(result.progress_records.front().regularization_strength == 10,
-          "regularized solve should report active regularization strength");
+          "final diagnostics should come from the lexicographic round");
+  require(source_worker->requests()[0].regularization_strength == 10,
+          "first source request should be regularized");
+  require(source_worker->requests().size() == 1,
+          "source worker should not receive a confirmation request");
+  require(target_worker->requests().size() == 1,
+          "target worker should not receive a confirmation request");
+}
+
+void fullSolveUsesLexicographicRegularizationToReachAgreement() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  const auto packages = makeTieBreakRegularizationPackages();
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      packages, makeInProcessWorkers(packages.size()), options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "lexicographic tie-break agreement should be optimal");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "lexicographic tie-break stop reason mismatch");
+  require(result.total_iterations == 2,
+          "tie-break solve should stop after the anchored low-scale round");
+  require(result.final_regularization_budget == 10,
+          "final diagnostics should include the tie-break budget");
+  require(result.final_regularization_contribution == 0,
+          "agreeing tie-break should not pay the regularizer");
+  require(result.progress_records.size() == 2,
+          "tie-break solve should record initial and regularized rounds");
+  require(result.progress_records[0].regularization_strength == 10,
+          "low-scale schedule should request regularization immediately");
+  require(result.progress_records[0].regularization_budget == 0,
+          "first low-scale round should have no anchors yet");
+  require(result.progress_records[0].disagreement_count == 1,
+          "first round should expose the initial disagreement");
+  require(result.progress_records[1].regularization_strength == 10,
+          "second low-scale round should remain regularized");
+  require(result.progress_records[1].regularization_budget == 10,
+          "second low-scale round should report its regularization budget");
+  require(result.progress_records[1].disagreement_count == 0,
+          "second low-scale round should reach agreement");
 }
 
 void fullSolveStopsAtIterationLimit() {
@@ -539,6 +766,49 @@ void fullSolveStopsOnGroupStopping() {
           "group stopping should evaluate two full groups");
 }
 
+void fullSolveRequestsRegularizationOnlyAtLowScales() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 1000;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 4;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}, {13, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 1}, {22, 1}, {23, 1}},
+      options, &source_worker, &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::ITERATION_COUNT_EXCEEDED,
+          "persistent disagreement should exhaust all configured scales");
+  require(result.progress_records.size() == 4,
+          "one iteration per scale should produce four progress records");
+  require(result.progress_records[0].step_size == 1000,
+          "first scale step size mismatch");
+  require(result.progress_records[1].step_size == 100,
+          "second scale step size mismatch");
+  require(result.progress_records[2].step_size == 10,
+          "third scale step size mismatch");
+  require(result.progress_records[3].step_size == 1,
+          "fourth scale step size mismatch");
+  require(source_worker->requests()[0].regularization_strength == 0,
+          "scale 1000 should not be regularized");
+  require(source_worker->requests()[1].regularization_strength == 0,
+          "scale 100 should not be regularized");
+  require(source_worker->requests()[2].regularization_strength == 10,
+          "scale 10 should request lexicographic regularization");
+  require(source_worker->requests()[3].regularization_strength == 1,
+          "scale 1 should request lexicographic regularization");
+  require(target_worker->requests()[2].regularization_strength == 10,
+          "target worker should receive scale 10 regularization");
+  require(target_worker->requests()[3].regularization_strength == 1,
+          "target worker should receive scale 1 regularization");
+}
+
 void fullSolveContinuesAcrossScales() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 1000;
@@ -585,12 +855,16 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
+    lexicographicRegularizationOnlyBreaksLocalTies();
+    lowScaleLexicographicRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();
-    fullSolveStopsNoProgressOnRegularizedAgreement();
+    fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
+    fullSolveUsesLexicographicRegularizationToReachAgreement();
     fullSolveStopsAtIterationLimit();
     fullSolveStopsOnPatienceNoProgress();
     fullSolveStopsOnLegacyPatienceAfterDelayedImprovement();
     fullSolveStopsOnGroupStopping();
+    fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";

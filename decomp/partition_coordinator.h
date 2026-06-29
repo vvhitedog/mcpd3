@@ -276,6 +276,67 @@ private:
     TwoGroupMaxTracker lower_bound_group_stats(num_stats_in_group);
     long scale_best_lower_bound = std::numeric_limits<long>::min();
     int last_improvement_iter = 0;
+    auto record_round =
+        [&](int iteration, int regularization_strength,
+            const PartitionWorkerRoundStats &round_stats) {
+          result->final_disagreement_count = round_stats.disagreement_count;
+          result->final_disagreement_norm_sq =
+              round_stats.disagreement_norm_sq;
+          result->final_regularization_budget =
+              round_stats.regularization_budget;
+          result->final_regularization_contribution =
+              round_stats.regularization_contribution;
+          result->final_regularization_anchor_sink_count =
+              round_stats.regularization_anchor_sink_count;
+          result->final_regularization_active_sink_count =
+              round_stats.regularization_active_sink_count;
+          scale_result.final_disagreement_count =
+              round_stats.disagreement_count;
+          scale_result.final_disagreement_norm_sq =
+              round_stats.disagreement_norm_sq;
+
+          const long best_lower_bound =
+              std::max(scale_best_lower_bound, round_stats.lower_bound);
+          result->progress_records.push_back(
+              PartitionWorkerProgressRecord{/*scale=*/scale,
+                                            /*iteration=*/iteration,
+                                            /*total_iteration=*/
+                                            result->total_iterations,
+                                            /*max_iteration=*/
+                                            options_.max_iteration_count,
+                                            /*lower_bound=*/
+                                            round_stats.lower_bound,
+                                            /*best_lower_bound=*/
+                                            best_lower_bound,
+                                            /*disagreement_count=*/
+                                            round_stats.disagreement_count,
+                                            /*disagreement_norm_sq=*/
+                                            round_stats.disagreement_norm_sq,
+                                            /*step_size=*/step_size,
+                                            /*effective_step_size=*/
+                                            round_stats.effective_step_size,
+                                            /*regularization_strength=*/
+                                            regularization_strength,
+                                            /*regularization_budget=*/
+                                            round_stats.regularization_budget,
+                                            /*regularization_contribution=*/
+                                            round_stats
+                                                .regularization_contribution,
+                                            /*regularization_anchor_sink_count=*/
+                                            round_stats
+                                                .regularization_anchor_sink_count,
+                                            /*regularization_active_sink_count=*/
+                                            round_stats
+                                                .regularization_active_sink_count,
+                                            /*iterations_since_improvement=*/
+                                            iteration - last_improvement_iter});
+
+          result->best_lower_bound_raw =
+              std::max(result->best_lower_bound_raw, round_stats.lower_bound);
+          scale_result.best_lower_bound_raw =
+              std::max(scale_result.best_lower_bound_raw,
+                       round_stats.lower_bound);
+        };
 
     for (int i = 0; i < options_.max_iteration_count; ++i) {
       ++result->total_iterations;
@@ -287,61 +348,7 @@ private:
           runRound(result->total_iterations, scale, step_size,
                    regularization_strength);
 
-      result->final_disagreement_count = round_stats.disagreement_count;
-      result->final_disagreement_norm_sq = round_stats.disagreement_norm_sq;
-      result->final_regularization_budget =
-          round_stats.regularization_budget;
-      result->final_regularization_contribution =
-          round_stats.regularization_contribution;
-      result->final_regularization_anchor_sink_count =
-          round_stats.regularization_anchor_sink_count;
-      result->final_regularization_active_sink_count =
-          round_stats.regularization_active_sink_count;
-      scale_result.final_disagreement_count =
-          round_stats.disagreement_count;
-      scale_result.final_disagreement_norm_sq =
-          round_stats.disagreement_norm_sq;
-
-      const long best_lower_bound =
-          std::max(scale_best_lower_bound, round_stats.lower_bound);
-      result->progress_records.push_back(
-          PartitionWorkerProgressRecord{/*scale=*/scale,
-                                        /*iteration=*/i,
-                                        /*total_iteration=*/
-                                        result->total_iterations,
-                                        /*max_iteration=*/
-                                        options_.max_iteration_count,
-                                        /*lower_bound=*/
-                                        round_stats.lower_bound,
-                                        /*best_lower_bound=*/
-                                        best_lower_bound,
-                                        /*disagreement_count=*/
-                                        round_stats.disagreement_count,
-                                        /*disagreement_norm_sq=*/
-                                        round_stats.disagreement_norm_sq,
-                                        /*step_size=*/step_size,
-                                        /*effective_step_size=*/
-                                        round_stats.effective_step_size,
-                                        /*regularization_strength=*/
-                                        regularization_strength,
-                                        /*regularization_budget=*/
-                                        round_stats.regularization_budget,
-                                        /*regularization_contribution=*/
-                                        round_stats
-                                            .regularization_contribution,
-                                        /*regularization_anchor_sink_count=*/
-                                        round_stats
-                                            .regularization_anchor_sink_count,
-                                        /*regularization_active_sink_count=*/
-                                        round_stats
-                                            .regularization_active_sink_count,
-                                        /*iterations_since_improvement=*/
-                                        i - last_improvement_iter});
-
-      result->best_lower_bound_raw =
-          std::max(result->best_lower_bound_raw, round_stats.lower_bound);
-      scale_result.best_lower_bound_raw =
-          std::max(scale_result.best_lower_bound_raw, round_stats.lower_bound);
+      record_round(i, regularization_strength, round_stats);
 
       if (round_stats.lower_bound > scale_best_lower_bound) {
         scale_best_lower_bound = round_stats.lower_bound;
@@ -383,8 +390,7 @@ private:
           scale_result.stop_reason =
               PartitionWorkerStopReason::NO_DISAGREEMENT;
         } else {
-          scale_result.status =
-              PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS;
+          scale_result.status = PartitionWorkerOptimizationStatus::OPTIMAL;
           scale_result.stop_reason =
               PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT;
         }

@@ -489,41 +489,38 @@ public:
 
       if (best_upper_bound_ != std::numeric_limits<long>::max() &&
           max_lower_bound >= best_upper_bound_) {
-        if (regularization_strength == 0) {
-          if (report_progress) {
+        if (report_progress) {
+          if (regularization_strength == 0) {
             std::fprintf(stderr,
                          "mcpd3_progress stage=dd_solve_stop "
                          "reason=lower_bound_closed_upper lower=%.6lf "
                          "upper=%.6lf\n",
                          double(max_lower_bound) / scale_,
                          double(best_upper_bound_) / scale_);
-            std::fflush(stderr);
+          } else {
+            std::fprintf(stderr,
+                         "mcpd3_progress stage=dd_solve_stop "
+                         "reason=regularized_closed_upper lower=%.6lf "
+                         "upper=%.6lf regularization_strength=%d\n",
+                         double(max_lower_bound) / scale_,
+                         double(best_upper_bound_) / scale_,
+                         regularization_strength);
           }
-          if (options_.verbose) {
-            printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
-                   double(max_lower_bound) / scale_,
-                   double(best_upper_bound_) / scale_);
-          }
-          opt_status = OPTIMAL;
-          break;
-        }
-        if (report_progress) {
-          std::fprintf(stderr,
-                       "mcpd3_progress stage=dd_solve_stop "
-                       "reason=regularized_closed_upper lower=%.6lf "
-                       "upper=%.6lf regularization_strength=%d\n",
-                       double(max_lower_bound) / scale_,
-                       double(best_upper_bound_) / scale_,
-                       regularization_strength);
           std::fflush(stderr);
         }
         if (options_.verbose) {
-          printf("breaking because regularized reported value closed primal upper bound; not an unregularized certificate: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
-                 double(max_lower_bound) / scale_,
-                 double(best_upper_bound_) / scale_,
-                 regularization_strength);
+          if (regularization_strength == 0) {
+            printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
+                   double(max_lower_bound) / scale_,
+                   double(best_upper_bound_) / scale_);
+          } else {
+            printf("breaking because lexicographic regularization closed primal upper bound: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
+                   double(max_lower_bound) / scale_,
+                   double(best_upper_bound_) / scale_,
+                   regularization_strength);
+          }
         }
-        opt_status = NO_FURTHER_PROGRESS;
+        opt_status = OPTIMAL;
         break;
       }
 
@@ -575,10 +572,10 @@ public:
             std::fflush(stderr);
           }
           if (options_.verbose) {
-            printf("breaking because regularized subproblems agree; not an unregularized certificate: regularization_strength=%d\n",
+            printf("breaking because lexicographically regularized subproblems agree: regularization_strength=%d\n",
                    regularization_strength);
           }
-          opt_status = NO_FURTHER_PROGRESS;
+          opt_status = OPTIMAL;
         }
         break;
       }
