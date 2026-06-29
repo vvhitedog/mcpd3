@@ -829,6 +829,139 @@ void symmetricAlphaShiftResolvesScaleTenCycle() {
   }
 }
 
+void randomInitialAlphaValidationAndZeroRadiusNoop() {
+  const auto packages = makeOppositeDirectionCyclePackages();
+
+  mcpd3::PartitionWorkerCoordinatorOptions invalid_options;
+  invalid_options.randomize_initial_alphas = true;
+  invalid_options.initial_alpha_random_radius = -1;
+  bool threw = false;
+  try {
+    mcpd3::PartitionWorkerCoordinator solver(
+        packages, makeInProcessWorkers(packages.size()), invalid_options);
+  } catch (const std::runtime_error &e) {
+    threw =
+        std::string(e.what()).find("initial alpha random radius") !=
+        std::string::npos;
+  }
+  require(threw, "negative initial alpha random radius should be rejected");
+
+  mcpd3::PartitionWorkerCoordinatorOptions zero_radius_options;
+  zero_radius_options.initial_step_size = 10;
+  zero_radius_options.max_iteration_count = 1;
+  zero_radius_options.num_optimization_scales = 1;
+  zero_radius_options.patience = 99;
+  zero_radius_options.enable_group_stopping = false;
+  zero_radius_options.use_momentum = false;
+  zero_radius_options.min_step_size = 1;
+  zero_radius_options.max_step_size = 10;
+  zero_radius_options.regularization_scheme =
+      mcpd3::PartitionWorkerRegularizationScheme::NONE;
+  zero_radius_options.randomize_initial_alphas = true;
+  zero_radius_options.initial_alpha_random_radius = 0;
+  zero_radius_options.initial_alpha_random_seed = 9;
+
+  mcpd3::PartitionWorkerCoordinator solver(
+      packages, makeInProcessWorkers(packages.size()), zero_radius_options);
+  const auto result = solver.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::ITERATION_COUNT_EXCEEDED,
+          "zero-radius random alpha init should be a no-op");
+  require(result.final_disagreement_count == 1,
+          "zero-radius random alpha init should preserve disagreement");
+  require(result.final_regularization_budget == 0,
+          "NONE regularization scheme should not use local regularization");
+  require(result.progress_records.size() == 1,
+          "zero-radius random alpha run should record one round");
+  require(result.progress_records[0].regularization_strength == 0,
+          "NONE scheme should keep local regularization disabled");
+}
+
+void randomInitialAlphaResolvesScaleTenCycle() {
+  for (const int target_terminal_capacity : {2, 5, 8}) {
+    const auto packages =
+        makeOppositeDirectionCyclePackages(target_terminal_capacity);
+
+    mcpd3::PartitionWorkerCoordinatorOptions baseline_options;
+    baseline_options.initial_step_size = 10;
+    baseline_options.max_iteration_count = 2;
+    baseline_options.num_optimization_scales = 1;
+    baseline_options.patience = 99;
+    baseline_options.enable_group_stopping = false;
+    baseline_options.use_momentum = false;
+    baseline_options.min_step_size = 1;
+    baseline_options.max_step_size = 10;
+    baseline_options.regularization_scheme =
+        mcpd3::PartitionWorkerRegularizationScheme::NONE;
+    mcpd3::PartitionWorkerCoordinator baseline(
+        packages, makeInProcessWorkers(packages.size()), baseline_options);
+    const auto baseline_result = baseline.solve();
+    require(baseline_result.status ==
+                mcpd3::PartitionWorkerOptimizationStatus::
+                    ITERATION_COUNT_EXCEEDED,
+            "unregularized scale 10 run should keep cycling");
+    require(baseline_result.final_disagreement_count == 1,
+            "unregularized scale 10 baseline should remain disagreeing");
+    require(baseline_result.final_regularization_budget == 0,
+            "unregularized baseline should not use local regularization");
+    require(baseline_result.progress_records.size() == 2,
+            "baseline should record both fixed-scale rounds");
+    require(baseline_result.progress_records[0].regularization_strength == 0,
+            "NONE scheme should disable baseline regularization");
+    require(baseline_result.progress_records[1].regularization_strength == 0,
+            "NONE scheme should keep baseline regularization disabled");
+
+    mcpd3::PartitionWorkerCoordinatorOptions missed_options =
+        baseline_options;
+    missed_options.randomize_initial_alphas = true;
+    missed_options.initial_alpha_random_radius = 9;
+    missed_options.initial_alpha_random_seed = 1;
+    mcpd3::PartitionWorkerCoordinator missed_solver(
+        packages, makeInProcessWorkers(packages.size()), missed_options);
+    const auto missed_result = missed_solver.solve();
+    require(missed_result.status ==
+                mcpd3::PartitionWorkerOptimizationStatus::
+                    ITERATION_COUNT_EXCEEDED,
+            "a missed random initial alpha should not resolve scale 10 cycles");
+    require(missed_result.final_disagreement_count == 1,
+            "a missed random initial alpha should remain disagreeing");
+    require(missed_result.final_regularization_budget == 0,
+            "missed random initial alpha should not use local regularization");
+    require(missed_result.progress_records.size() == 2,
+            "missed random initial alpha should record both rounds");
+    require(missed_result.progress_records[0].regularization_strength == 0,
+            "missed random initial alpha should keep local regularization off");
+    require(missed_result.progress_records[1].regularization_strength == 0,
+            "missed random initial alpha should keep regularization disabled");
+
+    mcpd3::PartitionWorkerCoordinatorOptions options = baseline_options;
+    options.randomize_initial_alphas = true;
+    options.initial_alpha_random_radius = 9;
+    options.initial_alpha_random_seed = 9;
+
+    mcpd3::PartitionWorkerCoordinator solver(
+        packages, makeInProcessWorkers(packages.size()), options);
+    const auto result = solver.solve();
+    require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+            "seeded random initial alpha should resolve scale 10 cycles");
+    require(result.stop_reason ==
+                mcpd3::PartitionWorkerStopReason::NO_DISAGREEMENT,
+            "random initial alpha should reach unregularized agreement");
+    require(result.total_iterations == 1,
+            "random initial alpha should agree on the first round");
+    require(result.final_disagreement_count == 0,
+            "random initial alpha should finish with agreement");
+    require(result.final_regularization_budget == 0,
+            "random initial alpha should not use local regularization budget");
+    require(result.progress_records.size() == 1,
+            "random initial alpha should record the agreeing round");
+    require(result.progress_records[0].regularization_strength == 0,
+            "random initial alpha test should keep local regularization off");
+    require(result.progress_records[0].disagreement_count == 0,
+            "random initial alpha should remove the disagreement");
+  }
+}
+
 void fullSolveStopsAtIterationLimit() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 100;
@@ -1030,6 +1163,8 @@ int main() {
     fullSolveUsesLexicographicRegularizationToReachAgreement();
     unitScaleResolvesOppositeDirectionCycle();
     symmetricAlphaShiftResolvesScaleTenCycle();
+    randomInitialAlphaValidationAndZeroRadiusNoop();
+    randomInitialAlphaResolvesScaleTenCycle();
     fullSolveStopsAtIterationLimit();
     fullSolveStopsOnPatienceNoProgress();
     fullSolveStopsOnLegacyPatienceAfterDelayedImprovement();

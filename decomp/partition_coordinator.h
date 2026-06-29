@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -40,7 +41,8 @@ enum class PartitionWorkerStopReason {
 
 enum class PartitionWorkerRegularizationScheme {
   LOCAL_LEXICOGRAPHIC,
-  SYMMETRIC_ALPHA_SHIFT
+  SYMMETRIC_ALPHA_SHIFT,
+  NONE
 };
 
 struct PartitionWorkerCoordinatorOptions {
@@ -56,6 +58,9 @@ struct PartitionWorkerCoordinatorOptions {
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::LOCAL_LEXICOGRAPHIC;
   long symmetric_alpha_shift = 1;
+  bool randomize_initial_alphas = false;
+  long initial_alpha_random_radius = 0;
+  unsigned int initial_alpha_random_seed = 0;
 };
 
 struct PartitionWorkerRoundStats {
@@ -144,6 +149,7 @@ public:
       workers_[i]->loadPartition(packages_[i]);
     }
     buildConstraints();
+    randomizeInitialAlphas();
   }
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
@@ -464,6 +470,29 @@ private:
       constraint.alpha_momentum = accumulator.alpha_momentum;
       constraint_index_by_id_[constraint.constraint_id] = constraints_.size();
       constraints_.push_back(constraint);
+    }
+  }
+
+  void randomizeInitialAlphas() {
+    if (!options_.randomize_initial_alphas) {
+      return;
+    }
+    if (options_.initial_alpha_random_radius < 0) {
+      throw std::runtime_error(
+          "initial alpha random radius must be non-negative");
+    }
+    if (options_.initial_alpha_random_radius == 0) {
+      return;
+    }
+
+    std::mt19937 generator(options_.initial_alpha_random_seed);
+    std::uniform_int_distribution<long> distribution(
+        -options_.initial_alpha_random_radius,
+        options_.initial_alpha_random_radius);
+    for (auto &constraint : constraints_) {
+      const long offset = distribution(generator);
+      constraint.alpha += offset;
+      constraint.last_alpha += offset;
     }
   }
 
