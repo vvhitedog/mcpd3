@@ -7,6 +7,7 @@
 // any later version.
 
 #include <cstdlib>
+#include <deque>
 #include <iostream>
 #include <list>
 #include <map>
@@ -269,6 +270,314 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
           "coordinator disagreement norm differs from DualDecomposition");
 }
 
+struct ScriptedRound {
+  long lower_bound = 0;
+  int label = 0;
+  long regularization_budget = 0;
+  long regularization_contribution = 0;
+  long regularization_anchor_sink_count = 0;
+  long regularization_active_sink_count = 0;
+};
+
+class ScriptedPartitionWorker final : public mcpd3::PartitionWorker {
+public:
+  explicit ScriptedPartitionWorker(std::deque<ScriptedRound> script)
+      : script_(std::move(script)) {}
+
+  void loadPartition(const mcpd3::PartitionPackage &package) override {
+    package_ = package;
+  }
+
+  mcpd3::PartitionSolveResult solveRound(
+      const mcpd3::PartitionSolveRequest &request) override {
+    require(!script_.empty(), "scripted worker was called too many times");
+    requests_.push_back(request);
+    const auto round = script_.front();
+    script_.pop_front();
+
+    mcpd3::PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = package_.partition_id;
+    result.lower_bound = round.lower_bound;
+    result.regularization_budget = round.regularization_budget;
+    result.regularization_contribution = round.regularization_contribution;
+    result.regularization_anchor_sink_count =
+        round.regularization_anchor_sink_count;
+    result.regularization_active_sink_count =
+        round.regularization_active_sink_count;
+    for (const auto &endpoint : package_.constraint_endpoints) {
+      result.constrained_labels.push_back(
+          mcpd3::ConstraintLabel{endpoint.constraint_id,
+                                 endpoint.global_node_id,
+                                 endpoint.local_index, round.label});
+    }
+    return result;
+  }
+
+  const std::vector<mcpd3::PartitionSolveRequest> &requests() const {
+    return requests_;
+  }
+
+private:
+  mcpd3::PartitionPackage package_;
+  std::deque<ScriptedRound> script_;
+  std::vector<mcpd3::PartitionSolveRequest> requests_;
+};
+
+mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
+                                               bool is_source) {
+  mcpd3::PartitionPackage package;
+  package.partition_id = partition_id;
+  package.local_node_count = 1;
+  package.terminal_capacities = {0};
+  package.local_to_global = {11};
+  package.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
+                                        /*global_node_id=*/11,
+                                        /*local_index=*/0,
+                                        /*is_source=*/is_source,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+  return package;
+}
+
+std::vector<mcpd3::PartitionPackage> makeCoordinatorPackages() {
+  return {makeCoordinatorPackage(/*partition_id=*/0, /*is_source=*/true),
+          makeCoordinatorPackage(/*partition_id=*/1, /*is_source=*/false)};
+}
+
+mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
+    std::deque<ScriptedRound> source_script,
+    std::deque<ScriptedRound> target_script,
+    const mcpd3::PartitionWorkerCoordinatorOptions &options,
+    ScriptedPartitionWorker **source_worker = nullptr,
+    ScriptedPartitionWorker **target_worker = nullptr) {
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  auto source = std::make_unique<ScriptedPartitionWorker>(
+      std::move(source_script));
+  auto target = std::make_unique<ScriptedPartitionWorker>(
+      std::move(target_script));
+  if (source_worker != nullptr) {
+    *source_worker = source.get();
+  }
+  if (target_worker != nullptr) {
+    *target_worker = target.get();
+  }
+  workers.push_back(std::move(source));
+  workers.push_back(std::move(target));
+  return mcpd3::PartitionWorkerCoordinator(makeCoordinatorPackages(),
+                                           std::move(workers), options);
+}
+
+void fullSolveStopsOptimalOnUnregularizedAgreement() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}},
+      std::deque<ScriptedRound>{{15, 0}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "unregularized agreement should be optimal");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::NO_DISAGREEMENT,
+          "optimal agreement should report no-disagreement stop");
+  require(result.best_lower_bound_raw == 25,
+          "best lower bound should include all partitions");
+  require(result.final_disagreement_count == 0,
+          "final disagreement count should be zero");
+  require(result.total_iterations == 1, "optimal solve should stop in one iter");
+  require(result.progress_records.size() == 1,
+          "progress should record every iteration");
+  const auto &record = result.progress_records.front();
+  require(record.scale == 100, "progress record scale mismatch");
+  require(record.iteration == 0, "progress record iteration mismatch");
+  require(record.total_iteration == 1,
+          "progress record total iteration mismatch");
+  require(record.max_iteration == 5, "progress record max iteration mismatch");
+  require(record.lower_bound == 25, "progress record lower bound mismatch");
+  require(record.best_lower_bound == 25,
+          "progress record best lower bound mismatch");
+  require(record.regularization_strength == 0,
+          "progress record regularization strength mismatch");
+}
+
+void fullSolveStopsNoProgressOnRegularizedAgreement() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0, 2, 1, 3, 1}},
+      std::deque<ScriptedRound>{{15, 0, 4, 2, 5, 2}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
+          "regularized agreement should not be exact optimality");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "regularized agreement should report regularized stop");
+  require(result.final_regularization_budget == 6,
+          "regularization budget should be accumulated");
+  require(result.final_regularization_contribution == 3,
+          "regularization contribution should be accumulated");
+  require(result.final_regularization_anchor_sink_count == 8,
+          "regularization anchor count should be accumulated");
+  require(result.final_regularization_active_sink_count == 3,
+          "regularization active count should be accumulated");
+  require(result.progress_records.front().regularization_strength == 10,
+          "regularized solve should report active regularization strength");
+}
+
+void fullSolveStopsAtIterationLimit() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 3;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 1}, {22, 1}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::ITERATION_COUNT_EXCEEDED,
+          "persistent disagreement should hit iteration limit");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED,
+          "iteration limit stop reason mismatch");
+  require(result.total_iterations == 3,
+          "iteration limit should run max iterations");
+  require(result.final_disagreement_count == 1,
+          "final disagreement should be retained");
+  require(result.best_lower_bound_raw == 34,
+          "best lower bound should track improvements");
+}
+
+void fullSolveStopsOnPatienceNoProgress() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 1;
+  options.enable_group_stopping = false;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
+          "flat lower bound should stop on patience");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::NO_LOWER_BOUND_IMPROVEMENT,
+          "patience stop reason mismatch");
+  require(result.total_iterations == 2,
+          "patience should stop after one non-improving iteration");
+  require(result.progress_records.back().iterations_since_improvement == 1,
+          "progress should report iterations since improvement");
+}
+
+void fullSolveStopsOnLegacyPatienceAfterDelayedImprovement() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 1;
+  options.legacy_patience = true;
+  options.enable_group_stopping = false;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}, {11, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}, {21, 1}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
+          "legacy patience should report no further progress");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::LEGACY_PATIENCE,
+          "legacy patience stop reason mismatch");
+  require(result.total_iterations == 3,
+          "legacy patience should stop on delayed improvement");
+}
+
+void fullSolveStopsOnGroupStopping() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 25;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = true;
+
+  std::deque<ScriptedRound> source_script;
+  std::deque<ScriptedRound> target_script;
+  for (int i = 0; i < 10; ++i) {
+    source_script.push_back(ScriptedRound{100 + i, 0});
+    target_script.push_back(ScriptedRound{0, 1});
+  }
+  for (int i = 0; i < 10; ++i) {
+    source_script.push_back(ScriptedRound{90 + i, 0});
+    target_script.push_back(ScriptedRound{0, 1});
+  }
+  auto coordinator = makeScriptedCoordinator(std::move(source_script),
+                                             std::move(target_script), options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
+          "group stopping should report no further progress");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::GROUP_STOPPING,
+          "group stopping reason mismatch");
+  require(result.total_iterations == 20,
+          "group stopping should evaluate two full groups");
+}
+
+void fullSolveContinuesAcrossScales() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 1000;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 2;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {12, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {22, 0}}, options, &source_worker,
+      &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "second scale agreement should stop as optimal");
+  require(result.scale_results.size() == 2,
+          "solve should record both scale attempts");
+  require(result.scale_results[0].status ==
+              mcpd3::PartitionWorkerOptimizationStatus::ITERATION_COUNT_EXCEEDED,
+          "first scale should hit iteration cap");
+  require(result.scale_results[1].status ==
+              mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "second scale should stop as optimal");
+  require(result.progress_records.size() == 2,
+          "two-scale solve should have two progress records");
+  require(result.progress_records[0].step_size == 1000,
+          "first scale step size mismatch");
+  require(result.progress_records[1].step_size == 100,
+          "second scale step size mismatch");
+  require(source_worker->requests()[0].regularization_strength == 0,
+          "first scale should not be regularized");
+  require(target_worker->requests()[1].regularization_strength == 0,
+          "second scale should not be regularized");
+}
+
 } // namespace
 
 int main() {
@@ -276,6 +585,13 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
+    fullSolveStopsOptimalOnUnregularizedAgreement();
+    fullSolveStopsNoProgressOnRegularizedAgreement();
+    fullSolveStopsAtIterationLimit();
+    fullSolveStopsOnPatienceNoProgress();
+    fullSolveStopsOnLegacyPatienceAfterDelayedImprovement();
+    fullSolveStopsOnGroupStopping();
+    fullSolveContinuesAcrossScales();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;
