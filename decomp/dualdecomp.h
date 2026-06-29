@@ -76,11 +76,6 @@ inline void dualdecomp_progress_message(const std::string &message) {
   std::fflush(stderr);
 }
 
-enum class DualDecompositionStepPolicy {
-  FixedScaleSchedule,
-  PolyakGap,
-};
-
 struct DualDecompositionOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
@@ -92,9 +87,6 @@ struct DualDecompositionOptions {
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
   bool verbose = true;
-  DualDecompositionStepPolicy step_policy =
-      DualDecompositionStepPolicy::FixedScaleSchedule;
-  double theta = 1.0;
   long min_step_size = 1;
   long max_step_size = 10000;
   size_t thread_count = 0;
@@ -654,28 +646,6 @@ private:
     return hash;
   }
 
-  long computePolyakStep(long fallback_step_size, long lower_bound,
-                         double disagreement_norm_sq) const {
-    if (options_.step_policy != DualDecompositionStepPolicy::PolyakGap ||
-        best_upper_bound_ == std::numeric_limits<long>::max() ||
-        disagreement_norm_sq <= 0) {
-      return fallback_step_size;
-    }
-    const long gap = best_upper_bound_ - lower_bound;
-    if (gap <= 0) {
-      return options_.min_step_size;
-    }
-    const double raw_step =
-        options_.theta * static_cast<double>(gap) / disagreement_norm_sq;
-    if (!std::isfinite(raw_step)) {
-      return fallback_step_size;
-    }
-    const long rounded_step =
-        std::max<long>(1, static_cast<long>(std::llround(raw_step)));
-    return std::clamp(rounded_step, options_.min_step_size,
-                      options_.max_step_size);
-  }
-
   LagrangeUpdateStats runLagrangeMultipliersUpdateStep(long step_size,
                                                        bool use_momentum,
                                                        long lower_bound) {
@@ -698,8 +668,9 @@ private:
         stats.disagreeing_global_indices.emplace_back(global_index);
       }
     }
+    (void)lower_bound;
     stats.effective_step_size =
-        computePolyakStep(step_size, lower_bound, stats.disagreement_norm_sq);
+        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
 
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {

@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
               << " DIMACS_MAXFLOW_FILE [NUM_PARTITIONS]\n"
               << "       " << argv[0]
               << " DIMACS_MAXFLOW_FILE --partitions N "
-                 "--step-policy fixed|polyak [--theta X] [--patience N] "
+                 "[--patience N] "
                  "[--max-iterations N] [--threads N] "
                  "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
@@ -69,19 +69,6 @@ int main(int argc, char *argv[]) {
     std::string value;
     if ((value = get_option_value(i, argc, argv, arg, "--partitions")) != "") {
       npartition = std::atoi(value.c_str());
-    } else if ((value = get_option_value(i, argc, argv, arg,
-                                         "--step-policy")) != "") {
-      if (value == "fixed") {
-        options.step_policy =
-            mcpd3::DualDecompositionStepPolicy::FixedScaleSchedule;
-      } else if (value == "polyak") {
-        options.step_policy = mcpd3::DualDecompositionStepPolicy::PolyakGap;
-      } else {
-        std::cerr << "unknown --step-policy: " << value << "\n";
-        return EXIT_FAILURE;
-      }
-    } else if ((value = get_option_value(i, argc, argv, arg, "--theta")) != "") {
-      options.theta = std::atof(value.c_str());
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--patience")) != "") {
       options.patience = std::atoi(value.c_str());
@@ -150,12 +137,7 @@ int main(int argc, char *argv[]) {
             << "\n";
 
   std::cout << "dd_options partitions=" << npartition
-            << " step_policy="
-            << (options.step_policy ==
-                        mcpd3::DualDecompositionStepPolicy::PolyakGap
-                    ? "polyak"
-                    : "fixed")
-            << " theta=" << options.theta
+            << " step_policy=fixed"
             << " patience=" << options.patience
             << " max_iterations=" << options.max_iteration_count
             << " threads=" << options.thread_count
