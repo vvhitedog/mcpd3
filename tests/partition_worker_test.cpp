@@ -270,6 +270,111 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
           "coordinator disagreement norm differs from DualDecomposition");
 }
 
+void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+
+  mcpd3::DualDecomposition local_lexicographic(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  require(local_lexicographic.regularizationStrengthForStepSize(100) == 0,
+          "high scales should not use local lexicographic regularization");
+  require(local_lexicographic.regularizationStrengthForStepSize(10) == 10,
+          "step 10 should use local lexicographic regularization");
+  require(local_lexicographic.regularizationStrengthForStepSize(1) == 1,
+          "step 1 should use local lexicographic regularization");
+
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  mcpd3::DualDecomposition none(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  require(none.regularizationStrengthForStepSize(10) == 0,
+          "NONE scheme should disable low-scale local regularization");
+
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
+  mcpd3::DualDecomposition symmetric_alpha_shift(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  require(symmetric_alpha_shift.regularizationStrengthForStepSize(10) == 0,
+          "symmetric alpha shift should disable local regularization");
+}
+
+void dualDecompositionRandomizesExportedInitialAlphas() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.randomize_initial_alphas = true;
+  options.initial_alpha_random_radius = 9;
+  options.initial_alpha_random_seed = 9;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  long randomized_alpha = 0;
+  int endpoint_count = 0;
+  for (const auto &package : dual_decomp.getPartitionPackages()) {
+    for (const auto &endpoint : package.constraint_endpoints) {
+      if (endpoint_count == 0) {
+        randomized_alpha = endpoint.alpha;
+      }
+      require(endpoint.alpha == randomized_alpha,
+              "random initial alpha should match across endpoints");
+      require(endpoint.last_alpha == randomized_alpha,
+              "random initial alpha should update last_alpha with alpha");
+      require(endpoint.alpha >= -options.initial_alpha_random_radius &&
+                  endpoint.alpha <= options.initial_alpha_random_radius,
+              "random initial alpha should stay inside configured radius");
+      ++endpoint_count;
+    }
+  }
+  require(endpoint_count == 2,
+          "tiny decomposition should export one pairwise constraint");
+  require(randomized_alpha != 0,
+          "seeded random initial alpha should perturb the initial multiplier");
+
+  mcpd3::DualDecompositionOptions invalid_options = options;
+  invalid_options.initial_alpha_random_radius = -1;
+  bool threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/2,
+        /*nnode=*/2,
+        /*narc=*/1,
+        /*arcs=*/std::vector<int>{0, 1},
+        /*arc_capacities=*/std::vector<int>{3, 5},
+        /*terminal_capacities=*/std::vector<int>{2, -4}, invalid_options);
+  } catch (const std::runtime_error &e) {
+    threw =
+        std::string(e.what()).find("initial alpha random radius") !=
+        std::string::npos;
+  }
+  require(threw, "negative initial alpha random radius should be rejected");
+}
+
 struct ScriptedRound {
   long lower_bound = 0;
   int label = 0;
@@ -1156,6 +1261,8 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
+    dualDecompositionRegularizationSchemeControlsLowScaleStrength();
+    dualDecompositionRandomizesExportedInitialAlphas();
     lexicographicRegularizationOnlyBreaksLocalTies();
     lowScaleLexicographicRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();

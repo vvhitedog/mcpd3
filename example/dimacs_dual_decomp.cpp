@@ -46,6 +46,39 @@ std::string get_option_value(int &i, int argc, char *argv[],
   return "";
 }
 
+bool parse_regularization_scheme(
+    const std::string &value,
+    mcpd3::DualDecompositionRegularizationScheme *scheme) {
+  if (value == "local-lexicographic") {
+    *scheme =
+        mcpd3::DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC;
+    return true;
+  }
+  if (value == "symmetric-alpha-shift") {
+    *scheme =
+        mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
+    return true;
+  }
+  if (value == "none") {
+    *scheme = mcpd3::DualDecompositionRegularizationScheme::NONE;
+    return true;
+  }
+  return false;
+}
+
+const char *regularization_scheme_name(
+    mcpd3::DualDecompositionRegularizationScheme scheme) {
+  switch (scheme) {
+  case mcpd3::DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC:
+    return "local-lexicographic";
+  case mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT:
+    return "symmetric-alpha-shift";
+  case mcpd3::DualDecompositionRegularizationScheme::NONE:
+    return "none";
+  }
+  return "unknown";
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -61,6 +94,11 @@ int main(int argc, char *argv[]) {
               << " DIMACS_MAXFLOW_FILE --partitions N "
                  "[--patience N] "
                  "[--max-iterations N] [--threads N] "
+                 "[--regularization local-lexicographic|"
+                 "symmetric-alpha-shift|none] "
+                 "[--symmetric-alpha-shift N] "
+                 "[--random-initial-alpha-radius N] "
+                 "[--random-initial-alpha-seed N] "
                  "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
   }
@@ -96,6 +134,28 @@ int main(int argc, char *argv[]) {
       options.enable_group_stopping = false;
     } else if (arg == "--no-momentum") {
       options.use_momentum = false;
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--regularization")) != "") {
+      if (!parse_regularization_scheme(value, &options.regularization_scheme)) {
+        std::cerr << "unknown regularization scheme: " << value << "\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--disable-regularization") {
+      options.regularization_scheme =
+          mcpd3::DualDecompositionRegularizationScheme::NONE;
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--symmetric-alpha-shift")) != "") {
+      options.symmetric_alpha_shift = std::atol(value.c_str());
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--random-initial-alpha-radius")) !=
+               "") {
+      options.randomize_initial_alphas = true;
+      options.initial_alpha_random_radius = std::atol(value.c_str());
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--random-initial-alpha-seed")) !=
+               "") {
+      options.initial_alpha_random_seed =
+          static_cast<unsigned int>(std::strtoul(value.c_str(), nullptr, 10));
     } else if (!arg.empty() && arg[0] == '-') {
       std::cerr << "unknown option: " << arg << "\n";
       return EXIT_FAILURE;
@@ -145,7 +205,16 @@ int main(int argc, char *argv[]) {
             << " group_stopping=" << options.enable_group_stopping
             << " primal_upper_bound=" << options.track_primal_upper_bound
             << " verbose=" << options.verbose
-            << " momentum=" << options.use_momentum << "\n";
+            << " momentum=" << options.use_momentum
+            << " regularization="
+            << regularization_scheme_name(options.regularization_scheme)
+            << " symmetric_alpha_shift=" << options.symmetric_alpha_shift
+            << " randomize_initial_alphas="
+            << options.randomize_initial_alphas
+            << " initial_alpha_random_radius="
+            << options.initial_alpha_random_radius
+            << " initial_alpha_random_seed="
+            << options.initial_alpha_random_seed << "\n";
 
   auto primal_decoder =
       [&](const std::vector<bool> &cut, double max_lower_bound,

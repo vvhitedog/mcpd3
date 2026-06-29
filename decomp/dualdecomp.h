@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <random>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -77,6 +78,12 @@ inline void dualdecomp_progress_message(const std::string &message) {
   std::fflush(stderr);
 }
 
+enum class DualDecompositionRegularizationScheme {
+  LOCAL_LEXICOGRAPHIC,
+  SYMMETRIC_ALPHA_SHIFT,
+  NONE
+};
+
 struct DualDecompositionOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
@@ -91,6 +98,12 @@ struct DualDecompositionOptions {
   long min_step_size = 1;
   long max_step_size = 10000;
   size_t thread_count = 0;
+  DualDecompositionRegularizationScheme regularization_scheme =
+      DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC;
+  long symmetric_alpha_shift = 1;
+  bool randomize_initial_alphas = false;
+  long initial_alpha_random_radius = 0;
+  unsigned int initial_alpha_random_seed = 0;
 };
 
 class DualDecomposition {
@@ -127,6 +140,7 @@ public:
         last_regularization_anchor_sink_count_(0),
         last_regularization_active_sink_count_(0),
         total_optimization_iterations_(0) {
+    validateOptions();
     initializeDecomposition();
   }
 
@@ -170,6 +184,14 @@ public:
   }
   const std::vector<PartitionPackage> &getPartitionPackages() const {
     return partition_packages_;
+  }
+
+  int regularizationStrengthForStepSize(long step_size) const {
+    if (options_.regularization_scheme !=
+        DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC) {
+      return 0;
+    }
+    return step_size <= 10 ? static_cast<int>(step_size) : 0;
   }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
@@ -303,7 +325,7 @@ public:
     long max_lower_bound = std::numeric_limits<long>::min();
     int last_improvement_iter = 0;
     for (auto &solver_uptr : solvers_) {
-      int regularization_str = step_size <= 10 ? step_size : 0;
+      int regularization_str = regularizationStrengthForStepSize(step_size);
       solver_uptr->setRegularizationStrength(regularization_str);
     }
     for (int i = 0; i < nstep; ++i) {
@@ -381,7 +403,8 @@ public:
       last_disagreement_count_ = update_stats.disagreement_count;
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
 
-      const int regularization_strength = step_size <= 10 ? step_size : 0;
+      const int regularization_strength =
+          regularizationStrengthForStepSize(step_size);
       if (report_progress) {
         const long best_lower_bound =
             std::max(max_lower_bound, lower_bound);
@@ -688,16 +711,40 @@ private:
             const int momentum_scale = 10;
             constraint.alpha_momentum =
                 beta * constraint.alpha_momentum * beta + (1 - beta) * diff;
-            constraint.alpha +=
+            const long alpha_update =
                 stats.effective_step_size *
                 static_cast<int>(momentum_scale * constraint.alpha_momentum);
+            constraint.alpha += applySymmetricAlphaShift(alpha_update);
           } else {
-            constraint.alpha += stats.effective_step_size * diff;
+            constraint.alpha +=
+                applySymmetricAlphaShift(stats.effective_step_size * diff);
           }
         }
       }
     }
     return stats;
+  }
+
+  void validateOptions() const {
+    if (options_.initial_alpha_random_radius < 0) {
+      throw std::runtime_error(
+          "initial alpha random radius must be non-negative");
+    }
+  }
+
+  long applySymmetricAlphaShift(long alpha_update) const {
+    if (options_.regularization_scheme !=
+        DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT) {
+      return alpha_update;
+    }
+    const long magnitude = alpha_update < 0 ? -alpha_update : alpha_update;
+    if (magnitude <= 1) {
+      return alpha_update;
+    }
+    const long shift =
+        std::clamp(options_.symmetric_alpha_shift, static_cast<long>(0),
+                   magnitude - 1);
+    return alpha_update > 0 ? alpha_update - shift : alpha_update + shift;
   }
 
   long computePrimalCutValue(const std::vector<bool> &labels) const {
@@ -955,6 +1002,17 @@ private:
     auto constraint_start = std::chrono::steady_clock::now();
     long constrained_done = 0;
     const long constrained_total = static_cast<long>(constrained_nodes.size());
+    std::mt19937 initial_alpha_generator(options_.initial_alpha_random_seed);
+    std::uniform_int_distribution<long> initial_alpha_distribution(
+        -options_.initial_alpha_random_radius,
+        options_.initial_alpha_random_radius);
+    auto initial_alpha = [&]() -> long {
+      if (!options_.randomize_initial_alphas ||
+          options_.initial_alpha_random_radius == 0) {
+        return 0;
+      }
+      return initial_alpha_distribution(initial_alpha_generator);
+    };
     for (auto &[global_index, partitions] : constrained_nodes) {
       partitions.insert(
           partitions_[global_index]); // list each constrained node in its
@@ -975,9 +1033,10 @@ private:
           int local_index_target =
               min_cut_sub_graphs_[partition_target].getNode(global_index);
           const int constraint_id = next_constraint_id++;
+          const long alpha = initial_alpha();
           constraint_arcs.emplace_back(
-              /*alpha=*/0,
-              /*last_alpha=*/0,
+              /*alpha=*/alpha,
+              /*last_alpha=*/alpha,
               /*alpha_momentum=*/0,
               /*partition_index_source=*/partition_source,
               /*partition_index_target=*/partition_target,
@@ -993,16 +1052,16 @@ private:
                                         /*global_node_id=*/global_index,
                                         /*local_index=*/local_index_source,
                                         /*is_source=*/true,
-                                        /*alpha=*/0,
-                                        /*last_alpha=*/0,
+                                        /*alpha=*/alpha,
+                                        /*last_alpha=*/alpha,
                                         /*alpha_momentum=*/0});
           partition_packages_[partition_target].constraint_endpoints.push_back(
               ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
                                         /*global_node_id=*/global_index,
                                         /*local_index=*/local_index_target,
                                         /*is_source=*/false,
-                                        /*alpha=*/0,
-                                        /*last_alpha=*/0,
+                                        /*alpha=*/alpha,
+                                        /*last_alpha=*/alpha,
                                         /*alpha_momentum=*/0});
           constrained_nodes_count_in_each_partition[partition_source]++;
           constrained_nodes_count_in_each_partition[partition_target]++;
