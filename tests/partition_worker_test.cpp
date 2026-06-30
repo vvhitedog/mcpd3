@@ -35,6 +35,40 @@ void require(bool condition, const std::string &message) {
   }
 }
 
+void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
+  require(mcpd3::regularizedObjectiveRaw(/*selected_lower_bound_raw=*/100,
+                                         /*regularization_contribution_raw=*/7) ==
+              107,
+          "regularized objective should add the actual contribution");
+  require(mcpd3::certifiedOriginalLowerBoundRaw(
+              /*selected_lower_bound_raw=*/100,
+              /*regularization_contribution_raw=*/7,
+              /*regularization_budget_raw=*/10) == 97,
+          "certified lower bound should subtract only budget slack");
+  require(mcpd3::certifiedOriginalLowerBoundRaw(
+              /*selected_lower_bound_raw=*/-20,
+              /*regularization_contribution_raw=*/3,
+              /*regularization_budget_raw=*/5) == -22,
+          "certificate arithmetic should support negative local objectives");
+
+  bool add_threw = false;
+  try {
+    (void)mcpd3::regularizedObjectiveRaw(std::numeric_limits<long>::max(), 1);
+  } catch (const std::overflow_error &) {
+    add_threw = true;
+  }
+  require(add_threw, "regularized objective overflow should be detected");
+
+  bool subtract_threw = false;
+  try {
+    (void)mcpd3::certifiedOriginalLowerBoundRaw(
+        std::numeric_limits<long>::min(), 0, 1);
+  } catch (const std::overflow_error &) {
+    subtract_threw = true;
+  }
+  require(subtract_threw, "certified lower bound underflow should be detected");
+}
+
 mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
   mcpd3::PartitionPackage package;
   package.partition_id = 3;
@@ -479,7 +513,8 @@ void dualDecompositionPromotesObjectiveScaleOnOverBudget() {
   require(dual_decomp.getScale() == 100,
           "promotion should increase objective scale by one decade");
   require(dual_decomp.getBestLowerBoundRaw() == 0,
-          "over-budget regularized lower bound should not be accepted");
+          "over-budget regularized lower bound should not be accepted: got " +
+              std::to_string(dual_decomp.getBestLowerBoundRaw()));
   require(dual_decomp.getLastRegularizationBudget() <
               dual_decomp.getScale(),
           "promoted solve should finish under the active budget limit");
@@ -787,6 +822,56 @@ mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
                                            std::move(workers), options);
 }
 
+void coordinatorRunRoundReportsCertifiedRegularizedLowerBound() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+  options.objective_scale = 100;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{100, 0, 10, 7, 1, 1}},
+      std::deque<ScriptedRound>{{50, 0, 5, 2, 1, 1}}, options);
+
+  const auto stats = coordinator.runRound(
+      /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/10);
+
+  require(stats.regularized_objective == 159,
+          "regularized objective should be selected value plus contribution");
+  require(stats.lower_bound == 144,
+          "certified lower bound should subtract full budget from "
+          "regularized objective");
+  require(stats.regularization_budget == 15,
+          "round should sum regularization budgets");
+  require(stats.regularization_contribution == 9,
+          "round should sum actual regularization contributions");
+  require(stats.disagreement_count == 0,
+          "scripted labels should agree for regularized certificate test");
+}
+
+void coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{12, 0}},
+      std::deque<ScriptedRound>{{30, 0}}, options);
+
+  const auto stats = coordinator.runRound(
+      /*round_id=*/1, /*scale=*/100, /*step_size=*/100,
+      /*regularization_strength=*/0);
+
+  require(stats.lower_bound == 42,
+          "unregularized certified lower bound should equal selected value");
+  require(stats.regularized_objective == 42,
+          "unregularized regularized objective diagnostic should match");
+  require(stats.regularization_budget == 0,
+          "unregularized round should have zero budget");
+  require(stats.regularization_contribution == 0,
+          "unregularized round should have zero contribution");
+}
+
 std::vector<std::unique_ptr<mcpd3::PartitionWorker>> makeInProcessWorkers(
     size_t count) {
   std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
@@ -1011,6 +1096,10 @@ void fullSolveStopsOptimalOnUnregularizedAgreement() {
   require(record.lower_bound == 25, "progress record lower bound mismatch");
   require(record.best_lower_bound == 25,
           "progress record best lower bound mismatch");
+  require(record.regularized_objective == 25,
+          "unregularized progress diagnostic should match lower bound");
+  require(record.best_regularized_objective == 25,
+          "unregularized best regularized diagnostic should match lower bound");
   require(record.regularization_strength == 0,
           "progress record regularization strength mismatch");
 }
@@ -1049,6 +1138,10 @@ void fullSolveReportsProgressThroughConfiguredCallback() {
           "callback should include the round lower bound");
   require(callbacks[0].best_lower_bound == 32,
           "callback should include the best lower bound");
+  require(callbacks[0].regularized_objective == 32,
+          "callback should include the regularized objective diagnostic");
+  require(callbacks[0].best_regularized_objective == 32,
+          "callback should include the best regularized objective diagnostic");
   require(callbacks[0].disagreement_count == 1,
           "callback should include disagreement count");
 }
@@ -1151,8 +1244,26 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
           "regularized agreement should report its stop reason");
   require(result.total_iterations == 1,
           "solve should not run an unregularized confirmation round");
+  require(result.best_lower_bound_raw == 22,
+          "regularized agreement should store the certified lower bound");
+  require(result.best_regularized_objective_raw == 28,
+          "regularized agreement should preserve the regularized objective");
+  require(result.best_lower_bound > 0.002199 &&
+              result.best_lower_bound < 0.002201,
+          "regularized certified lower bound should use objective scale");
+  require(result.best_regularized_objective > 0.002799 &&
+              result.best_regularized_objective < 0.002801,
+          "regularized objective diagnostic should use objective scale");
   require(result.progress_records.size() == 1,
           "regularized agreement should record one progress row");
+  require(result.progress_records[0].lower_bound == 22,
+          "regularized progress should report certified lower bound");
+  require(result.progress_records[0].best_lower_bound == 22,
+          "regularized progress should report best certified lower bound");
+  require(result.progress_records[0].regularized_objective == 28,
+          "regularized progress should report selected plus contribution");
+  require(result.progress_records[0].best_regularized_objective == 28,
+          "regularized progress should report best regularized objective");
   require(result.progress_records[0].regularization_strength == 10,
           "regularized round should use regularization");
   require(result.progress_records[0].regularization_budget == 6,
@@ -1614,9 +1725,11 @@ void fullSolvePromotesObjectiveScaleOnOverBudget() {
           "coordinator should promote objective scale once");
   require(result.scale == 100,
           "coordinator result should report the promoted objective scale");
-  require(result.best_lower_bound_raw == 1000,
+  require(result.best_lower_bound_raw == 999,
           "over-budget regularized lower bound should not be accepted");
-  require(result.best_lower_bound == 10,
+  require(result.best_regularized_objective_raw == 1000,
+          "regularized objective diagnostic should preserve selected objective");
+  require(result.best_lower_bound > 9.989 && result.best_lower_bound < 9.991,
           "promoted raw lower bound should use the promoted objective scale");
   require(result.total_iterations == 3,
           "coordinator should retry from the promoted schedule");
@@ -2054,6 +2167,7 @@ void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
 
 int main() {
   try {
+    lowerBoundCertificateSubtractsOnlyRegularizationSlack();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
@@ -2062,6 +2176,8 @@ int main() {
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
+    coordinatorRunRoundReportsCertifiedRegularizedLowerBound();
+    coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged();
     scaledEpsilonRegularizationUsesPreviousSinkAnchors();
     scaledEpsilonRegularizationPersistsUntilAlphaChanges();
     lowScaleScaledEpsilonRegularizationHandlesBoundaryTie();
