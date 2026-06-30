@@ -192,6 +192,9 @@ public:
   }
 
   void setRegularizationStrength(int str) {
+    if (str < 0) {
+      throw std::runtime_error("regularization strength must be non-negative");
+    }
     regularization_str_ = str;
   }
 
@@ -222,11 +225,6 @@ public:
   }
 
   void solve() {
-    resetRegularizationDiagnostics();
-    if (trySolveLexicographicRegularized()) {
-      return;
-    }
-
     if (is_first_iteration_) {
       auto init_time = time_lambda([&]{
       shrinkToFitDualDecompositionConstraints(); // memory optimization
@@ -236,6 +234,8 @@ public:
       printf("init_time: %ldms\n",init_time.count());
     }
     cacheLagrangeMultipliers(); // optimization
+    resetRegularizationDiagnostics();
+    updateRegularizationAnchorsFromCurrentSolution();
     updateNodePotentials();     // finds which node based lagrange multiplier
                                 // complementary slackness conditions are
                                 // violated and sets source and sink capacities
@@ -338,26 +338,9 @@ private:
   static long checkedAdd(long lhs, long rhs) {
     if ((rhs > 0 && lhs > std::numeric_limits<long>::max() - rhs) ||
         (rhs < 0 && lhs < std::numeric_limits<long>::min() - rhs)) {
-      throw std::overflow_error("lexicographic regularization capacity overflow");
+      throw std::overflow_error("scaled epsilon regularization capacity overflow");
     }
     return lhs + rhs;
-  }
-
-  static long checkedMultiply(long lhs, long rhs) {
-    if (lhs == 0 || rhs == 0) {
-      return 0;
-    }
-    if (lhs == -1 && rhs == std::numeric_limits<long>::min()) {
-      throw std::overflow_error("lexicographic regularization capacity overflow");
-    }
-    if (rhs == -1 && lhs == std::numeric_limits<long>::min()) {
-      throw std::overflow_error("lexicographic regularization capacity overflow");
-    }
-    const long result = lhs * rhs;
-    if (result / rhs != lhs) {
-      throw std::overflow_error("lexicographic regularization capacity overflow");
-    }
-    return result;
   }
 
   void resetRegularizationDiagnostics() {
@@ -365,8 +348,11 @@ private:
     last_regularization_contribution_ = 0;
     last_regularization_anchor_sink_count_ = 0;
     last_regularization_active_sink_count_ = 0;
-    last_regularization_anchor_sink_.assign(
-        dual_decomposition_local_indices_.size(), 0);
+    if (regularization_anchor_sink_.size() !=
+        dual_decomposition_local_indices_.size()) {
+      regularization_anchor_sink_.assign(
+          dual_decomposition_local_indices_.size(), 0);
+    }
   }
 
   long lagrangeMultiplierTerm(size_t constraint_index) const {
@@ -381,93 +367,39 @@ private:
     return lagrange_multiplier_term;
   }
 
-  long markRegularizationAnchorsFromCurrentSolution() {
-    if (regularization_str_ <= 0 || !has_solution_) {
+  long regularizationTerm(size_t constraint_index) const {
+    if (regularization_str_ <= 0 || regularization_anchor_sink_.empty() ||
+        !regularization_anchor_sink_[constraint_index]) {
       return 0;
+    }
+    return regularization_str_;
+  }
+
+  long updateRegularizationAnchorsFromCurrentSolution() {
+    if (regularization_str_ <= 0) {
+      std::fill(regularization_anchor_sink_.begin(),
+                regularization_anchor_sink_.end(), 0);
+      return 0;
+    }
+    if (has_solution_) {
+      for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
+        if (cached_lagrange_multipliers_[i] ==
+            cached_last_lagrange_multipliers_[i]) {
+          continue;
+        }
+        const int local_index = dual_decomposition_local_indices_[i];
+        regularization_anchor_sink_[i] = x_[local_index] ? 1 : 0;
+      }
     }
     long budget = 0;
     for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
-      const int local_index = dual_decomposition_local_indices_[i];
-      if (x_[local_index]) {
+      if (regularization_anchor_sink_[i]) {
         budget = checkedAdd(budget, regularization_str_);
         last_regularization_anchor_sink_count_++;
-        last_regularization_anchor_sink_[i] = 1;
       }
     }
     last_regularization_budget_ = budget;
     return budget;
-  }
-
-  void resetIncrementalStateAfterExternalSolve() {
-    std::fill(v_flow_.begin(), v_flow_.end(), 0);
-    std::fill(d_flow_.begin(), d_flow_.end(), 0);
-    incremental_mincut_nodes_.clear();
-    incremental_arcs_.clear();
-    maxflow_changed_list_.Reset();
-    maxflow_graph_.reset();
-    initializeMaxflowGraph();
-    is_first_iteration_ = true;
-    is_first_iteration_of_new_scale_ = true;
-  }
-
-  bool trySolveLexicographicRegularized() {
-    const long regularization_budget =
-        markRegularizationAnchorsFromCurrentSolution();
-    if (regularization_budget == 0) {
-      return false;
-    }
-
-    // M > max(R) makes the one-sided regularizer a lexicographic tie-break:
-    // every one-unit change in the unregularized objective dominates R.
-    const long objective_multiplier = checkedAdd(regularization_budget, 1);
-    using ExactGraph = Graph<long, long, long>;
-    ExactGraph graph(nnode_, narc_);
-    graph.add_node(nnode_);
-
-    for (int i = 0; i < narc_; ++i) {
-      const int s = arcs_[2 * i + 0];
-      const int t = arcs_[2 * i + 1];
-      const long forward_capacity =
-          checkedMultiply(arc_capacities_[2 * i + 0], objective_multiplier);
-      const long backward_capacity =
-          checkedMultiply(arc_capacities_[2 * i + 1], objective_multiplier);
-      graph.add_edge(s, t, forward_capacity, backward_capacity);
-    }
-
-    std::vector<long> terminal_terms(nnode_, 0);
-    for (int i = 0; i < nnode_; ++i) {
-      terminal_terms[i] =
-          checkedMultiply(terminal_capacities_[i], objective_multiplier);
-    }
-    for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
-      const int local_index = dual_decomposition_local_indices_[i];
-      terminal_terms[local_index] = checkedAdd(
-          terminal_terms[local_index],
-          checkedMultiply(lagrangeMultiplierTerm(i), objective_multiplier));
-      if (last_regularization_anchor_sink_[i]) {
-        terminal_terms[local_index] =
-            checkedAdd(terminal_terms[local_index], regularization_str_);
-      }
-    }
-
-    for (int i = 0; i < nnode_; ++i) {
-      const long terminal_capacity = terminal_terms[i];
-      if (terminal_capacity > 0) {
-        graph.add_tweights(i, terminal_capacity, 0);
-      } else {
-        graph.add_tweights(i, 0, -terminal_capacity);
-      }
-    }
-
-    graph.maxflow();
-    for (int i = 0; i < nnode_; ++i) {
-      x_[i] = graph.what_segment(i) == ExactGraph::SINK ? 1 : 0;
-    }
-    updateRegularizationContribution();
-    computeMinCutValueInitial();
-    has_solution_ = true;
-    resetIncrementalStateAfterExternalSolve();
-    return true;
   }
 
   void computeMinCutValueInitial() {
@@ -612,14 +544,13 @@ private:
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
       updateNodeTerminal(i, pos, false);
     }
-    size_t cache_index = 0;
-    for (const auto &i : dual_decomposition_local_indices_) {
-      if ( cached_last_lagrange_multipliers_[cache_index] == cached_lagrange_multipliers_[cache_index] ) {
-        cache_index++;
-        continue;
-      }
+    for (size_t cache_index = 0;
+         cache_index < dual_decomposition_local_indices_.size();
+         ++cache_index) {
+      const int i = dual_decomposition_local_indices_[cache_index];
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
-      pos += cached_lagrange_multipliers_[cache_index++];
+      pos += cached_lagrange_multipliers_[cache_index];
+      pos += regularizationTerm(cache_index);
       updateNodeTerminal(i, pos, false);
     }
   }
@@ -628,8 +559,9 @@ private:
     // add dual decomposition node potential terms (when/if applicable)
     size_t cache_index = 0;
     for (const auto &index : dual_decomposition_local_indices_) {
-      auto pos = cached_lagrange_multipliers_[cache_index++];
-      //pos += regularization_str_; // XXX: this is only used at first scale, regularization_str_ should always be zero
+      auto pos = cached_lagrange_multipliers_[cache_index];
+      pos += regularizationTerm(cache_index);
+      cache_index++;
       updateNodeTerminal(index, pos, true);
     }
   }
@@ -647,12 +579,12 @@ private:
     last_regularization_contribution_ = 0;
     last_regularization_active_sink_count_ = 0;
     if (regularization_str_ == 0 ||
-        last_regularization_anchor_sink_.empty()) {
+        regularization_anchor_sink_.empty()) {
       return;
     }
     for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
       const int local_index = dual_decomposition_local_indices_[i];
-      if (last_regularization_anchor_sink_[i] && x_[local_index]) {
+      if (regularization_anchor_sink_[i] && x_[local_index]) {
         last_regularization_contribution_ += regularization_str_;
         last_regularization_active_sink_count_++;
       }
@@ -894,7 +826,7 @@ private:
   long last_regularization_contribution_ = 0;
   long last_regularization_anchor_sink_count_ = 0;
   long last_regularization_active_sink_count_ = 0;
-  std::vector<unsigned char> last_regularization_anchor_sink_;
+  std::vector<unsigned char> regularization_anchor_sink_;
 };
 
 } // namespace mcpd3

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <memory>
@@ -40,8 +41,7 @@ enum class PartitionWorkerStopReason {
 };
 
 enum class PartitionWorkerRegularizationScheme {
-  LOCAL_LEXICOGRAPHIC,
-  SYMMETRIC_ALPHA_SHIFT,
+  SCALED_EPSILON,
   NONE
 };
 
@@ -57,8 +57,8 @@ struct PartitionWorkerCoordinatorOptions {
   bool use_momentum = true;
   bool enable_group_stopping = true;
   PartitionWorkerRegularizationScheme regularization_scheme =
-      PartitionWorkerRegularizationScheme::LOCAL_LEXICOGRAPHIC;
-  long symmetric_alpha_shift = 1;
+      PartitionWorkerRegularizationScheme::SCALED_EPSILON;
+  long regularization_budget_limit = 0;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -134,7 +134,8 @@ public:
       const std::vector<PartitionPackage> &packages,
       std::vector<std::unique_ptr<PartitionWorker>> workers,
       PartitionWorkerCoordinatorOptions options = {})
-      : packages_(packages), workers_(std::move(workers)), options_(options) {
+      : packages_(packages), workers_(std::move(workers)), options_(options),
+        warned_regularization_budget_exceeded_(false) {
     validateOptions();
     if (packages_.size() != workers_.size()) {
       throw std::runtime_error(
@@ -183,6 +184,8 @@ public:
     stats.effective_step_size =
         std::clamp(step_size, options_.min_step_size, options_.max_step_size);
     gatherRoundTerms(results, &stats);
+    warnIfRegularizationBudgetExceeded(stats.regularization_budget,
+                                       regularization_strength);
     updateConstraintsFromLabels(results, &stats);
     return stats;
   }
@@ -222,6 +225,10 @@ private:
     if (options_.initial_alpha_random_radius < 0) {
       throw std::runtime_error(
           "initial alpha random radius must be non-negative");
+    }
+    if (options_.regularization_budget_limit < 0) {
+      throw std::runtime_error(
+          "regularization budget limit must be non-negative");
     }
   }
 
@@ -588,32 +595,36 @@ private:
         const long alpha_update =
             stats->effective_step_size *
             static_cast<int>(momentum_scale * constraint.alpha_momentum);
-        constraint.alpha += applySymmetricAlphaShift(alpha_update);
+        constraint.alpha += alpha_update;
       } else {
-        constraint.alpha +=
-            applySymmetricAlphaShift(stats->effective_step_size * diff);
+        constraint.alpha += stats->effective_step_size * diff;
       }
     }
   }
 
-  long applySymmetricAlphaShift(long alpha_update) const {
-    if (options_.regularization_scheme !=
-        PartitionWorkerRegularizationScheme::SYMMETRIC_ALPHA_SHIFT) {
-      return alpha_update;
+  long regularizationBudgetLimit() const {
+    return options_.regularization_budget_limit > 0
+               ? options_.regularization_budget_limit
+               : options_.objective_scale;
+  }
+
+  void warnIfRegularizationBudgetExceeded(long budget,
+                                          int regularization_strength) {
+    if (regularization_strength <= 0 || budget < regularizationBudgetLimit() ||
+        warned_regularization_budget_exceeded_) {
+      return;
     }
-    const long magnitude = alpha_update < 0 ? -alpha_update : alpha_update;
-    if (magnitude <= 1) {
-      return alpha_update;
-    }
-    const long shift =
-        std::clamp(options_.symmetric_alpha_shift, static_cast<long>(0),
-                   magnitude - 1);
-    return alpha_update > 0 ? alpha_update - shift : alpha_update + shift;
+    std::fprintf(stderr,
+                 "warning: regularization budget %ld is not below limit %ld; "
+                 "a regularized agreement may not certify optimality\n",
+                 budget, regularizationBudgetLimit());
+    std::fflush(stderr);
+    warned_regularization_budget_exceeded_ = true;
   }
 
   int localRegularizationStrength(long step_size) const {
     if (options_.regularization_scheme !=
-        PartitionWorkerRegularizationScheme::LOCAL_LEXICOGRAPHIC) {
+        PartitionWorkerRegularizationScheme::SCALED_EPSILON) {
       return 0;
     }
     return step_size <= 10 ? static_cast<int>(step_size) : 0;
@@ -622,6 +633,7 @@ private:
   std::vector<PartitionPackage> packages_;
   std::vector<std::unique_ptr<PartitionWorker>> workers_;
   PartitionWorkerCoordinatorOptions options_;
+  bool warned_regularization_budget_exceeded_;
   std::unordered_map<int, size_t> partition_to_worker_index_;
   std::vector<CoordinatorConstraint> constraints_;
   std::unordered_map<int, size_t> constraint_index_by_id_;

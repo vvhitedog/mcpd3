@@ -79,8 +79,7 @@ inline void dualdecomp_progress_message(const std::string &message) {
 }
 
 enum class DualDecompositionRegularizationScheme {
-  LOCAL_LEXICOGRAPHIC,
-  SYMMETRIC_ALPHA_SHIFT,
+  SCALED_EPSILON,
   NONE
 };
 
@@ -100,8 +99,8 @@ struct DualDecompositionOptions {
   long objective_scale = 1;
   size_t thread_count = 0;
   DualDecompositionRegularizationScheme regularization_scheme =
-      DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC;
-  long symmetric_alpha_shift = 1;
+      DualDecompositionRegularizationScheme::SCALED_EPSILON;
+  long regularization_budget_limit = 0;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -140,7 +139,8 @@ public:
         last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
         last_regularization_active_sink_count_(0),
-        total_optimization_iterations_(0) {
+        total_optimization_iterations_(0),
+        warned_regularization_budget_exceeded_(false) {
     validateOptions();
     initializeDecomposition();
   }
@@ -189,7 +189,7 @@ public:
 
   int regularizationStrengthForStepSize(long step_size) const {
     if (options_.regularization_scheme !=
-        DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC) {
+        DualDecompositionRegularizationScheme::SCALED_EPSILON) {
       return 0;
     }
     return step_size <= 10 ? static_cast<int>(step_size) : 0;
@@ -389,6 +389,9 @@ public:
           std::accumulate(regularization_active_count_terms.begin(),
                           regularization_active_count_terms.end(),
                           static_cast<long>(0));
+      warnIfRegularizationBudgetExceeded(last_regularization_budget_,
+                                         regularizationStrengthForStepSize(
+                                             step_size));
       if (options_.track_primal_upper_bound) {
         current_upper_bound_ = updatePrimalUpperBound();
       }
@@ -538,7 +541,7 @@ public:
                    double(max_lower_bound) / scale_,
                    double(best_upper_bound_) / scale_);
           } else {
-            printf("breaking because lexicographic regularization closed primal upper bound: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
+            printf("breaking because scaled epsilon regularization closed primal upper bound: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
                    double(max_lower_bound) / scale_,
                    double(best_upper_bound_) / scale_,
                    regularization_strength);
@@ -596,8 +599,9 @@ public:
             std::fflush(stderr);
           }
           if (options_.verbose) {
-            printf("breaking because lexicographically regularized subproblems agree: regularization_strength=%d\n",
-                   regularization_strength);
+            printf("breaking because scaled epsilon regularized subproblems agree: regularization_strength=%d regularization_budget=%ld regularization_budget_limit=%ld\n",
+                   regularization_strength, last_regularization_budget_,
+                   regularizationBudgetLimit());
           }
           opt_status = OPTIMAL;
         }
@@ -715,10 +719,9 @@ private:
             const long alpha_update =
                 stats.effective_step_size *
                 static_cast<int>(momentum_scale * constraint.alpha_momentum);
-            constraint.alpha += applySymmetricAlphaShift(alpha_update);
+            constraint.alpha += alpha_update;
           } else {
-            constraint.alpha +=
-                applySymmetricAlphaShift(stats.effective_step_size * diff);
+            constraint.alpha += stats.effective_step_size * diff;
           }
         }
       }
@@ -734,21 +737,30 @@ private:
       throw std::runtime_error(
           "initial alpha random radius must be non-negative");
     }
+    if (options_.regularization_budget_limit < 0) {
+      throw std::runtime_error(
+          "regularization budget limit must be non-negative");
+    }
   }
 
-  long applySymmetricAlphaShift(long alpha_update) const {
-    if (options_.regularization_scheme !=
-        DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT) {
-      return alpha_update;
+  long regularizationBudgetLimit() const {
+    return options_.regularization_budget_limit > 0
+               ? options_.regularization_budget_limit
+               : options_.objective_scale;
+  }
+
+  void warnIfRegularizationBudgetExceeded(long budget,
+                                          int regularization_strength) {
+    if (regularization_strength <= 0 || budget < regularizationBudgetLimit() ||
+        warned_regularization_budget_exceeded_) {
+      return;
     }
-    const long magnitude = alpha_update < 0 ? -alpha_update : alpha_update;
-    if (magnitude <= 1) {
-      return alpha_update;
-    }
-    const long shift =
-        std::clamp(options_.symmetric_alpha_shift, static_cast<long>(0),
-                   magnitude - 1);
-    return alpha_update > 0 ? alpha_update - shift : alpha_update + shift;
+    std::fprintf(stderr,
+                 "warning: regularization budget %ld is not below limit %ld; "
+                 "a regularized agreement may not certify optimality\n",
+                 budget, regularizationBudgetLimit());
+    std::fflush(stderr);
+    warned_regularization_budget_exceeded_ = true;
   }
 
   long computePrimalCutValue(const std::vector<bool> &labels) const {
@@ -1230,6 +1242,7 @@ private:
   long last_regularization_anchor_sink_count_;
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
+  bool warned_regularization_budget_exceeded_;
   std::list<int> disagreeing_global_indices_;
 
   template <typename T> class ScalarStatisticsTracker {

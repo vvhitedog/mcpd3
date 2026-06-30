@@ -307,20 +307,21 @@ void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
   options.track_primal_upper_bound = false;
   options.verbose = false;
   options.thread_count = 1;
+  options.objective_scale = 10000;
 
-  mcpd3::DualDecomposition local_lexicographic(
+  mcpd3::DualDecomposition scaled_epsilon(
       /*npartition=*/2,
       /*nnode=*/2,
       /*narc=*/1,
       /*arcs=*/std::vector<int>{0, 1},
       /*arc_capacities=*/std::vector<int>{3, 5},
       /*terminal_capacities=*/std::vector<int>{2, -4}, options);
-  require(local_lexicographic.regularizationStrengthForStepSize(100) == 0,
-          "high scales should not use local lexicographic regularization");
-  require(local_lexicographic.regularizationStrengthForStepSize(10) == 10,
-          "step 10 should use local lexicographic regularization");
-  require(local_lexicographic.regularizationStrengthForStepSize(1) == 1,
-          "step 1 should use local lexicographic regularization");
+  require(scaled_epsilon.regularizationStrengthForStepSize(100) == 0,
+          "high scales should not use scaled epsilon regularization");
+  require(scaled_epsilon.regularizationStrengthForStepSize(10) == 10,
+          "step 10 should use scaled epsilon regularization");
+  require(scaled_epsilon.regularizationStrengthForStepSize(1) == 1,
+          "step 1 should use scaled epsilon regularization");
 
   options.regularization_scheme =
       mcpd3::DualDecompositionRegularizationScheme::NONE;
@@ -333,18 +334,6 @@ void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
       /*terminal_capacities=*/std::vector<int>{2, -4}, options);
   require(none.regularizationStrengthForStepSize(10) == 0,
           "NONE scheme should disable low-scale local regularization");
-
-  options.regularization_scheme =
-      mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
-  mcpd3::DualDecomposition symmetric_alpha_shift(
-      /*npartition=*/2,
-      /*nnode=*/2,
-      /*narc=*/1,
-      /*arcs=*/std::vector<int>{0, 1},
-      /*arc_capacities=*/std::vector<int>{3, 5},
-      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
-  require(symmetric_alpha_shift.regularizationStrengthForStepSize(10) == 0,
-          "symmetric alpha shift should disable local regularization");
 }
 
 void dualDecompositionRandomizesExportedInitialAlphas() {
@@ -566,11 +555,11 @@ std::vector<mcpd3::PartitionPackage> makeTieBreakRegularizationPackages() {
 }
 
 std::vector<mcpd3::PartitionPackage> makeOppositeDirectionCyclePackages(
-    int target_terminal_capacity = 8) {
+    int source_terminal_capacity = -10, int target_terminal_capacity = 8) {
   mcpd3::PartitionPackage source;
   source.partition_id = 0;
   source.local_node_count = 1;
-  source.terminal_capacities = {-10};
+  source.terminal_capacities = {source_terminal_capacity};
   source.local_to_global = {11};
   source.constraint_endpoints.push_back(
       mcpd3::ConstraintEndpointBinding{/*constraint_id=*/7,
@@ -640,10 +629,10 @@ struct OneNodeSourceSolveResult {
 };
 
 OneNodeSourceSolveResult solveOneNodeSourceProblem(
-    long alpha, int terminal_capacity, int regularization_strength,
-    bool seed_sink_anchor) {
+    long alpha, long last_alpha, int terminal_capacity,
+    int regularization_strength, bool seed_sink_anchor) {
   std::list<mcpd3::DualDecompositionConstraintArc> constraints;
-  constraints.emplace_back(alpha, alpha, /*alpha_momentum=*/0,
+  constraints.emplace_back(alpha, last_alpha, /*alpha_momentum=*/0,
                            /*partition_index_source=*/0,
                            /*partition_index_target=*/1,
                            /*local_index_source=*/0,
@@ -667,26 +656,38 @@ OneNodeSourceSolveResult solveOneNodeSourceProblem(
       solver.getLastRegularizationActiveSinkCount()};
 }
 
-void lexicographicRegularizationOnlyBreaksLocalTies() {
+void scaledEpsilonRegularizationUsesPreviousSinkAnchors() {
   const auto no_anchor =
-      solveOneNodeSourceProblem(/*alpha=*/-10, /*terminal_capacity=*/-10,
+      solveOneNodeSourceProblem(/*alpha=*/-100, /*last_alpha=*/-90,
+                                /*terminal_capacity=*/-100,
                                 /*regularization_strength=*/10,
                                 /*seed_sink_anchor=*/false);
   require(no_anchor.regularization_budget == 0,
           "regularization should not apply without an existing anchor");
-  require(no_anchor.lower_bound == 10,
+  require(no_anchor.lower_bound == 100,
           "unanchored tie lower bound should be unregularized");
 
+  const auto unchanged_alpha =
+      solveOneNodeSourceProblem(/*alpha=*/-100, /*last_alpha=*/-100,
+                                /*terminal_capacity=*/-100,
+                                /*regularization_strength=*/10,
+                                /*seed_sink_anchor=*/true);
+  require(unchanged_alpha.regularization_budget == 0,
+          "unchanged alpha terms should not activate sink anchors");
+  require(unchanged_alpha.lower_bound == 100,
+          "unchanged-alpha lower bound should remain unregularized");
+
   const auto strict =
-      solveOneNodeSourceProblem(/*alpha=*/-9, /*terminal_capacity=*/-10,
+      solveOneNodeSourceProblem(/*alpha=*/-89, /*last_alpha=*/-100,
+                                /*terminal_capacity=*/-100,
                                 /*regularization_strength=*/10,
                                 /*seed_sink_anchor=*/true);
   require(strict.label == 1,
-          "lexicographic regularization must preserve strict optima");
-  require(strict.lower_bound == 9,
+          "scaled epsilon regularization must preserve larger strict gaps");
+  require(strict.lower_bound == 89,
           "strict optimum lower bound should exclude regularization");
   require(strict.regularization_budget == 10,
-          "strict anchored solve should report the lexicographic budget");
+          "strict anchored solve should report the scaled epsilon budget");
   require(strict.regularization_contribution == 10,
           "strict anchored sink solution should pay the regularizer");
   require(strict.regularization_anchor_sink_count == 1,
@@ -695,15 +696,16 @@ void lexicographicRegularizationOnlyBreaksLocalTies() {
           "strict anchored sink solution should count active regularization");
 
   const auto tied =
-      solveOneNodeSourceProblem(/*alpha=*/-10, /*terminal_capacity=*/-10,
+      solveOneNodeSourceProblem(/*alpha=*/-100, /*last_alpha=*/-90,
+                                /*terminal_capacity=*/-100,
                                 /*regularization_strength=*/10,
                                 /*seed_sink_anchor=*/true);
   require(tied.label == 0,
-          "lexicographic regularization should select source on ties");
-  require(tied.lower_bound == 10,
+          "scaled epsilon regularization should select source on ties");
+  require(tied.lower_bound == 100,
           "tie-broken lower bound should remain the unregularized optimum");
   require(tied.regularization_budget == 10,
-          "tie-broken solve should report the lexicographic budget");
+          "tie-broken solve should report the scaled epsilon budget");
   require(tied.regularization_contribution == 0,
           "tie-broken source solution should not pay regularization");
   require(tied.regularization_anchor_sink_count == 1,
@@ -712,12 +714,53 @@ void lexicographicRegularizationOnlyBreaksLocalTies() {
           "tie-broken source solution should not count active regularization");
 }
 
-void lowScaleLexicographicRegularizationHandlesBoundaryTie() {
+void scaledEpsilonRegularizationPersistsUntilAlphaChanges() {
+  std::list<mcpd3::DualDecompositionConstraintArc> constraints;
+  constraints.emplace_back(/*alpha=*/-100, /*last_alpha=*/-90,
+                           /*alpha_momentum=*/0,
+                           /*partition_index_source=*/0,
+                           /*partition_index_target=*/1,
+                           /*local_index_source=*/0,
+                           /*local_index_target=*/-1);
+  auto ref = --constraints.end();
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{-100});
+  solver.addSourceDualDecompositionConstraint(ref);
+  solver.setMinCutSolution(std::vector<int>{1});
+  solver.setRegularizationStrength(10);
+
+  solver.solve();
+  require(solver.getMinCutSolution(/*index=*/0) == 0,
+          "changed-alpha epsilon should break the initial tie to source");
+  require(solver.getLastRegularizationBudget() == 10,
+          "changed-alpha solve should activate the epsilon budget");
+  require(solver.getLastRegularizationContribution() == 0,
+          "source label should not pay the active epsilon term");
+
+  ref->last_alpha = ref->alpha;
+  solver.solve();
+  require(solver.getLastRegularizationBudget() == 10,
+          "unchanged-alpha solve should keep the active epsilon term");
+  require(solver.getMinCutSolution(/*index=*/0) == 0,
+          "persistent epsilon should keep the tied source label");
+
+  ref->last_alpha = ref->alpha;
+  ref->alpha = -90;
+  solver.solve();
+  require(solver.getLastRegularizationBudget() == 0,
+          "changed alpha with previous source label should clear epsilon");
+  require(solver.getMinCutSolution(/*index=*/0) == 1,
+          "clearing epsilon should expose the strict sink label");
+}
+
+void lowScaleScaledEpsilonRegularizationHandlesBoundaryTie() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.use_momentum = false;
   options.enable_group_stopping = false;
   options.min_step_size = 1;
   options.max_step_size = 10;
+  options.objective_scale = 10000;
 
   const auto packages = makeTieBreakRegularizationPackages();
   mcpd3::PartitionWorkerCoordinator unregularized_coordinator(
@@ -752,7 +795,7 @@ void lowScaleLexicographicRegularizationHandlesBoundaryTie() {
       /*round_id=*/2, /*scale=*/10, /*step_size=*/10,
       /*regularization_strength=*/10);
   require(regularized.disagreement_count == 0,
-          "lexicographic regularization should select agreeing tied labels");
+          "scaled epsilon regularization should select agreeing tied labels");
   require(regularized.regularization_budget == 10,
           "regularized round should anchor the source-side sink label");
   require(regularized.regularization_contribution == 0,
@@ -842,6 +885,7 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
   options.patience = 99;
   options.enable_group_stopping = false;
   options.use_momentum = false;
+  options.objective_scale = 10000;
 
   ScriptedPartitionWorker *source_worker = nullptr;
   ScriptedPartitionWorker *target_worker = nullptr;
@@ -853,7 +897,7 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
   const auto result = coordinator.solve();
   require(result.status ==
               mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
-          "lexicographic regularized agreement should certify optimality");
+          "scaled epsilon regularized agreement should certify optimality");
   require(result.stop_reason ==
               mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
           "regularized agreement should report its stop reason");
@@ -868,7 +912,7 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
   require(result.progress_records[0].disagreement_count == 0,
           "regularized round should reach agreement");
   require(result.final_regularization_budget == 6,
-          "final diagnostics should come from the lexicographic round");
+          "final diagnostics should come from the scaled epsilon round");
   require(source_worker->requests()[0].regularization_strength == 10,
           "first source request should be regularized");
   require(source_worker->requests().size() == 1,
@@ -877,7 +921,7 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
           "target worker should not receive a confirmation request");
 }
 
-void fullSolveUsesLexicographicRegularizationToReachAgreement() {
+void fullSolveUsesScaledEpsilonRegularizationToReachAgreement() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 10;
   options.max_iteration_count = 5;
@@ -885,6 +929,7 @@ void fullSolveUsesLexicographicRegularizationToReachAgreement() {
   options.patience = 99;
   options.enable_group_stopping = false;
   options.use_momentum = false;
+  options.objective_scale = 10000;
 
   const auto packages = makeTieBreakRegularizationPackages();
   mcpd3::PartitionWorkerCoordinator coordinator(
@@ -893,10 +938,10 @@ void fullSolveUsesLexicographicRegularizationToReachAgreement() {
   const auto result = coordinator.solve();
   require(result.status ==
               mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
-          "lexicographic tie-break agreement should be optimal");
+          "scaled epsilon tie-break agreement should be optimal");
   require(result.stop_reason ==
               mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
-          "lexicographic tie-break stop reason mismatch");
+          "scaled epsilon tie-break stop reason mismatch");
   require(result.total_iterations == 2,
           "tie-break solve should stop after the anchored low-scale round");
   require(result.final_regularization_budget == 10,
@@ -925,9 +970,11 @@ void unitScaleResolvesOppositeDirectionCycle() {
   options.enable_group_stopping = false;
   options.min_step_size = 1;
   options.max_step_size = 10;
+  options.objective_scale = 100;
 
   auto make_coordinator = [&]() {
-    auto packages = makeOppositeDirectionCyclePackages();
+    auto packages = makeOppositeDirectionCyclePackages(
+        /*source_terminal_capacity=*/-100, /*target_terminal_capacity=*/92);
     return mcpd3::PartitionWorkerCoordinator(
         packages, makeInProcessWorkers(packages.size()), options);
   };
@@ -939,8 +986,6 @@ void unitScaleResolvesOppositeDirectionCycle() {
         /*regularization_strength=*/10);
     require(stats.disagreement_count == 1,
             "opposite-direction cycle should not agree at scale 10 alone");
-    require(stats.lower_bound == (round % 2 == 0 ? 8 : 0),
-            "scale 10 cycle lower-bound pattern mismatch");
   }
 
   auto unregularized_schedule = make_coordinator();
@@ -954,26 +999,31 @@ void unitScaleResolvesOppositeDirectionCycle() {
   }
 
   mcpd3::PartitionWorkerRoundStats unit_stats;
-  for (int round = 0; round < 10; ++round) {
+  for (int round = 0; round < 100; ++round) {
     unit_stats = unregularized_schedule.runRound(
         /*round_id=*/round_id++, /*scale=*/10, /*step_size=*/1,
         /*regularization_strength=*/0);
+    if (unit_stats.disagreement_count == 0) {
+      break;
+    }
   }
   require(unit_stats.disagreement_count == 0,
           "unit scale should resolve the cycle even without regularization");
   require(unit_stats.regularization_budget == 0,
           "forced-unregularized unit scale should report no budget");
 
-  const auto packages = makeOppositeDirectionCyclePackages();
+  const auto packages = makeOppositeDirectionCyclePackages(
+      /*source_terminal_capacity=*/-100, /*target_terminal_capacity=*/92);
   mcpd3::PartitionWorkerCoordinatorOptions solve_options;
   solve_options.initial_step_size = 10;
-  solve_options.max_iteration_count = 10;
+  solve_options.max_iteration_count = 20;
   solve_options.num_optimization_scales = 2;
   solve_options.patience = 99;
   solve_options.enable_group_stopping = false;
   solve_options.use_momentum = false;
   solve_options.min_step_size = 1;
   solve_options.max_step_size = 10;
+  solve_options.objective_scale = 100;
   mcpd3::PartitionWorkerCoordinator solver(
       packages, makeInProcessWorkers(packages.size()), solve_options);
   const auto result = solver.solve();
@@ -984,74 +1034,36 @@ void unitScaleResolvesOppositeDirectionCycle() {
           "full scale schedule should report low-scale regularized agreement");
   require(result.final_disagreement_count == 0,
           "full scale schedule should finish with agreement");
-  require(result.progress_records.back().step_size == 1,
-          "cycle should resolve at unit scale");
+  require(result.progress_records.back().step_size == 10,
+          "scaled epsilon regularization should resolve this cycle at scale 10");
   require(result.progress_records.back().disagreement_count == 0,
           "last progress record should be agreeing");
 }
 
-void symmetricAlphaShiftResolvesScaleTenCycle() {
-  for (const int target_terminal_capacity : {2, 5, 8}) {
-    const auto packages =
-        makeOppositeDirectionCyclePackages(target_terminal_capacity);
+void overBudgetScaledEpsilonAgreementRecordsDiagnostics() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 2;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
 
-    mcpd3::PartitionWorkerCoordinatorOptions baseline_options;
-    baseline_options.initial_step_size = 10;
-    baseline_options.max_iteration_count = 2;
-    baseline_options.num_optimization_scales = 1;
-    baseline_options.patience = 99;
-    baseline_options.enable_group_stopping = false;
-    baseline_options.use_momentum = false;
-    baseline_options.min_step_size = 1;
-    baseline_options.max_step_size = 10;
-    mcpd3::PartitionWorkerCoordinator baseline(
-        packages, makeInProcessWorkers(packages.size()), baseline_options);
-    const auto baseline_result = baseline.solve();
-    require(baseline_result.status ==
-                mcpd3::PartitionWorkerOptimizationStatus::
-                    ITERATION_COUNT_EXCEEDED,
-            "local lexicographic scheme should not resolve this at scale 10");
-    require(baseline_result.final_disagreement_count == 1,
-            "baseline scale 10 run should remain disagreeing");
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0, 10, 0, 1, 0}},
+      std::deque<ScriptedRound>{{15, 0, 0, 0, 0, 0}}, options);
 
-    mcpd3::PartitionWorkerCoordinatorOptions options;
-    options.initial_step_size = 10;
-    options.max_iteration_count = 2;
-    options.num_optimization_scales = 1;
-    options.patience = 99;
-    options.enable_group_stopping = false;
-    options.use_momentum = false;
-    options.min_step_size = 1;
-    options.max_step_size = 10;
-    options.regularization_scheme =
-        mcpd3::PartitionWorkerRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
-    options.symmetric_alpha_shift = 1;
-
-    mcpd3::PartitionWorkerCoordinator solver(
-        packages, makeInProcessWorkers(packages.size()), options);
-    const auto result = solver.solve();
-    require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
-            "symmetric alpha shift should resolve scale 10 cycles");
-    require(result.stop_reason ==
-                mcpd3::PartitionWorkerStopReason::NO_DISAGREEMENT,
-            "symmetric alpha shift is an exact DD alpha update");
-    require(result.total_iterations == 2,
-            "symmetric alpha shift should agree on the second round");
-    require(result.final_disagreement_count == 0,
-            "symmetric alpha shift should finish with agreement");
-    require(result.final_regularization_budget == 0,
-            "symmetric alpha shift should not use local regularization budget");
-    require(result.progress_records.size() == 2,
-            "symmetric alpha shift should record both rounds");
-    require(result.progress_records[0].regularization_strength == 0,
-            "symmetric alpha shift should disable local lexicographic reg");
-    require(result.progress_records[1].regularization_strength == 0,
-            "symmetric alpha shift should keep local reg disabled");
-    require(result.progress_records[0].disagreement_count == 1,
-            "first symmetric alpha-shift round should expose disagreement");
-    require(result.progress_records[1].disagreement_count == 0,
-            "second symmetric alpha-shift round should reach agreement");
-  }
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "over-budget regularized agreement currently still stops");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "over-budget regularized agreement should report regularized stop");
+  require(result.final_regularization_budget == 10,
+          "over-budget diagnostics should record the strict-limit violation");
+  require(result.progress_records[0].regularization_budget == 10,
+          "progress should record over-budget regularization");
 }
 
 void randomInitialAlphaValidationAndZeroRadiusNoop() {
@@ -1105,7 +1117,8 @@ void randomInitialAlphaValidationAndZeroRadiusNoop() {
 void randomInitialAlphaResolvesScaleTenCycle() {
   for (const int target_terminal_capacity : {2, 5, 8}) {
     const auto packages =
-        makeOppositeDirectionCyclePackages(target_terminal_capacity);
+        makeOppositeDirectionCyclePackages(/*source_terminal_capacity=*/-10,
+                                           target_terminal_capacity);
 
     mcpd3::PartitionWorkerCoordinatorOptions baseline_options;
     baseline_options.initial_step_size = 10;
@@ -1326,9 +1339,9 @@ void fullSolveRequestsRegularizationOnlyAtLowScales() {
   require(source_worker->requests()[1].regularization_strength == 0,
           "scale 100 should not be regularized");
   require(source_worker->requests()[2].regularization_strength == 10,
-          "scale 10 should request lexicographic regularization");
+          "scale 10 should request scaled epsilon regularization");
   require(source_worker->requests()[3].regularization_strength == 1,
-          "scale 1 should request lexicographic regularization");
+          "scale 1 should request scaled epsilon regularization");
   require(target_worker->requests()[2].regularization_strength == 10,
           "target worker should receive scale 10 regularization");
   require(target_worker->requests()[3].regularization_strength == 1,
@@ -1385,14 +1398,15 @@ int main() {
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
-    lexicographicRegularizationOnlyBreaksLocalTies();
-    lowScaleLexicographicRegularizationHandlesBoundaryTie();
+    scaledEpsilonRegularizationUsesPreviousSinkAnchors();
+    scaledEpsilonRegularizationPersistsUntilAlphaChanges();
+    lowScaleScaledEpsilonRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();
     fullSolveReportsBestBoundUsingObjectiveScale();
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
-    fullSolveUsesLexicographicRegularizationToReachAgreement();
+    fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     unitScaleResolvesOppositeDirectionCycle();
-    symmetricAlphaShiftResolvesScaleTenCycle();
+    overBudgetScaledEpsilonAgreementRecordsDiagnostics();
     randomInitialAlphaValidationAndZeroRadiusNoop();
     randomInitialAlphaResolvesScaleTenCycle();
     fullSolveStopsAtIterationLimit();

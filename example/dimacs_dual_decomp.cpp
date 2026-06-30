@@ -49,14 +49,9 @@ std::string get_option_value(int &i, int argc, char *argv[],
 bool parse_regularization_scheme(
     const std::string &value,
     mcpd3::DualDecompositionRegularizationScheme *scheme) {
-  if (value == "local-lexicographic") {
+  if (value == "scaled-epsilon" || value == "local-lexicographic") {
     *scheme =
-        mcpd3::DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC;
-    return true;
-  }
-  if (value == "symmetric-alpha-shift") {
-    *scheme =
-        mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT;
+        mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON;
     return true;
   }
   if (value == "none") {
@@ -69,10 +64,8 @@ bool parse_regularization_scheme(
 const char *regularization_scheme_name(
     mcpd3::DualDecompositionRegularizationScheme scheme) {
   switch (scheme) {
-  case mcpd3::DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC:
-    return "local-lexicographic";
-  case mcpd3::DualDecompositionRegularizationScheme::SYMMETRIC_ALPHA_SHIFT:
-    return "symmetric-alpha-shift";
+  case mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON:
+    return "scaled-epsilon";
   case mcpd3::DualDecompositionRegularizationScheme::NONE:
     return "none";
   }
@@ -96,9 +89,8 @@ int main(int argc, char *argv[]) {
               << " DIMACS_MAXFLOW_FILE --partitions N "
                  "[--patience N] "
                  "[--max-iterations N] [--threads N] "
-                 "[--regularization local-lexicographic|"
-                 "symmetric-alpha-shift|none] "
-                 "[--symmetric-alpha-shift N] "
+                 "[--regularization scaled-epsilon|none] "
+                 "[--regularization-budget-limit N] "
                  "[--random-initial-alpha-radius N] "
                  "[--random-initial-alpha-seed N] "
                  "[--capacity-multiplier N] "
@@ -153,8 +145,8 @@ int main(int argc, char *argv[]) {
       options.regularization_scheme =
           mcpd3::DualDecompositionRegularizationScheme::NONE;
     } else if ((value = get_option_value(i, argc, argv, arg,
-                                         "--symmetric-alpha-shift")) != "") {
-      options.symmetric_alpha_shift = std::atol(value.c_str());
+                                         "--regularization-budget-limit")) != "") {
+      options.regularization_budget_limit = std::atol(value.c_str());
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--random-initial-alpha-radius")) !=
                "") {
@@ -236,7 +228,8 @@ int main(int argc, char *argv[]) {
             << " capacity_multiplier=" << capacity_multiplier
             << " regularization="
             << regularization_scheme_name(options.regularization_scheme)
-            << " symmetric_alpha_shift=" << options.symmetric_alpha_shift
+            << " regularization_budget_limit="
+            << options.regularization_budget_limit
             << " randomize_initial_alphas="
             << options.randomize_initial_alphas
             << " initial_alpha_random_radius="
