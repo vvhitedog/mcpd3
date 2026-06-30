@@ -302,6 +302,14 @@ int main(int argc, char *argv[]) {
             << "\n";
   std::cout << " best_lower_bound_raw : "
             << dual_decomp->getBestLowerBoundRaw() << "\n";
+  std::cout << " best_selected_objective : "
+            << dual_decomp->getBestSelectedObjective() << "\n";
+  std::cout << " best_selected_objective_raw : "
+            << dual_decomp->getBestSelectedObjectiveRaw() << "\n";
+  std::cout << " best_certified_lower_bound : "
+            << dual_decomp->getBestCertifiedLowerBound() << "\n";
+  std::cout << " best_certified_lower_bound_raw : "
+            << dual_decomp->getBestCertifiedLowerBoundRaw() << "\n";
   std::cout << " best_regularized_objective : "
             << dual_decomp->getBestRegularizedObjective() << "\n";
   std::cout << " best_regularized_objective_raw : "
