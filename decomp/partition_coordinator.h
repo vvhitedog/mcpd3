@@ -214,6 +214,8 @@ public:
       futures.push_back(std::async(
           std::launch::async,
           [&, worker_index] {
+            std::vector<PartitionSolveRequest> requests;
+            requests.reserve(packages_by_worker[worker_index].size());
             for (const auto package_index : packages_by_worker[worker_index]) {
               const int partition_id = packages_[package_index].partition_id;
               PartitionSolveRequest request;
@@ -222,8 +224,23 @@ public:
               request.scale = scale;
               request.regularization_strength = regularization_strength;
               request.alpha_updates = std::move(alpha_updates[package_index]);
-              results[package_index] =
-                  workers_[worker_index]->solveRound(request);
+              requests.push_back(std::move(request));
+            }
+            const auto worker_results =
+                workers_[worker_index]->solveRoundBatch(requests);
+            if (worker_results.size() != requests.size()) {
+              throw std::runtime_error(
+                  "worker batch result count does not match request count");
+            }
+            for (const auto &worker_result : worker_results) {
+              const size_t package_index =
+                  packageIndexForPartition(worker_result.partition_id);
+              if (workerIndexForPartition(worker_result.partition_id) !=
+                  worker_index) {
+                throw std::runtime_error(
+                    "worker returned a result for an unowned partition");
+              }
+              results[package_index] = worker_result;
             }
           }));
     }

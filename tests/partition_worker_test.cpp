@@ -606,6 +606,76 @@ private:
   long scale_factor_ = 1;
 };
 
+class BatchRecordingWorker final : public mcpd3::PartitionWorker {
+public:
+  enum class Mode {
+    NORMAL,
+    DROP_LAST_RESULT,
+    RETURN_UNOWNED_PARTITION,
+  };
+
+  explicit BatchRecordingWorker(Mode mode = Mode::NORMAL) : mode_(mode) {}
+
+  void loadPartition(const mcpd3::PartitionPackage &package) override {
+    packages_[package.partition_id] = package;
+  }
+
+  mcpd3::PartitionSolveResult solveRound(
+      const mcpd3::PartitionSolveRequest &request) override {
+    ++single_solve_count_;
+    return makeResult(request, request.partition_id);
+  }
+
+  std::vector<mcpd3::PartitionSolveResult> solveRoundBatch(
+      const std::vector<mcpd3::PartitionSolveRequest> &requests) override {
+    batch_sizes_.push_back(requests.size());
+    std::vector<mcpd3::PartitionSolveResult> results;
+    results.reserve(requests.size());
+    for (const auto &request : requests) {
+      results.push_back(makeResult(request, request.partition_id));
+    }
+    if (mode_ == Mode::DROP_LAST_RESULT && !results.empty()) {
+      results.pop_back();
+    }
+    if (mode_ == Mode::RETURN_UNOWNED_PARTITION && !results.empty()) {
+      results.front().partition_id =
+          results.front().partition_id == 0 ? 1 : 0;
+    }
+    return results;
+  }
+
+  void scaleObjective(long) override {}
+
+  const std::vector<size_t> &batchSizes() const { return batch_sizes_; }
+  int singleSolveCount() const { return single_solve_count_; }
+
+private:
+  mcpd3::PartitionSolveResult makeResult(
+      const mcpd3::PartitionSolveRequest &request, int partition_id) const {
+    const auto find_iter = packages_.find(request.partition_id);
+    require(find_iter != packages_.end(),
+            "batch worker received unknown partition id");
+    const auto &package = find_iter->second;
+
+    mcpd3::PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = partition_id;
+    result.lower_bound = package.partition_id + 1;
+    for (const auto &endpoint : package.constraint_endpoints) {
+      result.constrained_labels.push_back(
+          mcpd3::ConstraintLabel{endpoint.constraint_id,
+                                 endpoint.global_node_id,
+                                 endpoint.local_index, 0});
+    }
+    return result;
+  }
+
+  Mode mode_ = Mode::NORMAL;
+  std::map<int, mcpd3::PartitionPackage> packages_;
+  std::vector<size_t> batch_sizes_;
+  int single_solve_count_ = 0;
+};
+
 mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
                                                bool is_source) {
   mcpd3::PartitionPackage package;
@@ -1193,6 +1263,120 @@ void coordinatorRoutesMultiplePackagesToOneWorker() {
           "partition 0 alpha should update after disagreement");
   require(worker_ptr->requests()[3].alpha_updates[0].alpha == 100,
           "partition 1 alpha should update after disagreement");
+}
+
+void coordinatorBatchesMultiplePackagesPerWorker() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  auto worker = std::make_unique<BatchRecordingWorker>();
+  auto *worker_ptr = worker.get();
+  workers.push_back(std::move(worker));
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+  const auto stats =
+      coordinator.runRound(/*round_id=*/7, /*scale=*/100,
+                           /*step_size=*/100, /*regularization_strength=*/0);
+
+  require(stats.lower_bound == 3,
+          "batched worker lower bound should combine both partitions");
+  require(stats.disagreement_count == 0,
+          "batched worker should return agreeing labels");
+  require(worker_ptr->batchSizes() == std::vector<size_t>{2},
+          "coordinator should send one batch containing both partitions");
+  require(worker_ptr->singleSolveCount() == 0,
+          "coordinator should use solveRoundBatch instead of per-partition RPCs");
+}
+
+void coordinatorRejectsMalformedBatchResponses() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  {
+    std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+    workers.push_back(std::make_unique<BatchRecordingWorker>(
+        BatchRecordingWorker::Mode::DROP_LAST_RESULT));
+    mcpd3::PartitionWorkerCoordinator coordinator(
+        makeCoordinatorPackages(), std::move(workers), options);
+    bool threw = false;
+    try {
+      (void)coordinator.runRound(/*round_id=*/1, /*scale=*/100,
+                                 /*step_size=*/100,
+                                 /*regularization_strength=*/0);
+    } catch (const std::runtime_error &e) {
+      threw = std::string(e.what()).find("result count") !=
+              std::string::npos;
+    }
+    require(threw, "coordinator should reject short batch responses");
+  }
+
+  {
+    std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+    workers.push_back(std::make_unique<BatchRecordingWorker>(
+        BatchRecordingWorker::Mode::RETURN_UNOWNED_PARTITION));
+    workers.push_back(std::make_unique<BatchRecordingWorker>());
+    mcpd3::PartitionWorkerCoordinator coordinator(
+        makeCoordinatorPackages(), std::move(workers), options);
+    bool threw = false;
+    try {
+      (void)coordinator.runRound(/*round_id=*/1, /*scale=*/100,
+                                 /*step_size=*/100,
+                                 /*regularization_strength=*/0);
+    } catch (const std::runtime_error &e) {
+      threw = std::string(e.what()).find("unowned partition") !=
+              std::string::npos;
+    }
+    require(threw, "coordinator should reject unowned batch results");
+  }
+}
+
+void inProcessWorkerBatchSolvesDistinctLoadedPartitions() {
+  mcpd3::InProcessPartitionWorker worker;
+  for (const auto &package : makeCoordinatorPackages()) {
+    worker.loadPartition(package);
+  }
+
+  mcpd3::PartitionSolveRequest first_request;
+  first_request.round_id = 9;
+  first_request.partition_id = 0;
+  first_request.scale = 100;
+  first_request.regularization_strength = 0;
+
+  mcpd3::PartitionSolveRequest second_request = first_request;
+  second_request.partition_id = 1;
+
+  const auto results =
+      worker.solveRoundBatch({first_request, second_request});
+  require(results.size() == 2,
+          "in-process batch should return one result per request");
+  require(results[0].round_id == 9 && results[1].round_id == 9,
+          "in-process batch should preserve round ids");
+  require(results[0].partition_id == 0 && results[1].partition_id == 1,
+          "in-process batch should preserve request order and partition ids");
+  require(results[0].constrained_labels.size() == 1 &&
+              results[1].constrained_labels.size() == 1,
+          "in-process batch should return constrained labels");
+
+  bool threw = false;
+  try {
+    (void)worker.solveRoundBatch({first_request, first_request});
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("distinct partitions") !=
+            std::string::npos;
+  }
+  require(threw, "in-process batch should reject duplicate partitions");
 }
 
 void coordinatorSendsOnlyDirtyAlphaUpdates() {
@@ -1889,6 +2073,9 @@ int main() {
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     coordinatorRoutesMultiplePackagesToOneWorker();
+    coordinatorBatchesMultiplePackagesPerWorker();
+    coordinatorRejectsMalformedBatchResponses();
+    inProcessWorkerBatchSolvesDistinctLoadedPartitions();
     coordinatorSendsOnlyDirtyAlphaUpdates();
     inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages();
     unitScaleResolvesOppositeDirectionCycle();

@@ -8,12 +8,14 @@
 
 #pragma once
 
+#include <future>
 #include <limits>
 #include <list>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <decomp/constraint.h>
@@ -80,6 +82,15 @@ public:
   virtual void loadPartition(const PartitionPackage &package) = 0;
   virtual PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) = 0;
+  virtual std::vector<PartitionSolveResult> solveRoundBatch(
+      const std::vector<PartitionSolveRequest> &requests) {
+    std::vector<PartitionSolveResult> results;
+    results.reserve(requests.size());
+    for (const auto &request : requests) {
+      results.push_back(solveRound(request));
+    }
+    return results;
+  }
   virtual void scaleObjective(long factor) = 0;
 };
 
@@ -111,33 +122,39 @@ public:
       throw std::runtime_error("partition must be loaded before solveRound");
     }
     auto &loaded = loadedPartitionForRequest(request);
+    return solveLoadedPartition(&loaded, request);
+  }
 
-    for (const auto &update : request.alpha_updates) {
-      applyAlphaUpdate(&loaded, update);
+  std::vector<PartitionSolveResult> solveRoundBatch(
+      const std::vector<PartitionSolveRequest> &requests) override {
+    if (partitions_.empty()) {
+      throw std::runtime_error(
+          "partition must be loaded before solveRoundBatch");
+    }
+    std::vector<LoadedPartition *> loaded_partitions;
+    loaded_partitions.reserve(requests.size());
+    std::unordered_set<int> seen_partition_ids;
+    for (const auto &request : requests) {
+      auto &loaded = loadedPartitionForRequest(request);
+      if (!seen_partition_ids.insert(loaded.package.partition_id).second) {
+        throw std::runtime_error(
+            "batch solve requests must target distinct partitions");
+      }
+      loaded_partitions.push_back(&loaded);
     }
 
-    loaded.solver->setRegularizationStrength(request.regularization_strength);
-    loaded.solver->solve();
-
-    PartitionSolveResult result;
-    result.round_id = request.round_id;
-    result.partition_id = loaded.package.partition_id;
-    result.lower_bound = loaded.solver->getMinCutValue();
-    result.regularization_budget = loaded.solver->getLastRegularizationBudget();
-    result.regularization_contribution =
-        loaded.solver->getLastRegularizationContribution();
-    result.regularization_anchor_sink_count =
-        loaded.solver->getLastRegularizationAnchorSinkCount();
-    result.regularization_active_sink_count =
-        loaded.solver->getLastRegularizationActiveSinkCount();
-
-    result.constrained_labels.reserve(loaded.package.constraint_endpoints.size());
-    for (const auto &binding : loaded.package.constraint_endpoints) {
-      result.constrained_labels.push_back(ConstraintLabel{
-          binding.constraint_id, binding.global_node_id, binding.local_index,
-          loaded.solver->getMinCutSolution(binding.local_index)});
+    std::vector<PartitionSolveResult> results(requests.size());
+    std::vector<std::future<void>> futures;
+    futures.reserve(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+      futures.push_back(std::async(std::launch::async, [&, i] {
+        results[i] = solveLoadedPartition(loaded_partitions[i], requests[i]);
+      }));
     }
-    return result;
+    for (auto &future : futures) {
+      future.get();
+    }
+    return results;
   }
 
   void scaleObjective(long factor) override {
@@ -294,6 +311,38 @@ private:
     arc_reference->alpha = update.alpha;
     arc_reference->last_alpha = update.last_alpha;
     arc_reference->alpha_momentum = update.alpha_momentum;
+  }
+
+  PartitionSolveResult solveLoadedPartition(
+      LoadedPartition *loaded, const PartitionSolveRequest &request) {
+    for (const auto &update : request.alpha_updates) {
+      applyAlphaUpdate(loaded, update);
+    }
+
+    loaded->solver->setRegularizationStrength(request.regularization_strength);
+    loaded->solver->solve();
+
+    PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = loaded->package.partition_id;
+    result.lower_bound = loaded->solver->getMinCutValue();
+    result.regularization_budget =
+        loaded->solver->getLastRegularizationBudget();
+    result.regularization_contribution =
+        loaded->solver->getLastRegularizationContribution();
+    result.regularization_anchor_sink_count =
+        loaded->solver->getLastRegularizationAnchorSinkCount();
+    result.regularization_active_sink_count =
+        loaded->solver->getLastRegularizationActiveSinkCount();
+
+    result.constrained_labels.reserve(
+        loaded->package.constraint_endpoints.size());
+    for (const auto &binding : loaded->package.constraint_endpoints) {
+      result.constrained_labels.push_back(ConstraintLabel{
+          binding.constraint_id, binding.global_node_id, binding.local_index,
+          loaded->solver->getMinCutSolution(binding.local_index)});
+    }
+    return result;
   }
 
   std::unordered_map<int, LoadedPartition> partitions_;
