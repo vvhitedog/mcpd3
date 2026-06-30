@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 

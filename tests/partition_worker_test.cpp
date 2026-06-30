@@ -945,6 +945,77 @@ void fullSolveStopsOptimalOnUnregularizedAgreement() {
           "progress record regularization strength mismatch");
 }
 
+void fullSolveReportsProgressThroughConfiguredCallback() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.progress_report_interval = 2;
+
+  std::vector<mcpd3::PartitionWorkerProgressRecord> callbacks;
+  options.progress_callback =
+      [&](const mcpd3::PartitionWorkerProgressRecord &record) {
+        callbacks.push_back(record);
+      };
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 1}, {22, 0}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "callback progress solve should finish on agreement");
+  require(result.total_iterations == 3,
+          "callback progress solve should run three iterations");
+  require(result.progress_records.size() == 3,
+          "callback progress should not replace stored progress records");
+  require(callbacks.size() == 1,
+          "callback should fire only on configured interval");
+  require(callbacks[0].total_iteration == 2,
+          "callback should report the second total iteration");
+  require(callbacks[0].lower_bound == 32,
+          "callback should include the round lower bound");
+  require(callbacks[0].best_lower_bound == 32,
+          "callback should include the best lower bound");
+  require(callbacks[0].disagreement_count == 1,
+          "callback should include disagreement count");
+}
+
+void disabledProgressCallbackDoesNotFire() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.progress_report_interval = 0;
+
+  bool called = false;
+  options.progress_callback =
+      [&](const mcpd3::PartitionWorkerProgressRecord &) { called = true; };
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}},
+      std::deque<ScriptedRound>{{20, 0}}, options);
+  (void)coordinator.solve();
+  require(!called, "disabled progress interval should not call callback");
+}
+
+void invalidProgressIntervalIsRejected() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.progress_report_interval = -1;
+  bool threw = false;
+  try {
+    auto coordinator = makeScriptedCoordinator(
+        std::deque<ScriptedRound>{{10, 0}},
+        std::deque<ScriptedRound>{{20, 0}}, options);
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("progress report interval") !=
+            std::string::npos;
+  }
+  require(threw, "negative progress interval should be rejected");
+}
+
 void fullSolveReportsBestBoundUsingObjectiveScale() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 100;
@@ -1744,6 +1815,9 @@ int main() {
     scaledEpsilonRegularizationPersistsUntilAlphaChanges();
     lowScaleScaledEpsilonRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();
+    fullSolveReportsProgressThroughConfiguredCallback();
+    disabledProgressCallbackDoesNotFire();
+    invalidProgressIntervalIsRejected();
     fullSolveReportsBestBoundUsingObjectiveScale();
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();

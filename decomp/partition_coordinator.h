@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <future>
 #include <limits>
 #include <map>
@@ -48,6 +49,8 @@ enum class PartitionWorkerRegularizationScheme {
   NONE
 };
 
+struct PartitionWorkerProgressRecord;
+
 struct PartitionWorkerCoordinatorOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
@@ -67,6 +70,8 @@ struct PartitionWorkerCoordinatorOptions {
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
+  int progress_report_interval = 0;
+  std::function<void(const PartitionWorkerProgressRecord &)> progress_callback;
 };
 
 struct PartitionWorkerRoundStats {
@@ -277,6 +282,10 @@ private:
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
     }
+    if (options_.progress_report_interval < 0) {
+      throw std::runtime_error(
+          "progress report interval must be non-negative");
+    }
   }
 
   struct ConstraintEndpoint {
@@ -379,39 +388,29 @@ private:
 
           const long best_lower_bound =
               std::max(scale_best_lower_bound, round_stats.lower_bound);
-          result->progress_records.push_back(
-              PartitionWorkerProgressRecord{/*scale=*/scale,
-                                            /*iteration=*/iteration,
-                                            /*total_iteration=*/
-                                            result->total_iterations,
-                                            /*max_iteration=*/
-                                            options_.max_iteration_count,
-                                            /*lower_bound=*/
-                                            round_stats.lower_bound,
-                                            /*best_lower_bound=*/
-                                            best_lower_bound,
-                                            /*disagreement_count=*/
-                                            round_stats.disagreement_count,
-                                            /*disagreement_norm_sq=*/
-                                            round_stats.disagreement_norm_sq,
-                                            /*step_size=*/step_size,
-                                            /*effective_step_size=*/
-                                            round_stats.effective_step_size,
-                                            /*regularization_strength=*/
-                                            regularization_strength,
-                                            /*regularization_budget=*/
-                                            round_stats.regularization_budget,
-                                            /*regularization_contribution=*/
-                                            round_stats
-                                                .regularization_contribution,
-                                            /*regularization_anchor_sink_count=*/
-                                            round_stats
-                                                .regularization_anchor_sink_count,
-                                            /*regularization_active_sink_count=*/
-                                            round_stats
-                                                .regularization_active_sink_count,
-                                            /*iterations_since_improvement=*/
-                                            iteration - last_improvement_iter});
+          PartitionWorkerProgressRecord record{
+              /*scale=*/scale,
+              /*iteration=*/iteration,
+              /*total_iteration=*/result->total_iterations,
+              /*max_iteration=*/options_.max_iteration_count,
+              /*lower_bound=*/round_stats.lower_bound,
+              /*best_lower_bound=*/best_lower_bound,
+              /*disagreement_count=*/round_stats.disagreement_count,
+              /*disagreement_norm_sq=*/round_stats.disagreement_norm_sq,
+              /*step_size=*/step_size,
+              /*effective_step_size=*/round_stats.effective_step_size,
+              /*regularization_strength=*/regularization_strength,
+              /*regularization_budget=*/round_stats.regularization_budget,
+              /*regularization_contribution=*/
+              round_stats.regularization_contribution,
+              /*regularization_anchor_sink_count=*/
+              round_stats.regularization_anchor_sink_count,
+              /*regularization_active_sink_count=*/
+              round_stats.regularization_active_sink_count,
+              /*iterations_since_improvement=*/
+              iteration - last_improvement_iter};
+          result->progress_records.push_back(record);
+          reportProgress(record);
 
           result->best_lower_bound_raw =
               std::max(result->best_lower_bound_raw, round_stats.lower_bound);
@@ -552,6 +551,17 @@ private:
       constraint_index_by_id_[constraint.constraint_id] = constraints_.size();
       constraints_.push_back(constraint);
     }
+  }
+
+  void reportProgress(const PartitionWorkerProgressRecord &record) const {
+    if (!options_.progress_callback ||
+        options_.progress_report_interval <= 0) {
+      return;
+    }
+    if (record.total_iteration % options_.progress_report_interval != 0) {
+      return;
+    }
+    options_.progress_callback(record);
   }
 
   void randomizeInitialAlphas() {
