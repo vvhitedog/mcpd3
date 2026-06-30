@@ -156,35 +156,42 @@ public:
     computeMinCutValueInitial(); // TODO: is this needed?
   }
 
-  template <int scale> void scaleProblem() {
+  template <int scale> void scaleProblem() { scaleProblem(scale); }
+
+  void scaleProblem(long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("problem scale factor must be positive");
+    }
     for (int i = 0; i < nnode_; ++i) {
-      terminal_capacities_[i] *= scale;
+      terminal_capacities_[i] =
+          checkedScaleInt(terminal_capacities_[i], scale);
       auto &flow = d_flow_[i];
-      flow *= scale;
+      flow = checkedScaleInt(flow, scale);
     }
     for (int i = 0; i < narc_; ++i) {
       auto &forward_capacity = arc_capacities_[2 * i + 0];
       auto &backward_capacity = arc_capacities_[2 * i + 1];
-      forward_capacity *= scale;
-      backward_capacity *= scale;
+      forward_capacity = checkedScaleInt(forward_capacity, scale);
+      backward_capacity = checkedScaleInt(backward_capacity, scale);
       auto &flow = v_flow_[i];
-      flow *= scale;
+      flow = checkedScaleInt(flow, scale);
     }
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
       int flow;
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, flow * scale);
+      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
       a = maxflow_graph_.get_next_arc(a);
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, flow * scale);
+      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
       int flow;
       flow = maxflow_graph_.get_trcap(i);
-      maxflow_graph_.set_trcap(i, flow * scale);
+      maxflow_graph_.set_trcap(i, checkedScaleInt(flow, scale));
     }
+    mincut_value_ = checkedScaleLong(mincut_value_, scale);
     // NOTE: after changing scale, the capacities from previous and this scale
     // are at completely different values, hence incremental update of
     // mincut_value_ will not work properly
@@ -341,6 +348,28 @@ private:
       throw std::overflow_error("scaled epsilon regularization capacity overflow");
     }
     return lhs + rhs;
+  }
+
+  static long checkedScaleLong(long value, long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("scale factor must be positive");
+    }
+    if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    return value * scale;
+  }
+
+  static int checkedScaleInt(int value, long scale) {
+    const long result = checkedScaleLong(value, scale);
+    if (result > std::numeric_limits<int>::max() ||
+        result < std::numeric_limits<int>::min()) {
+      throw std::overflow_error("objective scale promotion exceeds int");
+    }
+    return static_cast<int>(result);
   }
 
   void resetRegularizationDiagnostics() {

@@ -91,6 +91,8 @@ int main(int argc, char *argv[]) {
                  "[--max-iterations N] [--threads N] "
                  "[--regularization scaled-epsilon|none] "
                  "[--regularization-budget-limit N] "
+                 "[--disable-scale-promotion] "
+                 "[--max-scale-promotions N] "
                  "[--random-initial-alpha-radius N] "
                  "[--random-initial-alpha-seed N] "
                  "[--capacity-multiplier N] "
@@ -147,6 +149,11 @@ int main(int argc, char *argv[]) {
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--regularization-budget-limit")) != "") {
       options.regularization_budget_limit = std::atol(value.c_str());
+    } else if (arg == "--disable-scale-promotion") {
+      options.promote_objective_scale_on_overbudget = false;
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--max-scale-promotions")) != "") {
+      options.max_objective_scale_promotions = std::atoi(value.c_str());
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--random-initial-alpha-radius")) !=
                "") {
@@ -230,6 +237,10 @@ int main(int argc, char *argv[]) {
             << regularization_scheme_name(options.regularization_scheme)
             << " regularization_budget_limit="
             << options.regularization_budget_limit
+            << " promote_objective_scale_on_overbudget="
+            << options.promote_objective_scale_on_overbudget
+            << " max_objective_scale_promotions="
+            << options.max_objective_scale_promotions
             << " randomize_initial_alphas="
             << options.randomize_initial_alphas
             << " initial_alpha_random_radius="
@@ -309,5 +320,7 @@ int main(int argc, char *argv[]) {
             << dual_decomp->getLastRegularizationAnchorSinkCount() << "\n";
   std::cout << " final_regularization_active_sink_count : "
             << dual_decomp->getLastRegularizationActiveSinkCount() << "\n";
+  std::cout << " objective_scale_promotion_count : "
+            << dual_decomp->getObjectiveScalePromotionCount() << "\n";
   return EXIT_SUCCESS;
 }

@@ -445,6 +445,45 @@ void dualDecompositionObjectiveScaleIsIndependentOfStepSize() {
   require(threw, "nonpositive dual decomposition objective scale should fail");
 }
 
+void dualDecompositionPromotesObjectiveScaleOnOverBudget() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10;
+  options.initial_step_size = 10;
+  options.num_optimization_scales = 3;
+  options.max_iteration_count = 20;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.max_objective_scale_promotions = 2;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{0, 0},
+      /*terminal_capacities=*/std::vector<int>{-100, -10}, options);
+
+  dual_decomp.solve();
+
+  require(dual_decomp.getObjectiveScalePromotionCount() == 1,
+          "over-budget scaled epsilon solve should promote objective scale");
+  require(dual_decomp.getScale() == 100,
+          "promotion should increase objective scale by one decade");
+  require(dual_decomp.getBestLowerBoundRaw() == 0,
+          "over-budget regularized lower bound should not be accepted");
+  require(dual_decomp.getLastRegularizationBudget() <
+              dual_decomp.getScale(),
+          "promoted solve should finish under the active budget limit");
+  require(dual_decomp.getLastDisagreementCount() == 0,
+          "promoted solve should preserve progress and reach agreement");
+}
+
 struct ScriptedRound {
   long lower_bound = 0;
   int label = 0;
@@ -1398,6 +1437,7 @@ int main() {
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
+    dualDecompositionPromotesObjectiveScaleOnOverBudget();
     scaledEpsilonRegularizationUsesPreviousSinkAnchors();
     scaledEpsilonRegularizationPersistsUntilAlphaChanges();
     lowScaleScaledEpsilonRegularizationHandlesBoundaryTie();

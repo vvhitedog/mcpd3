@@ -101,6 +101,8 @@ struct DualDecompositionOptions {
   DualDecompositionRegularizationScheme regularization_scheme =
       DualDecompositionRegularizationScheme::SCALED_EPSILON;
   long regularization_budget_limit = 0;
+  bool promote_objective_scale_on_overbudget = true;
+  int max_objective_scale_promotions = 4;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -140,6 +142,7 @@ public:
         last_regularization_anchor_sink_count_(0),
         last_regularization_active_sink_count_(0),
         total_optimization_iterations_(0),
+        objective_scale_promotion_count_(0),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
     initializeDecomposition();
@@ -182,6 +185,9 @@ public:
   }
   long getTotalOptimizationIterations() const {
     return total_optimization_iterations_;
+  }
+  long getObjectiveScalePromotionCount() const {
+    return objective_scale_promotion_count_;
   }
   const std::vector<PartitionPackage> &getPartitionPackages() const {
     return partition_packages_;
@@ -260,7 +266,8 @@ public:
   enum OptimizationStatus {
     OPTIMAL,
     NO_FURTHER_PROGRESS,
-    ITERATION_COUNT_EXCEEDED
+    ITERATION_COUNT_EXCEEDED,
+    REGULARIZATION_BUDGET_EXCEEDED
   };
 
   template <bool attempt_decoding, typename Decoder>
@@ -269,7 +276,8 @@ public:
     long step_size = options_.initial_step_size;
     scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
-    for (int iscale = 0; iscale < options_.num_optimization_scales; ++iscale) {
+    int iscale = 0;
+    while (iscale < options_.num_optimization_scales && step_size >= 1) {
       OptimizationStatus status;
       auto run_opt_scale_time = time_lambda([&] {
         status = runOptimizationScale(options_.max_iteration_count, step_size,
@@ -279,6 +287,11 @@ public:
       if (options_.verbose) {
         printf("run optimization scale time: %lums\n",
                run_opt_scale_time.count());
+      }
+      if (status == REGULARIZATION_BUDGET_EXCEEDED &&
+          tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
+        iscale = 0;
+        continue;
       }
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
         break;
@@ -291,6 +304,7 @@ public:
         }
       }
       step_size /= 10;
+      ++iscale;
       //auto rescale_problem_time =
       //    time_lambda([&] { scaleProblem<scaling_factor>(); });
       //printf("rescale problem time: %lums\n", rescale_problem_time.count());
@@ -392,6 +406,21 @@ public:
       warnIfRegularizationBudgetExceeded(last_regularization_budget_,
                                          regularizationStrengthForStepSize(
                                              step_size));
+      if (isRegularizationBudgetExceeded(last_regularization_budget_,
+                                         regularizationStrengthForStepSize(
+                                             step_size))) {
+        if (report_progress) {
+          std::fprintf(stderr,
+                       "mcpd3_progress stage=dd_solve_stop "
+                       "reason=regularization_budget_exceeded iter=%d "
+                       "budget=%ld limit=%ld step_size=%ld scale=%ld\n",
+                       i, last_regularization_budget_,
+                       regularizationBudgetLimit(), step_size, scale_);
+          std::fflush(stderr);
+        }
+        opt_status = REGULARIZATION_BUDGET_EXCEEDED;
+        break;
+      }
       if (options_.track_primal_upper_bound) {
         current_upper_bound_ = updatePrimalUpperBound();
       }
@@ -637,26 +666,67 @@ public:
   }
 
   template <int scale> void scaleProblem() {
-    scale_ *= scale;
+    scaleProblem(static_cast<long>(scale));
+  }
+
+  void scaleProblem(long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("problem scale factor must be positive");
+    }
+    scale_ = checkedScaleLong(scale_, scale);
+    options_.objective_scale = checkedScaleLong(options_.objective_scale, scale);
     for (auto &cap : original_arc_capacities_) {
-      cap *= scale;
+      cap = checkedScaleInt(cap, scale);
     }
     for (auto &cap : original_terminal_capacities_) {
-      cap *= scale;
+      cap = checkedScaleInt(cap, scale);
     }
     for (auto &solver_uptr : solvers_) {
       auto *solver = solver_uptr.get();
-      thread_pool_.push([solver] { solver->scaleProblem<scale>(); });
+      thread_pool_.push([solver, scale] { solver->scaleProblem(scale); });
     }
     thread_pool_.wait();
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
-        constraint.alpha *= scale;
+        constraint.alpha = checkedScaleLong(constraint.alpha, scale);
+        constraint.last_alpha = checkedScaleLong(constraint.last_alpha, scale);
       }
     }
+    if (max_lower_bound_raw_ != std::numeric_limits<long>::min()) {
+      max_lower_bound_raw_ = checkedScaleLong(max_lower_bound_raw_, scale);
+    }
+    if (best_upper_bound_ != std::numeric_limits<long>::max()) {
+      best_upper_bound_ = checkedScaleLong(best_upper_bound_, scale);
+    }
+    if (current_upper_bound_ != std::numeric_limits<long>::max()) {
+      current_upper_bound_ = checkedScaleLong(current_upper_bound_, scale);
+    }
+    warned_regularization_budget_exceeded_ = false;
   }
 
 private:
+  static long checkedScaleLong(long value, long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("scale factor must be positive");
+    }
+    if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    return value * scale;
+  }
+
+  static int checkedScaleInt(int value, long scale) {
+    const long result = checkedScaleLong(value, scale);
+    if (result > std::numeric_limits<int>::max() ||
+        result < std::numeric_limits<int>::min()) {
+      throw std::overflow_error("objective scale promotion exceeds int");
+    }
+    return static_cast<int>(result);
+  }
+
   static size_t resolveThreadCount(int npartition, size_t requested) {
     size_t hardware = std::thread::hardware_concurrency();
     if (hardware == 0) {
@@ -741,6 +811,10 @@ private:
       throw std::runtime_error(
           "regularization budget limit must be non-negative");
     }
+    if (options_.max_objective_scale_promotions < 0) {
+      throw std::runtime_error(
+          "max objective scale promotions must be non-negative");
+    }
   }
 
   long regularizationBudgetLimit() const {
@@ -751,7 +825,7 @@ private:
 
   void warnIfRegularizationBudgetExceeded(long budget,
                                           int regularization_strength) {
-    if (regularization_strength <= 0 || budget < regularizationBudgetLimit() ||
+    if (!isRegularizationBudgetExceeded(budget, regularization_strength) ||
         warned_regularization_budget_exceeded_) {
       return;
     }
@@ -761,6 +835,38 @@ private:
                  budget, regularizationBudgetLimit());
     std::fflush(stderr);
     warned_regularization_budget_exceeded_ = true;
+  }
+
+  bool isRegularizationBudgetExceeded(long budget,
+                                      int regularization_strength) const {
+    return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+  }
+
+  bool tryPromoteObjectiveScale(long factor, long *step_size) {
+    if (!options_.promote_objective_scale_on_overbudget ||
+        options_.regularization_budget_limit > 0 ||
+        objective_scale_promotion_count_ >=
+            options_.max_objective_scale_promotions) {
+      return false;
+    }
+    const long old_scale = scale_;
+    scaleProblem(factor);
+    ++objective_scale_promotion_count_;
+    *step_size = scale_;
+    if (dualdecomp_progress_enabled()) {
+      std::fprintf(stderr,
+                   "mcpd3_progress stage=dd_objective_scale_promote "
+                   "old_scale=%ld new_scale=%ld factor=%ld "
+                   "restart_step_size=%ld promotion_count=%ld\n",
+                   old_scale, scale_, factor, *step_size,
+                   objective_scale_promotion_count_);
+      std::fflush(stderr);
+    }
+    if (options_.verbose) {
+      printf("promoting objective scale from %ld to %ld and restarting at step %ld\n",
+             old_scale, scale_, *step_size);
+    }
+    return true;
   }
 
   long computePrimalCutValue(const std::vector<bool> &labels) const {
@@ -1242,6 +1348,7 @@ private:
   long last_regularization_anchor_sink_count_;
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
+  long objective_scale_promotion_count_;
   bool warned_regularization_budget_exceeded_;
   std::list<int> disagreeing_global_indices_;
 
