@@ -97,6 +97,7 @@ struct DualDecompositionOptions {
   bool verbose = true;
   long min_step_size = 1;
   long max_step_size = 10000;
+  long objective_scale = 1;
   size_t thread_count = 0;
   DualDecompositionRegularizationScheme regularization_scheme =
       DualDecompositionRegularizationScheme::LOCAL_LEXICOGRAPHIC;
@@ -266,7 +267,7 @@ public:
   void solve(Decoder decoder) {
     const int scaling_factor = 10;
     long step_size = options_.initial_step_size;
-    scale_ = step_size;
+    scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
     for (int iscale = 0; iscale < options_.num_optimization_scales; ++iscale) {
       OptimizationStatus status;
@@ -726,6 +727,9 @@ private:
   }
 
   void validateOptions() const {
+    if (options_.objective_scale <= 0) {
+      throw std::runtime_error("objective scale must be positive");
+    }
     if (options_.initial_alpha_random_radius < 0) {
       throw std::runtime_error(
           "initial alpha random radius must be non-negative");

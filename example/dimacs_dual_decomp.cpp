@@ -87,6 +87,7 @@ int main(int argc, char *argv[]) {
   std::string dimacs_path;
   bool stream_symmetric_input = false;
   bool stream_directed_input = false;
+  long capacity_multiplier = 1;
   mcpd3::DualDecompositionOptions options;
   if (argc < 2) {
     std::cout << "usage: " << argv[0]
@@ -100,6 +101,7 @@ int main(int argc, char *argv[]) {
                  "[--symmetric-alpha-shift N] "
                  "[--random-initial-alpha-radius N] "
                  "[--random-initial-alpha-seed N] "
+                 "[--capacity-multiplier N] "
                  "[--stream-directed-input] "
                  "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
@@ -118,6 +120,9 @@ int main(int argc, char *argv[]) {
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--threads")) != "") {
       options.thread_count = static_cast<size_t>(std::atoll(value.c_str()));
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--capacity-multiplier")) != "") {
+      capacity_multiplier = std::atol(value.c_str());
     } else if (arg == "--disable-primal-upper-bound") {
       options.track_primal_upper_bound = false;
     } else if (arg == "--quiet") {
@@ -174,6 +179,11 @@ int main(int argc, char *argv[]) {
     std::cerr << "missing DIMACS_MAXFLOW_FILE\n";
     return EXIT_FAILURE;
   }
+  if (capacity_multiplier <= 0) {
+    std::cerr << "capacity multiplier must be positive\n";
+    return EXIT_FAILURE;
+  }
+  options.objective_scale = capacity_multiplier;
   mcpd3::MinCutGraph min_cut_graph_data;
   mcpd3::ResidentMemoryUsage read_graph_mem{0, 0, 0};
   auto read_graph_microseconds = mcpd3::time_lambda([&] {
@@ -199,11 +209,13 @@ int main(int argc, char *argv[]) {
             << "\n";
 
   auto scale_graph_microseconds = mcpd3::time_lambda([&] {
-    for ( auto &cap : min_cut_graph_data.arc_capacities ) {
-      cap *= 10000;
-    }
-    for ( auto &cap : min_cut_graph_data.terminal_capacities ) {
-      cap *= 10000;
+    if (capacity_multiplier != 1) {
+      for (auto &cap : min_cut_graph_data.arc_capacities) {
+        cap *= capacity_multiplier;
+      }
+      for (auto &cap : min_cut_graph_data.terminal_capacities) {
+        cap *= capacity_multiplier;
+      }
     }
   });
   std::cout << "scale_graph_time_us : " << scale_graph_microseconds.count()
@@ -221,6 +233,7 @@ int main(int argc, char *argv[]) {
             << " momentum=" << options.use_momentum
             << " stream_directed_input=" << stream_directed_input
             << " stream_symmetric_input=" << stream_symmetric_input
+            << " capacity_multiplier=" << capacity_multiplier
             << " regularization="
             << regularization_scheme_name(options.regularization_scheme)
             << " symmetric_alpha_shift=" << options.symmetric_alpha_shift

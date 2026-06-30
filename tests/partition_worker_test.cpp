@@ -407,6 +407,55 @@ void dualDecompositionRandomizesExportedInitialAlphas() {
   require(threw, "negative initial alpha random radius should be rejected");
 }
 
+void dualDecompositionObjectiveScaleIsIndependentOfStepSize() {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  dual_decomp.solve();
+  require(dual_decomp.getScale() == 1,
+          "objective reporting scale should not follow the DD step size");
+
+  options.objective_scale = 7;
+  mcpd3::DualDecomposition scaled_dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{21, 35},
+      /*terminal_capacities=*/std::vector<int>{14, -28}, options);
+  scaled_dual_decomp.solve();
+  require(scaled_dual_decomp.getScale() == 7,
+          "explicit objective scale should be preserved");
+
+  options.objective_scale = 0;
+  bool threw = false;
+  try {
+    mcpd3::DualDecomposition invalid_scale_dual_decomp(
+        /*npartition=*/2,
+        /*nnode=*/2,
+        /*narc=*/1,
+        /*arcs=*/std::vector<int>{0, 1},
+        /*arc_capacities=*/std::vector<int>{3, 5},
+        /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("objective scale") !=
+            std::string::npos;
+  }
+  require(threw, "nonpositive dual decomposition objective scale should fail");
+}
+
 struct ScriptedRound {
   long lower_bound = 0;
   int label = 0;
@@ -744,6 +793,45 @@ void fullSolveStopsOptimalOnUnregularizedAgreement() {
           "progress record best lower bound mismatch");
   require(record.regularization_strength == 0,
           "progress record regularization strength mismatch");
+}
+
+void fullSolveReportsBestBoundUsingObjectiveScale() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.objective_scale = 1;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}},
+      std::deque<ScriptedRound>{{15, 0}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.best_lower_bound_raw == 25,
+          "best lower bound raw value should include all partitions");
+  require(result.best_lower_bound == 25,
+          "reported best lower bound should not be divided by step size");
+
+  options.objective_scale = 5;
+  auto scaled_coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{50, 0}},
+      std::deque<ScriptedRound>{{75, 0}}, options);
+  const auto scaled_result = scaled_coordinator.solve();
+  require(scaled_result.best_lower_bound_raw == 125,
+          "scaled raw bound should include all partitions");
+  require(scaled_result.best_lower_bound == 25,
+          "explicit objective scale should control reported lower bound");
+
+  options.objective_scale = 0;
+  bool threw = false;
+  try {
+    auto invalid_coordinator = makeScriptedCoordinator(
+        std::deque<ScriptedRound>{{10, 0}},
+        std::deque<ScriptedRound>{{15, 0}}, options);
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("objective scale") !=
+            std::string::npos;
+  }
+  require(threw, "nonpositive coordinator objective scale should fail");
 }
 
 void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
@@ -1296,9 +1384,11 @@ int main() {
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
+    dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     lexicographicRegularizationOnlyBreaksLocalTies();
     lowScaleLexicographicRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();
+    fullSolveReportsBestBoundUsingObjectiveScale();
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesLexicographicRegularizationToReachAgreement();
     unitScaleResolvesOppositeDirectionCycle();

@@ -53,6 +53,7 @@ struct PartitionWorkerCoordinatorOptions {
   bool legacy_patience = false;
   long min_step_size = 1;
   long max_step_size = 10000;
+  long objective_scale = 1;
   bool use_momentum = true;
   bool enable_group_stopping = true;
   PartitionWorkerRegularizationScheme regularization_scheme =
@@ -134,6 +135,7 @@ public:
       std::vector<std::unique_ptr<PartitionWorker>> workers,
       PartitionWorkerCoordinatorOptions options = {})
       : packages_(packages), workers_(std::move(workers)), options_(options) {
+    validateOptions();
     if (packages_.size() != workers_.size()) {
       throw std::runtime_error(
           "partition package count must match worker count");
@@ -187,19 +189,21 @@ public:
 
   PartitionWorkerCoordinatorSolveResult solve() {
     PartitionWorkerCoordinatorSolveResult result;
-    result.scale = options_.initial_step_size;
+    result.scale = options_.objective_scale;
 
+    long schedule_scale = options_.initial_step_size;
     long step_size = options_.initial_step_size;
     for (int scale_index = 0;
          scale_index < options_.num_optimization_scales; ++scale_index) {
       auto scale_result =
-          runOptimizationScale(result.scale, step_size, &result);
+          runOptimizationScale(schedule_scale, step_size, &result);
       result.scale_results.push_back(scale_result);
       result.status = scale_result.status;
       result.stop_reason = scale_result.stop_reason;
       if (scale_result.status == PartitionWorkerOptimizationStatus::OPTIMAL) {
         break;
       }
+      schedule_scale /= 10;
       step_size /= 10;
     }
 
@@ -211,6 +215,16 @@ public:
   }
 
 private:
+  void validateOptions() const {
+    if (options_.objective_scale <= 0) {
+      throw std::runtime_error("objective scale must be positive");
+    }
+    if (options_.initial_alpha_random_radius < 0) {
+      throw std::runtime_error(
+          "initial alpha random radius must be non-negative");
+    }
+  }
+
   struct ConstraintEndpoint {
     int partition_id = -1;
     int global_node_id = -1;
