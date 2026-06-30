@@ -35,6 +35,7 @@
 
 #include <measure/timer.h>
 #include <decomp/constraint.h>
+#include <decomp/lower_bound_certificate.h>
 #include <decomp/partition_worker.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
@@ -133,6 +134,7 @@ public:
         solve_loop_time_(0),
         max_lower_bound_(std::numeric_limits<double>::lowest()),
         max_lower_bound_raw_(std::numeric_limits<long>::min()),
+        max_regularized_objective_raw_(std::numeric_limits<long>::min()),
         best_upper_bound_(std::numeric_limits<long>::max()),
         current_upper_bound_(std::numeric_limits<long>::max()),
         last_disagreement_count_(0),
@@ -160,6 +162,14 @@ public:
   long getScale() const { return scale_; }
   double getBestLowerBound() const { return max_lower_bound_; }
   long getBestLowerBoundRaw() const { return max_lower_bound_raw_; }
+  double getBestRegularizedObjective() const {
+    return max_regularized_objective_raw_ == std::numeric_limits<long>::min()
+               ? -std::numeric_limits<double>::infinity()
+               : double(max_regularized_objective_raw_) / scale_;
+  }
+  long getBestRegularizedObjectiveRaw() const {
+    return max_regularized_objective_raw_;
+  }
   long getBestUpperBoundRaw() const { return best_upper_bound_; }
   double getBestUpperBound() const {
     return best_upper_bound_ == std::numeric_limits<long>::max()
@@ -384,7 +394,7 @@ public:
         thread_pool_.wait();
       });
       solve_loop_time_ += solve_loop_time.count();
-      long lower_bound =
+      long selected_lower_bound =
           std::accumulate(lower_bound_terms.begin(), lower_bound_terms.end(),
                           static_cast<long>(0));
       last_regularization_budget_ =
@@ -403,6 +413,12 @@ public:
           std::accumulate(regularization_active_count_terms.begin(),
                           regularization_active_count_terms.end(),
                           static_cast<long>(0));
+      const long regularized_objective =
+          regularizedObjectiveRaw(selected_lower_bound,
+                                  last_regularization_contribution_);
+      const long lower_bound = certifiedOriginalLowerBoundRaw(
+          selected_lower_bound, last_regularization_contribution_,
+          last_regularization_budget_);
       warnIfRegularizationBudgetExceeded(last_regularization_budget_,
                                          regularizationStrengthForStepSize(
                                              step_size));
@@ -453,7 +469,8 @@ public:
             stderr,
             "mcpd3_progress stage=dd_solve_iter scale=%ld iter=%d "
             "total_iter=%ld max_iter=%d lower_bound=%.6lf "
-            "best_lower_bound=%.6lf upper_bound=%.6lf gap=%.6lf "
+            "best_lower_bound=%.6lf regularized_objective=%.6lf "
+            "best_regularized_objective=%.6lf upper_bound=%.6lf gap=%.6lf "
             "num_disagreeing=%ld disagreement_norm_sq=%.1lf "
             "step_size=%ld effective_step_size=%ld "
             "regularization_strength=%d regularization_budget=%.6lf "
@@ -464,6 +481,10 @@ public:
             "lagrange_update_us=%ld elapsed_sec=%.1f eta_sec=%.1f\n",
             scale_, i, total_optimization_iterations_, nstep,
             double(lower_bound) / scale_, double(best_lower_bound) / scale_,
+            double(regularized_objective) / scale_,
+            double(std::max(max_regularized_objective_raw_,
+                            regularized_objective)) /
+                scale_,
             current_upper_bound_ == std::numeric_limits<long>::max()
                 ? std::numeric_limits<double>::infinity()
                 : double(current_upper_bound_) / scale_,
@@ -505,6 +526,8 @@ public:
       max_lower_bound_ =
           std::max<double>(max_lower_bound_, double(lower_bound) / scale_);
       max_lower_bound_raw_ = std::max(max_lower_bound_raw_, lower_bound);
+      max_regularized_objective_raw_ =
+          std::max(max_regularized_objective_raw_, regularized_objective);
 
       if ( lower_bound > max_lower_bound ) {
         max_lower_bound = lower_bound;
@@ -694,6 +717,10 @@ public:
     }
     if (max_lower_bound_raw_ != std::numeric_limits<long>::min()) {
       max_lower_bound_raw_ = checkedScaleLong(max_lower_bound_raw_, scale);
+    }
+    if (max_regularized_objective_raw_ != std::numeric_limits<long>::min()) {
+      max_regularized_objective_raw_ =
+          checkedScaleLong(max_regularized_objective_raw_, scale);
     }
     if (best_upper_bound_ != std::numeric_limits<long>::max()) {
       best_upper_bound_ = checkedScaleLong(best_upper_bound_, scale);
@@ -1339,6 +1366,7 @@ private:
   long solve_loop_time_;
   double max_lower_bound_;
   long max_lower_bound_raw_;
+  long max_regularized_objective_raw_;
   long best_upper_bound_;
   long current_upper_bound_;
   long last_disagreement_count_;

@@ -302,6 +302,10 @@ int main(int argc, char *argv[]) {
             << "\n";
   std::cout << " best_lower_bound_raw : "
             << dual_decomp->getBestLowerBoundRaw() << "\n";
+  std::cout << " best_regularized_objective : "
+            << dual_decomp->getBestRegularizedObjective() << "\n";
+  std::cout << " best_regularized_objective_raw : "
+            << dual_decomp->getBestRegularizedObjectiveRaw() << "\n";
   std::cout << " best_lower_bound_unscaled : "
             << dual_decomp->getBestLowerBoundRaw() / dual_decomp->getScale()
             << "\n";
