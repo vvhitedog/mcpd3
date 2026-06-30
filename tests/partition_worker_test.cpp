@@ -1086,6 +1086,43 @@ void unitScaleResolvesOppositeDirectionCycle() {
           "last progress record should be agreeing");
 }
 
+void lowObjectiveScaleCyclePromotesAndConverges() {
+  const auto packages = makeOppositeDirectionCyclePackages(
+      /*source_terminal_capacity=*/-100, /*target_terminal_capacity=*/92);
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 100;
+  options.num_optimization_scales = 3;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.min_step_size = 1;
+  options.max_step_size = 10;
+  options.objective_scale = 10;
+
+  mcpd3::PartitionWorkerCoordinator solver(
+      packages, makeInProcessWorkers(packages.size()), options);
+  const auto result = solver.solve();
+
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "promoted low objective scale cycle should reach agreement");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::NO_DISAGREEMENT ||
+              result.stop_reason ==
+                  mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "promoted low objective scale cycle should reach agreeing stop");
+  require(result.final_disagreement_count == 0,
+          "promoted low objective scale cycle should finish with agreement");
+  require(result.objective_scale_promotion_count == 1,
+          "low objective scale cycle should promote once");
+  require(result.scale == 100,
+          "low objective scale cycle should finish at promoted scale");
+  require(result.final_regularization_budget < result.scale,
+          "promoted cycle should finish under the active budget");
+  require(result.progress_records.back().disagreement_count == 0,
+          "last promoted cycle progress record should be agreeing");
+}
+
 void fullSolvePromotesObjectiveScaleOnOverBudget() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 10;
@@ -1549,6 +1586,7 @@ int main() {
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     unitScaleResolvesOppositeDirectionCycle();
+    lowObjectiveScaleCyclePromotesAndConverges();
     fullSolvePromotesObjectiveScaleOnOverBudget();
     fullSolveStopsOverBudgetWhenPromotionDisabled();
     inProcessCoordinatorPromotesObjectiveScaleOnOverBudget();
