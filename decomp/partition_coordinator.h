@@ -160,6 +160,7 @@ public:
       throw std::runtime_error("at least one partition worker is required");
     }
     packages_.reserve(packages.size());
+    const auto package_to_worker_index = assignPackagesToWorkers(packages);
     std::vector<bool> worker_has_partition(workers_.size(), false);
     for (size_t i = 0; i < packages.size(); ++i) {
       const auto &package = packages[i];
@@ -169,7 +170,7 @@ public:
         throw std::runtime_error("duplicate partition id " +
                                  std::to_string(partition_id));
       }
-      const size_t worker_index = i % workers_.size();
+      const size_t worker_index = package_to_worker_index[i];
       partition_to_worker_index_.emplace(partition_id, worker_index);
       partition_to_package_index_.emplace(partition_id, packages_.size());
       if (!worker_has_partition[worker_index]) {
@@ -675,6 +676,97 @@ private:
                                std::to_string(partition_id));
     }
     return find_iter->second;
+  }
+
+  static double estimatePartitionWork(const PartitionPackage &package) {
+    const double node_count =
+        static_cast<double>(std::max(package.local_node_count, 0));
+    const double arc_count =
+        static_cast<double>(package.arcs.size()) / 2.0;
+    const double boundary_count =
+        static_cast<double>(package.constraint_endpoints.size());
+    return std::max(1.0, node_count + 2.0 * arc_count +
+                             8.0 * boundary_count);
+  }
+
+  static double workerCapacity(
+      const PartitionWorkerResourceEstimate &resources, double max_ram_gb) {
+    const double cpu_count =
+        static_cast<double>(std::max(resources.cpu_count, 1));
+    double ram_factor = 1.0;
+    if (max_ram_gb > 0.0) {
+      const double ram_gb =
+          static_cast<double>(std::max(resources.ram_gb, 0L));
+      ram_factor = 0.75 + 0.25 * std::min(ram_gb / max_ram_gb, 1.0);
+    }
+    return std::max(1.0e-9, cpu_count * ram_factor);
+  }
+
+  std::vector<size_t> assignPackagesToWorkers(
+      const std::vector<PartitionPackage> &packages) const {
+    std::vector<PartitionWorkerResourceEstimate> resources;
+    resources.reserve(workers_.size());
+    double max_ram_gb = 0.0;
+    for (const auto &worker : workers_) {
+      resources.push_back(worker->resourceEstimate());
+      max_ram_gb =
+          std::max(max_ram_gb,
+                   static_cast<double>(std::max(resources.back().ram_gb, 0L)));
+    }
+
+    std::vector<double> capacities;
+    capacities.reserve(workers_.size());
+    for (const auto &resource : resources) {
+      capacities.push_back(workerCapacity(resource, max_ram_gb));
+    }
+
+    std::vector<double> package_work(packages.size(), 1.0);
+    std::vector<size_t> package_order;
+    package_order.reserve(packages.size());
+    for (size_t i = 0; i < packages.size(); ++i) {
+      package_work[i] = estimatePartitionWork(packages[i]);
+      package_order.push_back(i);
+    }
+    std::sort(package_order.begin(), package_order.end(),
+              [&](size_t lhs, size_t rhs) {
+                if (package_work[lhs] != package_work[rhs]) {
+                  return package_work[lhs] > package_work[rhs];
+                }
+                return lhs < rhs;
+              });
+
+    std::vector<double> worker_load(workers_.size(), 0.0);
+    std::vector<size_t> package_to_worker(packages.size(), 0);
+    constexpr double kTieTolerance = 1.0e-9;
+    for (const auto package_index : package_order) {
+      const double work = package_work[package_index];
+      size_t best_worker = 0;
+      double best_score = std::numeric_limits<double>::infinity();
+      double best_raw_load = std::numeric_limits<double>::infinity();
+      for (size_t worker_index = 0; worker_index < workers_.size();
+           ++worker_index) {
+        const double candidate_load = worker_load[worker_index] + work;
+        const double candidate_score =
+            candidate_load / capacities[worker_index];
+        const bool better_score =
+            candidate_score + kTieTolerance < best_score;
+        const bool equal_score =
+            std::fabs(candidate_score - best_score) <= kTieTolerance;
+        const bool better_tie =
+            equal_score &&
+            (candidate_load + kTieTolerance < best_raw_load ||
+             (std::fabs(candidate_load - best_raw_load) <= kTieTolerance &&
+              worker_index < best_worker));
+        if (better_score || better_tie) {
+          best_worker = worker_index;
+          best_score = candidate_score;
+          best_raw_load = candidate_load;
+        }
+      }
+      package_to_worker[package_index] = best_worker;
+      worker_load[best_worker] += work;
+    }
+    return package_to_worker;
   }
 
   size_t packageIndexForPartition(int partition_id) const {

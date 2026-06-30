@@ -76,9 +76,17 @@ struct PartitionSolveResult {
   std::vector<ConstraintLabel> constrained_labels;
 };
 
+struct PartitionWorkerResourceEstimate {
+  int cpu_count = 1;
+  long ram_gb = 0;
+};
+
 class PartitionWorker {
 public:
   virtual ~PartitionWorker() = default;
+  virtual PartitionWorkerResourceEstimate resourceEstimate() const {
+    return {};
+  }
   virtual void loadPartition(const PartitionPackage &package) = 0;
   virtual PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) = 0;

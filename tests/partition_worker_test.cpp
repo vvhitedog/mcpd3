@@ -651,8 +651,21 @@ public:
 
   explicit BatchRecordingWorker(Mode mode = Mode::NORMAL) : mode_(mode) {}
 
+  explicit BatchRecordingWorker(
+      mcpd3::PartitionWorkerResourceEstimate resources)
+      : resources_(resources) {}
+
+  BatchRecordingWorker(Mode mode,
+                       mcpd3::PartitionWorkerResourceEstimate resources)
+      : mode_(mode), resources_(resources) {}
+
+  mcpd3::PartitionWorkerResourceEstimate resourceEstimate() const override {
+    return resources_;
+  }
+
   void loadPartition(const mcpd3::PartitionPackage &package) override {
     packages_[package.partition_id] = package;
+    loaded_partition_ids_.push_back(package.partition_id);
   }
 
   mcpd3::PartitionSolveResult solveRound(
@@ -683,6 +696,9 @@ public:
 
   const std::vector<size_t> &batchSizes() const { return batch_sizes_; }
   int singleSolveCount() const { return single_solve_count_; }
+  const std::vector<int> &loadedPartitionIds() const {
+    return loaded_partition_ids_;
+  }
 
 private:
   mcpd3::PartitionSolveResult makeResult(
@@ -706,7 +722,9 @@ private:
   }
 
   Mode mode_ = Mode::NORMAL;
+  mcpd3::PartitionWorkerResourceEstimate resources_;
   std::map<int, mcpd3::PartitionPackage> packages_;
+  std::vector<int> loaded_partition_ids_;
   std::vector<size_t> batch_sizes_;
   int single_solve_count_ = 0;
 };
@@ -732,6 +750,27 @@ mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
 std::vector<mcpd3::PartitionPackage> makeCoordinatorPackages() {
   return {makeCoordinatorPackage(/*partition_id=*/0, /*is_source=*/true),
           makeCoordinatorPackage(/*partition_id=*/1, /*is_source=*/false)};
+}
+
+mcpd3::PartitionWorkerResourceEstimate makeWorkerResources(int cpu_count,
+                                                           long ram_gb) {
+  mcpd3::PartitionWorkerResourceEstimate resources;
+  resources.cpu_count = cpu_count;
+  resources.ram_gb = ram_gb;
+  return resources;
+}
+
+mcpd3::PartitionPackage makeSizedPackage(int partition_id,
+                                         int local_node_count) {
+  mcpd3::PartitionPackage package;
+  package.partition_id = partition_id;
+  package.local_node_count = local_node_count;
+  package.terminal_capacities.assign(static_cast<size_t>(local_node_count), 0);
+  package.local_to_global.reserve(static_cast<size_t>(local_node_count));
+  for (int i = 0; i < local_node_count; ++i) {
+    package.local_to_global.push_back(partition_id * 1000 + i);
+  }
+  return package;
 }
 
 std::vector<mcpd3::PartitionPackage> makeTieBreakRegularizationPackages() {
@@ -1404,6 +1443,63 @@ void coordinatorBatchesMultiplePackagesPerWorker() {
           "coordinator should send one batch containing both partitions");
   require(worker_ptr->singleSolveCount() == 0,
           "coordinator should use solveRoundBatch instead of per-partition RPCs");
+}
+
+void coordinatorBalancesInitialPackagesByCpuCapacity() {
+  std::vector<mcpd3::PartitionPackage> packages{
+      makeSizedPackage(/*partition_id=*/0, /*local_node_count=*/100),
+      makeSizedPackage(/*partition_id=*/1, /*local_node_count=*/10),
+      makeSizedPackage(/*partition_id=*/2, /*local_node_count=*/10),
+      makeSizedPackage(/*partition_id=*/3, /*local_node_count=*/10),
+      makeSizedPackage(/*partition_id=*/4, /*local_node_count=*/10),
+      makeSizedPackage(/*partition_id=*/5, /*local_node_count=*/10)};
+
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  auto small_worker = std::make_unique<BatchRecordingWorker>(
+      makeWorkerResources(/*cpu_count=*/1, /*ram_gb=*/4));
+  auto large_worker = std::make_unique<BatchRecordingWorker>(
+      makeWorkerResources(/*cpu_count=*/4, /*ram_gb=*/16));
+  auto *small_worker_ptr = small_worker.get();
+  auto *large_worker_ptr = large_worker.get();
+  workers.push_back(std::move(small_worker));
+  workers.push_back(std::move(large_worker));
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      std::move(packages), std::move(workers));
+
+  require(small_worker_ptr->loadedPartitionIds() ==
+              std::vector<int>({1, 2}),
+          "low-CPU worker should receive only the first small packages");
+  require(large_worker_ptr->loadedPartitionIds() ==
+              std::vector<int>({0, 3, 4, 5}),
+          "high-CPU worker should receive the largest package and more work");
+}
+
+void coordinatorUsesRamAsInitialAssignmentTieBreaker() {
+  std::vector<mcpd3::PartitionPackage> packages{
+      makeSizedPackage(/*partition_id=*/0, /*local_node_count=*/100),
+      makeSizedPackage(/*partition_id=*/1, /*local_node_count=*/10),
+      makeSizedPackage(/*partition_id=*/2, /*local_node_count=*/10)};
+
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  auto low_ram_worker = std::make_unique<BatchRecordingWorker>(
+      makeWorkerResources(/*cpu_count=*/2, /*ram_gb=*/4));
+  auto high_ram_worker = std::make_unique<BatchRecordingWorker>(
+      makeWorkerResources(/*cpu_count=*/2, /*ram_gb=*/64));
+  auto *low_ram_worker_ptr = low_ram_worker.get();
+  auto *high_ram_worker_ptr = high_ram_worker.get();
+  workers.push_back(std::move(low_ram_worker));
+  workers.push_back(std::move(high_ram_worker));
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      std::move(packages), std::move(workers));
+
+  require(low_ram_worker_ptr->loadedPartitionIds() ==
+              std::vector<int>({1, 2}),
+          "lower-RAM equal-CPU worker should receive the small packages");
+  require(high_ram_worker_ptr->loadedPartitionIds() ==
+              std::vector<int>({0}),
+          "higher-RAM equal-CPU worker should receive the largest package");
 }
 
 void coordinatorRejectsMalformedBatchResponses() {
@@ -2190,6 +2286,8 @@ int main() {
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     coordinatorRoutesMultiplePackagesToOneWorker();
     coordinatorBatchesMultiplePackagesPerWorker();
+    coordinatorBalancesInitialPackagesByCpuCapacity();
+    coordinatorUsesRamAsInitialAssignmentTieBreaker();
     coordinatorRejectsMalformedBatchResponses();
     inProcessWorkerBatchSolvesDistinctLoadedPartitions();
     coordinatorSendsOnlyDirtyAlphaUpdates();
