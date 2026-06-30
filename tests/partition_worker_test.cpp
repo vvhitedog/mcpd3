@@ -1195,6 +1195,73 @@ void coordinatorRoutesMultiplePackagesToOneWorker() {
           "partition 1 alpha should update after disagreement");
 }
 
+void coordinatorSendsOnlyDirtyAlphaUpdates() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 4;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}, {13, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 0}, {22, 0}, {23, 0}},
+      options, &source_worker, &target_worker);
+
+  const auto first =
+      coordinator.runRound(/*round_id=*/1, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+  const auto second =
+      coordinator.runRound(/*round_id=*/2, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+  const auto third =
+      coordinator.runRound(/*round_id=*/3, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+  const auto fourth =
+      coordinator.runRound(/*round_id=*/4, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+
+  require(first.disagreement_count == 1,
+          "first dirty-alpha round should create disagreement");
+  require(second.disagreement_count == 0,
+          "second dirty-alpha round should agree");
+  require(third.disagreement_count == 0,
+          "third dirty-alpha round should agree");
+  require(fourth.disagreement_count == 0,
+          "fourth dirty-alpha round should agree");
+  require(source_worker->requests().size() == 4,
+          "source worker should receive four requests");
+  require(target_worker->requests().size() == 4,
+          "target worker should receive four requests");
+  require(source_worker->requests()[0].alpha_updates.empty(),
+          "initial zero alpha state should not be resent");
+  require(target_worker->requests()[0].alpha_updates.empty(),
+          "target initial zero alpha state should not be resent");
+  require(source_worker->requests()[1].alpha_updates.size() == 1,
+          "changed alpha should be sent on the next source request");
+  require(target_worker->requests()[1].alpha_updates.size() == 1,
+          "changed alpha should be sent on the next target request");
+  require(source_worker->requests()[1].alpha_updates[0].alpha == 100,
+          "dirty alpha update should carry the changed alpha");
+  require(source_worker->requests()[1].alpha_updates[0].last_alpha == 0,
+          "dirty alpha update should carry the previous alpha");
+  require(source_worker->requests()[2].alpha_updates.size() == 1,
+          "last-alpha catch-up should be sent once after agreement");
+  require(source_worker->requests()[2].alpha_updates[0].alpha == 100,
+          "catch-up alpha should preserve the alpha value");
+  require(source_worker->requests()[2].alpha_updates[0].last_alpha == 100,
+          "catch-up update should synchronize last_alpha");
+  require(target_worker->requests()[2].alpha_updates.size() == 1,
+          "target catch-up update should be sent once");
+  require(source_worker->requests()[3].alpha_updates.empty(),
+          "unchanged synchronized alpha should not be resent");
+  require(target_worker->requests()[3].alpha_updates.empty(),
+          "unchanged synchronized target alpha should not be resent");
+}
+
 void inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 10;
@@ -1822,6 +1889,7 @@ int main() {
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     coordinatorRoutesMultiplePackagesToOneWorker();
+    coordinatorSendsOnlyDirtyAlphaUpdates();
     inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages();
     unitScaleResolvesOppositeDirectionCycle();
     lowObjectiveScaleCyclePromotesAndConverges();

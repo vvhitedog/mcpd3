@@ -72,6 +72,16 @@ const char *regularization_scheme_name(
   return "unknown";
 }
 
+bool would_overflow_int_scale(int value, long factor) {
+  if (value > 0 && value > std::numeric_limits<int>::max() / factor) {
+    return true;
+  }
+  if (value < 0 && value < std::numeric_limits<int>::min() / factor) {
+    return true;
+  }
+  return false;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -207,18 +217,31 @@ int main(int argc, char *argv[]) {
   std::cout << "read_graph_time_us : " << read_graph_microseconds.count()
             << "\n";
 
+  bool capacity_scale_overflow = false;
   auto scale_graph_microseconds = mcpd3::time_lambda([&] {
     if (capacity_multiplier != 1) {
       for (auto &cap : min_cut_graph_data.arc_capacities) {
+        if (would_overflow_int_scale(cap, capacity_multiplier)) {
+          capacity_scale_overflow = true;
+          return;
+        }
         cap *= capacity_multiplier;
       }
       for (auto &cap : min_cut_graph_data.terminal_capacities) {
+        if (would_overflow_int_scale(cap, capacity_multiplier)) {
+          capacity_scale_overflow = true;
+          return;
+        }
         cap *= capacity_multiplier;
       }
     }
   });
   std::cout << "scale_graph_time_us : " << scale_graph_microseconds.count()
             << "\n";
+  if (capacity_scale_overflow) {
+    std::cerr << "capacity multiplier exceeds int range\n";
+    return EXIT_FAILURE;
+  }
 
   std::cout << "dd_options partitions=" << npartition
             << " step_policy=fixed"

@@ -142,18 +142,20 @@ struct PartitionWorkerCoordinatorSolveResult {
 class PartitionWorkerCoordinator {
 public:
   PartitionWorkerCoordinator(
-      const std::vector<PartitionPackage> &packages,
+      std::vector<PartitionPackage> packages,
       std::vector<std::unique_ptr<PartitionWorker>> workers,
       PartitionWorkerCoordinatorOptions options = {})
-      : packages_(packages), workers_(std::move(workers)), options_(options),
+      : workers_(std::move(workers)), options_(options),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
     if (workers_.empty()) {
       throw std::runtime_error("at least one partition worker is required");
     }
+    packages_.reserve(packages.size());
     std::vector<bool> worker_has_partition(workers_.size(), false);
-    for (size_t i = 0; i < packages_.size(); ++i) {
-      const int partition_id = packages_[i].partition_id;
+    for (size_t i = 0; i < packages.size(); ++i) {
+      const auto &package = packages[i];
+      const int partition_id = package.partition_id;
       if (partition_to_worker_index_.find(partition_id) !=
           partition_to_worker_index_.end()) {
         throw std::runtime_error("duplicate partition id " +
@@ -161,27 +163,40 @@ public:
       }
       const size_t worker_index = i % workers_.size();
       partition_to_worker_index_.emplace(partition_id, worker_index);
-      partition_to_package_index_.emplace(partition_id, i);
+      partition_to_package_index_.emplace(partition_id, packages_.size());
       if (!worker_has_partition[worker_index]) {
         worker_has_partition[worker_index] = true;
         active_worker_indices_.push_back(worker_index);
       }
-      workers_[worker_index]->loadPartition(packages_[i]);
+      workers_[worker_index]->loadPartition(package);
+
+      PartitionPackage coordinator_package;
+      coordinator_package.partition_id = partition_id;
+      coordinator_package.constraint_endpoints = package.constraint_endpoints;
+      packages_.push_back(std::move(coordinator_package));
     }
     buildConstraints();
+    dropCoordinatorPackagePayloads();
     randomizeInitialAlphas();
   }
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
                                      int regularization_strength) {
     std::vector<std::vector<AlphaUpdate>> alpha_updates(packages_.size());
-    for (const auto &constraint : constraints_) {
+    std::vector<size_t> synced_constraint_indices;
+    for (size_t constraint_index = 0; constraint_index < constraints_.size();
+         ++constraint_index) {
+      const auto &constraint = constraints_[constraint_index];
+      if (!constraint.needs_sync) {
+        continue;
+      }
       AlphaUpdate update{constraint.constraint_id, constraint.alpha,
                          constraint.last_alpha, constraint.alpha_momentum};
       alpha_updates[packageIndexForPartition(
           constraint.source.partition_id)].push_back(update);
       alpha_updates[packageIndexForPartition(
           constraint.target.partition_id)].push_back(update);
+      synced_constraint_indices.push_back(constraint_index);
     }
 
     std::vector<PartitionSolveResult> results(packages_.size());
@@ -214,6 +229,9 @@ public:
     }
     for (auto &future : futures) {
       future.get();
+    }
+    for (const auto constraint_index : synced_constraint_indices) {
+      constraints_[constraint_index].needs_sync = false;
     }
 
     PartitionWorkerRoundStats stats;
@@ -301,6 +319,7 @@ private:
     long alpha = 0;
     long last_alpha = 0;
     float alpha_momentum = 0;
+    bool needs_sync = false;
   };
 
   struct ConstraintAccumulator {
@@ -553,6 +572,22 @@ private:
     }
   }
 
+  void dropCoordinatorPackagePayloads() {
+    for (auto &package : packages_) {
+      package.local_node_count = 0;
+      package.arcs.clear();
+      package.arc_capacities.clear();
+      package.terminal_capacities.clear();
+      package.local_to_global.clear();
+      package.constraint_endpoints.clear();
+      package.arcs.shrink_to_fit();
+      package.arc_capacities.shrink_to_fit();
+      package.terminal_capacities.shrink_to_fit();
+      package.local_to_global.shrink_to_fit();
+      package.constraint_endpoints.shrink_to_fit();
+    }
+  }
+
   void reportProgress(const PartitionWorkerProgressRecord &record) const {
     if (!options_.progress_callback ||
         options_.progress_report_interval <= 0) {
@@ -582,8 +617,12 @@ private:
         options_.initial_alpha_random_radius);
     for (auto &constraint : constraints_) {
       const long offset = distribution(generator);
+      if (offset == 0) {
+        continue;
+      }
       constraint.alpha += offset;
       constraint.last_alpha += offset;
+      constraint.needs_sync = true;
     }
   }
 
@@ -665,8 +704,16 @@ private:
       if (!update_alpha) {
         continue;
       }
+      const long old_alpha = constraint.alpha;
+      const long old_last_alpha = constraint.last_alpha;
+      const float old_alpha_momentum = constraint.alpha_momentum;
       constraint.last_alpha = constraint.alpha;
       if (diff == 0) {
+        if (constraint.alpha != old_alpha ||
+            constraint.last_alpha != old_last_alpha ||
+            constraint.alpha_momentum != old_alpha_momentum) {
+          constraint.needs_sync = true;
+        }
         continue;
       }
       if (options_.use_momentum) {
@@ -680,6 +727,11 @@ private:
         constraint.alpha += alpha_update;
       } else {
         constraint.alpha += stats->effective_step_size * diff;
+      }
+      if (constraint.alpha != old_alpha ||
+          constraint.last_alpha != old_last_alpha ||
+          constraint.alpha_momentum != old_alpha_momentum) {
+        constraint.needs_sync = true;
       }
     }
   }
