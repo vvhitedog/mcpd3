@@ -36,17 +36,17 @@ void require(bool condition, const std::string &message) {
 }
 
 void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
-  require(mcpd3::regularizedObjectiveRaw(/*selected_lower_bound_raw=*/100,
+  require(mcpd3::regularizedObjectiveRaw(/*original_objective_raw=*/100,
                                          /*regularization_contribution_raw=*/7) ==
               107,
           "regularized objective should add the actual contribution");
   require(mcpd3::certifiedOriginalLowerBoundRaw(
-              /*selected_lower_bound_raw=*/100,
+              /*original_objective_raw=*/100,
               /*regularization_contribution_raw=*/7,
               /*regularization_budget_raw=*/10) == 97,
           "certified lower bound should subtract only budget slack");
   require(mcpd3::certifiedOriginalLowerBoundRaw(
-              /*selected_lower_bound_raw=*/-20,
+              /*original_objective_raw=*/-20,
               /*regularization_contribution_raw=*/3,
               /*regularization_budget_raw=*/5) == -22,
           "certificate arithmetic should support negative local objectives");
@@ -875,10 +875,10 @@ void coordinatorRunRoundReportsCertifiedRegularizedLowerBound() {
       /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
       /*regularization_strength=*/10);
 
-  require(stats.selected_objective == 150,
-          "selected objective should sum solver-reported original values");
+  require(stats.original_objective == 150,
+          "original objective should sum solver-reported original values");
   require(stats.regularized_objective == 159,
-          "regularized objective should be selected value plus contribution");
+          "regularized objective should be original value plus contribution");
   require(stats.certified_lower_bound == 144,
           "certified field should subtract full budget from regularized objective");
   require(stats.lower_bound == 144,
@@ -905,8 +905,8 @@ void coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged() {
       /*round_id=*/1, /*scale=*/100, /*step_size=*/100,
       /*regularization_strength=*/0);
 
-  require(stats.selected_objective == 42,
-          "unregularized selected objective should equal selected value");
+  require(stats.original_objective == 42,
+          "unregularized original objective should equal solver value");
   require(stats.certified_lower_bound == 42,
           "unregularized certified field should equal selected value");
   require(stats.lower_bound == 42,
@@ -1140,10 +1140,6 @@ void fullSolveStopsOptimalOnUnregularizedAgreement() {
   require(record.total_iteration == 1,
           "progress record total iteration mismatch");
   require(record.max_iteration == 5, "progress record max iteration mismatch");
-  require(record.selected_objective == 25,
-          "progress record selected objective mismatch");
-  require(record.best_selected_objective == 25,
-          "progress record best selected objective mismatch");
   require(record.lower_bound == 25, "progress record lower bound mismatch");
   require(record.best_lower_bound == 25,
           "progress record best lower bound mismatch");
@@ -1193,10 +1189,6 @@ void fullSolveReportsProgressThroughConfiguredCallback() {
           "callback should include the round lower bound");
   require(callbacks[0].best_lower_bound == 32,
           "callback should include the best lower bound");
-  require(callbacks[0].selected_objective == 32,
-          "callback should include the selected objective");
-  require(callbacks[0].best_selected_objective == 32,
-          "callback should include the best selected objective");
   require(callbacks[0].certified_lower_bound == 32,
           "callback should include the certified lower bound");
   require(callbacks[0].best_certified_lower_bound == 32,
@@ -1307,23 +1299,21 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
           "regularized agreement should report its stop reason");
   require(result.total_iterations == 1,
           "solve should not run an unregularized confirmation round");
-  require(result.final_selected_objective_raw == 25,
-          "regularized agreement should preserve the final selected objective");
+  require(result.final_objective_raw == 25,
+          "regularized agreement should preserve the final objective");
   require(result.final_certified_lower_bound_raw == 22,
           "regularized agreement should preserve the final certified lower bound");
   require(result.final_regularized_objective_raw == 28,
           "regularized agreement should preserve the final regularized objective");
-  require(result.best_selected_objective_raw == 25,
-          "regularized agreement should preserve the selected objective");
   require(result.best_lower_bound_raw == 22,
           "regularized agreement should store the certified lower bound");
   require(result.best_certified_lower_bound_raw == 22,
           "regularized agreement should store the explicit certified lower bound");
   require(result.best_regularized_objective_raw == 28,
           "regularized agreement should preserve the regularized objective");
-  require(result.best_selected_objective > 0.002499 &&
-              result.best_selected_objective < 0.002501,
-          "regularized selected objective should use objective scale");
+  require(result.final_objective > 0.002499 &&
+              result.final_objective < 0.002501,
+          "regularized final objective should use objective scale");
   require(result.best_lower_bound > 0.002199 &&
               result.best_lower_bound < 0.002201,
           "regularized certified lower bound should use objective scale");
@@ -1339,16 +1329,12 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
           "regularized progress should report certified lower bound");
   require(result.progress_records[0].best_lower_bound == 22,
           "regularized progress should report best certified lower bound");
-  require(result.progress_records[0].selected_objective == 25,
-          "regularized progress should report selected objective");
-  require(result.progress_records[0].best_selected_objective == 25,
-          "regularized progress should report best selected objective");
   require(result.progress_records[0].certified_lower_bound == 22,
           "regularized progress should report certified lower bound explicitly");
   require(result.progress_records[0].best_certified_lower_bound == 22,
           "regularized progress should report best certified lower bound explicitly");
   require(result.progress_records[0].regularized_objective == 28,
-          "regularized progress should report selected plus contribution");
+          "regularized progress should report original plus contribution");
   require(result.progress_records[0].best_regularized_objective == 28,
           "regularized progress should report best regularized objective");
   require(result.progress_records[0].regularization_strength == 10,
@@ -1871,14 +1857,12 @@ void fullSolvePromotesObjectiveScaleOnOverBudget() {
           "coordinator result should report the promoted objective scale");
   require(result.best_lower_bound_raw == 999,
           "over-budget regularized lower bound should not be accepted");
-  require(result.best_selected_objective_raw == 1000,
-          "selected objective diagnostic should preserve selected objective");
   require(result.best_certified_lower_bound_raw == 999,
           "explicit certified lower bound should subtract remaining budget");
   require(result.best_regularized_objective_raw == 1000,
-          "regularized objective diagnostic should preserve selected objective");
-  require(result.best_selected_objective == 10,
-          "promoted selected objective should use the promoted objective scale");
+          "regularized objective diagnostic should preserve final objective");
+  require(result.final_objective == 10,
+          "promoted final objective should use the promoted objective scale");
   require(result.best_lower_bound > 9.989 && result.best_lower_bound < 9.991,
           "promoted raw lower bound should use the promoted objective scale");
   require(result.total_iterations == 3,

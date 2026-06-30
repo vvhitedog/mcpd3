@@ -26,18 +26,18 @@ inline long checkedSubtractObjectiveRaw(long lhs, long rhs,
   return lhs - rhs;
 }
 
-inline long regularizedObjectiveRaw(long selected_lower_bound_raw,
+inline long regularizedObjectiveRaw(long original_objective_raw,
                                     long regularization_contribution_raw) {
-  return checkedAddObjectiveRaw(selected_lower_bound_raw,
+  return checkedAddObjectiveRaw(original_objective_raw,
                                 regularization_contribution_raw,
                                 "regularized objective overflow");
 }
 
 inline long certifiedOriginalLowerBoundRaw(
-    long selected_lower_bound_raw, long regularization_contribution_raw,
+    long original_objective_raw, long regularization_contribution_raw,
     long regularization_budget_raw) {
   return checkedSubtractObjectiveRaw(
-      regularizedObjectiveRaw(selected_lower_bound_raw,
+      regularizedObjectiveRaw(original_objective_raw,
                               regularization_contribution_raw),
       regularization_budget_raw, "certified lower bound overflow");
 }

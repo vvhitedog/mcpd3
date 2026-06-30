@@ -77,7 +77,7 @@ struct PartitionWorkerCoordinatorOptions {
 
 struct PartitionWorkerRoundStats {
   long round_id = 0;
-  long selected_objective = 0;
+  long original_objective = 0;
   long lower_bound = 0;
   long certified_lower_bound = 0;
   long regularized_objective = 0;
@@ -96,8 +96,6 @@ struct PartitionWorkerProgressRecord {
   int iteration = 0;
   long total_iteration = 0;
   int max_iteration = 0;
-  long selected_objective = 0;
-  long best_selected_objective = 0;
   long lower_bound = 0;
   long best_lower_bound = 0;
   long certified_lower_bound = 0;
@@ -124,7 +122,6 @@ struct PartitionWorkerScaleResult {
   long scale = 1;
   long step_size = 0;
   int iterations = 0;
-  long best_selected_objective_raw = std::numeric_limits<long>::min();
   long best_lower_bound_raw = std::numeric_limits<long>::min();
   long best_certified_lower_bound_raw = std::numeric_limits<long>::min();
   long best_regularized_objective_raw = std::numeric_limits<long>::min();
@@ -138,14 +135,12 @@ struct PartitionWorkerCoordinatorSolveResult {
   PartitionWorkerStopReason stop_reason =
       PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED;
   long scale = 1;
-  long final_selected_objective_raw = 0;
-  double final_selected_objective = 0;
+  long final_objective_raw = 0;
+  double final_objective = 0;
   long final_certified_lower_bound_raw = 0;
   double final_certified_lower_bound = 0;
   long final_regularized_objective_raw = 0;
   double final_regularized_objective = 0;
-  long best_selected_objective_raw = std::numeric_limits<long>::min();
-  double best_selected_objective = -std::numeric_limits<double>::infinity();
   long best_lower_bound_raw = std::numeric_limits<long>::min();
   double best_lower_bound = -std::numeric_limits<double>::infinity();
   long best_certified_lower_bound_raw = std::numeric_limits<long>::min();
@@ -321,20 +316,14 @@ public:
       ++scale_index;
     }
 
-    result.final_selected_objective =
-        static_cast<double>(result.final_selected_objective_raw) / result.scale;
+    result.final_objective =
+        static_cast<double>(result.final_objective_raw) / result.scale;
     result.final_certified_lower_bound =
         static_cast<double>(result.final_certified_lower_bound_raw) /
         result.scale;
     result.final_regularized_objective =
         static_cast<double>(result.final_regularized_objective_raw) /
         result.scale;
-    if (result.best_selected_objective_raw !=
-        std::numeric_limits<long>::min()) {
-      result.best_selected_objective =
-          static_cast<double>(result.best_selected_objective_raw) /
-          result.scale;
-    }
     if (result.best_certified_lower_bound_raw !=
         std::numeric_limits<long>::min()) {
       result.best_certified_lower_bound =
@@ -463,8 +452,7 @@ private:
           result->final_disagreement_count = round_stats.disagreement_count;
           result->final_disagreement_norm_sq =
               round_stats.disagreement_norm_sq;
-          result->final_selected_objective_raw =
-              round_stats.selected_objective;
+          result->final_objective_raw = round_stats.original_objective;
           result->final_certified_lower_bound_raw =
               round_stats.certified_lower_bound;
           result->final_regularized_objective_raw =
@@ -484,9 +472,6 @@ private:
 
           const long best_lower_bound =
               std::max(scale_best_lower_bound, round_stats.lower_bound);
-          const long best_selected_objective =
-              std::max(scale_result.best_selected_objective_raw,
-                       round_stats.selected_objective);
           const long best_certified_lower_bound =
               std::max(scale_result.best_certified_lower_bound_raw,
                        round_stats.certified_lower_bound);
@@ -498,8 +483,6 @@ private:
               /*iteration=*/iteration,
               /*total_iteration=*/result->total_iterations,
               /*max_iteration=*/options_.max_iteration_count,
-              /*selected_objective=*/round_stats.selected_objective,
-              /*best_selected_objective=*/best_selected_objective,
               /*lower_bound=*/round_stats.lower_bound,
               /*best_lower_bound=*/best_lower_bound,
               /*certified_lower_bound=*/round_stats.certified_lower_bound,
@@ -528,12 +511,6 @@ private:
           scale_result.best_lower_bound_raw =
               std::max(scale_result.best_lower_bound_raw,
                        round_stats.lower_bound);
-          result->best_selected_objective_raw =
-              std::max(result->best_selected_objective_raw,
-                       round_stats.selected_objective);
-          scale_result.best_selected_objective_raw =
-              std::max(scale_result.best_selected_objective_raw,
-                       round_stats.selected_objective);
           result->best_certified_lower_bound_raw =
               std::max(result->best_certified_lower_bound_raw,
                        round_stats.certified_lower_bound);
@@ -847,10 +824,10 @@ private:
 
   void gatherRoundTerms(const std::vector<PartitionSolveResult> &results,
                         PartitionWorkerRoundStats *stats) const {
-    long selected_lower_bound = 0;
+    long original_objective = 0;
     for (const auto &result : results) {
-      selected_lower_bound =
-          checkedAddObjectiveRaw(selected_lower_bound, result.lower_bound,
+      original_objective =
+          checkedAddObjectiveRaw(original_objective, result.lower_bound,
                                  "round lower bound overflow");
       stats->regularization_budget =
           checkedAddObjectiveRaw(stats->regularization_budget,
@@ -870,11 +847,11 @@ private:
                                  "round regularization active count overflow");
     }
     stats->regularized_objective =
-        regularizedObjectiveRaw(selected_lower_bound,
+        regularizedObjectiveRaw(original_objective,
                                 stats->regularization_contribution);
-    stats->selected_objective = selected_lower_bound;
+    stats->original_objective = original_objective;
     stats->certified_lower_bound =
-        certifiedOriginalLowerBoundRaw(selected_lower_bound,
+        certifiedOriginalLowerBoundRaw(original_objective,
                                        stats->regularization_contribution,
                                        stats->regularization_budget);
     stats->lower_bound = stats->certified_lower_bound;
@@ -1022,17 +999,12 @@ private:
                            PartitionWorkerCoordinatorSolveResult *result) {
     options_.objective_scale = checkedScaleLong(options_.objective_scale, factor);
     result->scale = options_.objective_scale;
-    result->final_selected_objective_raw =
-        checkedScaleLong(result->final_selected_objective_raw, factor);
+    result->final_objective_raw =
+        checkedScaleLong(result->final_objective_raw, factor);
     result->final_certified_lower_bound_raw =
         checkedScaleLong(result->final_certified_lower_bound_raw, factor);
     result->final_regularized_objective_raw =
         checkedScaleLong(result->final_regularized_objective_raw, factor);
-    if (result->best_selected_objective_raw !=
-        std::numeric_limits<long>::min()) {
-      result->best_selected_objective_raw =
-          checkedScaleLong(result->best_selected_objective_raw, factor);
-    }
     if (result->best_lower_bound_raw != std::numeric_limits<long>::min()) {
       result->best_lower_bound_raw =
           checkedScaleLong(result->best_lower_bound_raw, factor);
