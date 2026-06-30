@@ -27,7 +27,8 @@ namespace mcpd3 {
 enum class PartitionWorkerOptimizationStatus {
   OPTIMAL,
   NO_FURTHER_PROGRESS,
-  ITERATION_COUNT_EXCEEDED
+  ITERATION_COUNT_EXCEEDED,
+  REGULARIZATION_BUDGET_EXCEEDED
 };
 
 enum class PartitionWorkerStopReason {
@@ -37,7 +38,8 @@ enum class PartitionWorkerStopReason {
   ITERATION_COUNT_EXCEEDED,
   NO_LOWER_BOUND_IMPROVEMENT,
   LEGACY_PATIENCE,
-  GROUP_STOPPING
+  GROUP_STOPPING,
+  REGULARIZATION_BUDGET_EXCEEDED
 };
 
 enum class PartitionWorkerRegularizationScheme {
@@ -59,6 +61,8 @@ struct PartitionWorkerCoordinatorOptions {
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::SCALED_EPSILON;
   long regularization_budget_limit = 0;
+  bool promote_objective_scale_on_overbudget = true;
+  int max_objective_scale_promotions = 4;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -124,6 +128,7 @@ struct PartitionWorkerCoordinatorSolveResult {
   long final_regularization_contribution = 0;
   long final_regularization_anchor_sink_count = 0;
   long final_regularization_active_sink_count = 0;
+  long objective_scale_promotion_count = 0;
   std::vector<PartitionWorkerProgressRecord> progress_records;
   std::vector<PartitionWorkerScaleResult> scale_results;
 };
@@ -186,7 +191,10 @@ public:
     gatherRoundTerms(results, &stats);
     warnIfRegularizationBudgetExceeded(stats.regularization_budget,
                                        regularization_strength);
-    updateConstraintsFromLabels(results, &stats);
+    updateConstraintsFromLabels(
+        results, &stats,
+        !isRegularizationBudgetExceeded(stats.regularization_budget,
+                                        regularization_strength));
     return stats;
   }
 
@@ -196,18 +204,26 @@ public:
 
     long schedule_scale = options_.initial_step_size;
     long step_size = options_.initial_step_size;
-    for (int scale_index = 0;
-         scale_index < options_.num_optimization_scales; ++scale_index) {
+    int scale_index = 0;
+    while (scale_index < options_.num_optimization_scales && step_size >= 1) {
       auto scale_result =
           runOptimizationScale(schedule_scale, step_size, &result);
       result.scale_results.push_back(scale_result);
       result.status = scale_result.status;
       result.stop_reason = scale_result.stop_reason;
+      if (scale_result.status ==
+              PartitionWorkerOptimizationStatus::REGULARIZATION_BUDGET_EXCEEDED &&
+          tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale, &step_size,
+                                   &result)) {
+        scale_index = 0;
+        continue;
+      }
       if (scale_result.status == PartitionWorkerOptimizationStatus::OPTIMAL) {
         break;
       }
       schedule_scale /= 10;
       step_size /= 10;
+      ++scale_index;
     }
 
     if (result.best_lower_bound_raw != std::numeric_limits<long>::min()) {
@@ -229,6 +245,10 @@ private:
     if (options_.regularization_budget_limit < 0) {
       throw std::runtime_error(
           "regularization budget limit must be non-negative");
+    }
+    if (options_.max_objective_scale_promotions < 0) {
+      throw std::runtime_error(
+          "max objective scale promotions must be non-negative");
     }
   }
 
@@ -382,6 +402,19 @@ private:
       const auto round_stats =
           runRound(result->total_iterations, scale, step_size,
                    regularization_strength);
+
+      if (isRegularizationBudgetExceeded(round_stats.regularization_budget,
+                                         regularization_strength)) {
+        scale_result.status =
+            PartitionWorkerOptimizationStatus::REGULARIZATION_BUDGET_EXCEEDED;
+        scale_result.stop_reason =
+            PartitionWorkerStopReason::REGULARIZATION_BUDGET_EXCEEDED;
+        scale_result.final_disagreement_count =
+            round_stats.disagreement_count;
+        scale_result.final_disagreement_norm_sq =
+            round_stats.disagreement_norm_sq;
+        return scale_result;
+      }
 
       record_round(i, regularization_strength, round_stats);
 
@@ -542,7 +575,7 @@ private:
 
   void updateConstraintsFromLabels(
       const std::vector<PartitionSolveResult> &results,
-      PartitionWorkerRoundStats *stats) {
+      PartitionWorkerRoundStats *stats, bool update_alpha = true) {
     std::vector<ConstraintLabels> labels(constraints_.size());
     for (const auto &result : results) {
       for (const auto &label : result.constrained_labels) {
@@ -583,6 +616,9 @@ private:
             constraint.source.global_node_id);
       }
 
+      if (!update_alpha) {
+        continue;
+      }
       constraint.last_alpha = constraint.alpha;
       if (diff == 0) {
         continue;
@@ -610,7 +646,7 @@ private:
 
   void warnIfRegularizationBudgetExceeded(long budget,
                                           int regularization_strength) {
-    if (regularization_strength <= 0 || budget < regularizationBudgetLimit() ||
+    if (!isRegularizationBudgetExceeded(budget, regularization_strength) ||
         warned_regularization_budget_exceeded_) {
       return;
     }
@@ -620,6 +656,87 @@ private:
                  budget, regularizationBudgetLimit());
     std::fflush(stderr);
     warned_regularization_budget_exceeded_ = true;
+  }
+
+  bool isRegularizationBudgetExceeded(long budget,
+                                      int regularization_strength) const {
+    return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+  }
+
+  static long checkedScaleLong(long value, long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("scale factor must be positive");
+    }
+    if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    return value * scale;
+  }
+
+  static int checkedScaleInt(int value, long scale) {
+    const long result = checkedScaleLong(value, scale);
+    if (result > std::numeric_limits<int>::max() ||
+        result < std::numeric_limits<int>::min()) {
+      throw std::overflow_error("objective scale promotion exceeds int");
+    }
+    return static_cast<int>(result);
+  }
+
+  void scalePackage(PartitionPackage *package, long factor) {
+    for (auto &capacity : package->arc_capacities) {
+      capacity = checkedScaleInt(capacity, factor);
+    }
+    for (auto &capacity : package->terminal_capacities) {
+      capacity = checkedScaleInt(capacity, factor);
+    }
+    for (auto &binding : package->constraint_endpoints) {
+      binding.alpha = checkedScaleLong(binding.alpha, factor);
+      binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
+    }
+  }
+
+  void scaleObjectiveState(long factor,
+                           PartitionWorkerCoordinatorSolveResult *result) {
+    options_.objective_scale = checkedScaleLong(options_.objective_scale, factor);
+    result->scale = options_.objective_scale;
+    if (result->best_lower_bound_raw != std::numeric_limits<long>::min()) {
+      result->best_lower_bound_raw =
+          checkedScaleLong(result->best_lower_bound_raw, factor);
+    }
+    result->final_regularization_budget =
+        checkedScaleLong(result->final_regularization_budget, factor);
+    result->final_regularization_contribution =
+        checkedScaleLong(result->final_regularization_contribution, factor);
+    for (auto &package : packages_) {
+      scalePackage(&package, factor);
+    }
+    for (auto &constraint : constraints_) {
+      constraint.alpha = checkedScaleLong(constraint.alpha, factor);
+      constraint.last_alpha = checkedScaleLong(constraint.last_alpha, factor);
+    }
+    for (auto &worker : workers_) {
+      worker->scaleObjective(factor);
+    }
+    warned_regularization_budget_exceeded_ = false;
+  }
+
+  bool tryPromoteObjectiveScale(
+      long factor, long *schedule_scale, long *step_size,
+      PartitionWorkerCoordinatorSolveResult *result) {
+    if (!options_.promote_objective_scale_on_overbudget ||
+        options_.regularization_budget_limit > 0 ||
+        result->objective_scale_promotion_count >=
+            options_.max_objective_scale_promotions) {
+      return false;
+    }
+    scaleObjectiveState(factor, result);
+    ++result->objective_scale_promotion_count;
+    *schedule_scale = options_.objective_scale;
+    *step_size = options_.objective_scale;
+    return true;
   }
 
   int localRegularizationStrength(long step_size) const {

@@ -528,14 +528,21 @@ public:
     return result;
   }
 
+  void scaleObjective(long factor) override {
+    scale_factors_.push_back(factor);
+  }
+
   const std::vector<mcpd3::PartitionSolveRequest> &requests() const {
     return requests_;
   }
+
+  const std::vector<long> &scaleFactors() const { return scale_factors_; }
 
 private:
   mcpd3::PartitionPackage package_;
   std::deque<ScriptedRound> script_;
   std::vector<mcpd3::PartitionSolveRequest> requests_;
+  std::vector<long> scale_factors_;
 };
 
 mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
@@ -1079,30 +1086,126 @@ void unitScaleResolvesOppositeDirectionCycle() {
           "last progress record should be agreeing");
 }
 
-void overBudgetScaledEpsilonAgreementRecordsDiagnostics() {
+void fullSolvePromotesObjectiveScaleOnOverBudget() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 10;
-  options.max_iteration_count = 2;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 2;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
+  options.max_objective_scale_promotions = 2;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{1000, 0, 10, 0, 1, 0},
+                                {40, 0, 0, 0, 0, 0},
+                                {400, 0, 1, 0, 1, 0}},
+      std::deque<ScriptedRound>{{2000, 0, 0, 0, 0, 0},
+                                {60, 1, 0, 0, 0, 0},
+                                {600, 0, 0, 0, 0, 0}},
+      options, &source_worker, &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "promoted coordinator solve should reach agreement");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
+          "promoted coordinator solve should stop on regularized agreement");
+  require(result.objective_scale_promotion_count == 1,
+          "coordinator should promote objective scale once");
+  require(result.scale == 100,
+          "coordinator result should report the promoted objective scale");
+  require(result.best_lower_bound_raw == 1000,
+          "over-budget regularized lower bound should not be accepted");
+  require(result.best_lower_bound == 10,
+          "promoted raw lower bound should use the promoted objective scale");
+  require(result.total_iterations == 3,
+          "coordinator should retry from the promoted schedule");
+  require(result.progress_records.size() == 2,
+          "over-budget iteration should not be recorded as accepted progress");
+  require(result.scale_results.size() == 3,
+          "solve should include over-budget, promoted high-scale, and low-scale results");
+  require(result.scale_results[0].status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  REGULARIZATION_BUDGET_EXCEEDED,
+          "first scale should stop on over-budget regularization");
+  require(source_worker->scaleFactors() == std::vector<long>{10},
+          "source worker should receive objective rescale request");
+  require(target_worker->scaleFactors() == std::vector<long>{10},
+          "target worker should receive objective rescale request");
+  require(source_worker->requests()[1].scale == 100,
+          "promoted solve should restart at objective scale");
+  require(source_worker->requests()[2].regularization_strength == 10,
+          "promoted low-scale solve should re-enable scaled epsilon");
+}
+
+void fullSolveStopsOverBudgetWhenPromotionDisabled() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 1;
   options.num_optimization_scales = 1;
   options.patience = 99;
   options.enable_group_stopping = false;
   options.use_momentum = false;
   options.objective_scale = 10;
+  options.promote_objective_scale_on_overbudget = false;
 
+  ScriptedPartitionWorker *source_worker = nullptr;
   auto coordinator = makeScriptedCoordinator(
-      std::deque<ScriptedRound>{{10, 0, 10, 0, 1, 0}},
-      std::deque<ScriptedRound>{{15, 0, 0, 0, 0, 0}}, options);
+      std::deque<ScriptedRound>{{1000, 0, 10, 0, 1, 0}},
+      std::deque<ScriptedRound>{{2000, 0, 0, 0, 0, 0}}, options,
+      &source_worker);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  REGULARIZATION_BUDGET_EXCEEDED,
+          "disabled promotion should expose over-budget status");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::REGULARIZATION_BUDGET_EXCEEDED,
+          "disabled promotion should expose over-budget stop reason");
+  require(result.objective_scale_promotion_count == 0,
+          "disabled promotion should not rescale objective");
+  require(result.best_lower_bound_raw == std::numeric_limits<long>::min(),
+          "over-budget lower bound should not be accepted without promotion");
+  require(result.progress_records.empty(),
+          "over-budget iteration should not be recorded as accepted progress");
+  require(source_worker->scaleFactors().empty(),
+          "disabled promotion should not request worker rescale");
+}
+
+void inProcessCoordinatorPromotesObjectiveScaleOnOverBudget() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 20;
+  options.num_optimization_scales = 3;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
+  options.max_objective_scale_promotions = 2;
+
+  const auto packages = makeTieBreakRegularizationPackages();
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      packages, makeInProcessWorkers(packages.size()), options);
 
   const auto result = coordinator.solve();
   require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
-          "over-budget regularized agreement currently still stops");
-  require(result.stop_reason ==
-              mcpd3::PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT,
-          "over-budget regularized agreement should report regularized stop");
-  require(result.final_regularization_budget == 10,
-          "over-budget diagnostics should record the strict-limit violation");
-  require(result.progress_records[0].regularization_budget == 10,
-          "progress should record over-budget regularization");
+          "in-process coordinator promotion should still reach agreement");
+  require(result.objective_scale_promotion_count == 1,
+          "in-process coordinator should promote objective scale");
+  require(result.scale == 100,
+          "in-process coordinator should finish at promoted scale");
+  require(result.best_lower_bound_raw == 100,
+          "promoted in-process solve should preserve the exact bound: got " +
+              std::to_string(result.best_lower_bound_raw));
+  require(result.final_regularization_budget < result.scale,
+          "promoted in-process solve should finish under budget");
+  require(result.final_disagreement_count == 0,
+          "promoted in-process solve should finish with agreement");
 }
 
 void randomInitialAlphaValidationAndZeroRadiusNoop() {
@@ -1446,7 +1549,9 @@ int main() {
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
     unitScaleResolvesOppositeDirectionCycle();
-    overBudgetScaledEpsilonAgreementRecordsDiagnostics();
+    fullSolvePromotesObjectiveScaleOnOverBudget();
+    fullSolveStopsOverBudgetWhenPromotionDisabled();
+    inProcessCoordinatorPromotesObjectiveScaleOnOverBudget();
     randomInitialAlphaValidationAndZeroRadiusNoop();
     randomInitialAlphaResolvesScaleTenCycle();
     fullSolveStopsAtIterationLimit();

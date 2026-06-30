@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <limits>
 #include <list>
 #include <memory>
 #include <stdexcept>
@@ -78,6 +79,7 @@ public:
   virtual void loadPartition(const PartitionPackage &package) = 0;
   virtual PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) = 0;
+  virtual void scaleObjective(long factor) = 0;
 };
 
 class InProcessPartitionWorker final : public PartitionWorker {
@@ -134,7 +136,54 @@ public:
     return result;
   }
 
+  void scaleObjective(long factor) override {
+    if (!solver_) {
+      throw std::runtime_error("partition must be loaded before scaleObjective");
+    }
+    if (factor <= 0) {
+      throw std::runtime_error("objective scale factor must be positive");
+    }
+    for (auto &capacity : package_.arc_capacities) {
+      capacity = checkedScaleInt(capacity, factor);
+    }
+    for (auto &capacity : package_.terminal_capacities) {
+      capacity = checkedScaleInt(capacity, factor);
+    }
+    for (auto &binding : package_.constraint_endpoints) {
+      binding.alpha = checkedScaleLong(binding.alpha, factor);
+      binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
+    }
+    for (auto &constraint_arc : constraint_arcs_) {
+      constraint_arc.alpha = checkedScaleLong(constraint_arc.alpha, factor);
+      constraint_arc.last_alpha =
+          checkedScaleLong(constraint_arc.last_alpha, factor);
+    }
+    solver_->scaleProblem(factor);
+  }
+
 private:
+  static long checkedScaleLong(long value, long scale) {
+    if (scale <= 0) {
+      throw std::runtime_error("scale factor must be positive");
+    }
+    if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
+      throw std::overflow_error("objective scale promotion overflow");
+    }
+    return value * scale;
+  }
+
+  static int checkedScaleInt(int value, long scale) {
+    const long result = checkedScaleLong(value, scale);
+    if (result > std::numeric_limits<int>::max() ||
+        result < std::numeric_limits<int>::min()) {
+      throw std::overflow_error("objective scale promotion exceeds int");
+    }
+    return static_cast<int>(result);
+  }
+
   static void validatePackage(const PartitionPackage &package) {
     if (package.partition_id < 0) {
       throw std::runtime_error("partition id must be non-negative");
