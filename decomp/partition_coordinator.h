@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -178,19 +179,36 @@ public:
           constraint.target.partition_id)].push_back(update);
     }
 
-    std::vector<PartitionSolveResult> results;
-    results.reserve(packages_.size());
+    std::vector<PartitionSolveResult> results(packages_.size());
+    std::vector<std::vector<size_t>> packages_by_worker(workers_.size());
     for (size_t package_index = 0; package_index < packages_.size();
          ++package_index) {
       const int partition_id = packages_[package_index].partition_id;
       const size_t worker_index = workerIndexForPartition(partition_id);
-      PartitionSolveRequest request;
-      request.round_id = round_id;
-      request.partition_id = partition_id;
-      request.scale = scale;
-      request.regularization_strength = regularization_strength;
-      request.alpha_updates = std::move(alpha_updates[package_index]);
-      results.push_back(workers_[worker_index]->solveRound(request));
+      packages_by_worker[worker_index].push_back(package_index);
+    }
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(active_worker_indices_.size());
+    for (const auto worker_index : active_worker_indices_) {
+      futures.push_back(std::async(
+          std::launch::async,
+          [&, worker_index] {
+            for (const auto package_index : packages_by_worker[worker_index]) {
+              const int partition_id = packages_[package_index].partition_id;
+              PartitionSolveRequest request;
+              request.round_id = round_id;
+              request.partition_id = partition_id;
+              request.scale = scale;
+              request.regularization_strength = regularization_strength;
+              request.alpha_updates = std::move(alpha_updates[package_index]);
+              results[package_index] =
+                  workers_[worker_index]->solveRound(request);
+            }
+          }));
+    }
+    for (auto &future : futures) {
+      future.get();
     }
 
     PartitionWorkerRoundStats stats;

@@ -7,6 +7,8 @@
 // any later version.
 
 #include <cstdlib>
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include <fstream>
 #include <iostream>
@@ -16,6 +18,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <decomp/dualdecomp.h>
@@ -557,6 +560,50 @@ private:
   std::deque<ScriptedRound> script_;
   std::vector<mcpd3::PartitionSolveRequest> requests_;
   std::vector<long> scale_factors_;
+};
+
+class ConcurrencyProbeWorker final : public mcpd3::PartitionWorker {
+public:
+  ConcurrencyProbeWorker(std::atomic<int> *active_solves,
+                         std::atomic<int> *max_active_solves)
+      : active_solves_(active_solves),
+        max_active_solves_(max_active_solves) {}
+
+  void loadPartition(const mcpd3::PartitionPackage &package) override {
+    package_ = package;
+  }
+
+  mcpd3::PartitionSolveResult solveRound(
+      const mcpd3::PartitionSolveRequest &request) override {
+    const int active = active_solves_->fetch_add(1) + 1;
+    int previous_max = max_active_solves_->load();
+    while (active > previous_max &&
+           !max_active_solves_->compare_exchange_weak(previous_max, active)) {
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    active_solves_->fetch_sub(1);
+
+    mcpd3::PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = package_.partition_id;
+    result.lower_bound = package_.partition_id + 1;
+    for (const auto &endpoint : package_.constraint_endpoints) {
+      result.constrained_labels.push_back(
+          mcpd3::ConstraintLabel{endpoint.constraint_id,
+                                 endpoint.global_node_id,
+                                 endpoint.local_index, 0});
+    }
+    return result;
+  }
+
+  void scaleObjective(long factor) override { scale_factor_ = factor; }
+
+private:
+  mcpd3::PartitionPackage package_;
+  std::atomic<int> *active_solves_;
+  std::atomic<int> *max_active_solves_;
+  long scale_factor_ = 1;
 };
 
 mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
@@ -1656,6 +1703,31 @@ void fullSolveContinuesAcrossScales() {
           "second scale should not be regularized");
 }
 
+void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
+  std::atomic<int> active_solves{0};
+  std::atomic<int> max_active_solves{0};
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<ConcurrencyProbeWorker>(
+      &active_solves, &max_active_solves));
+  workers.push_back(std::make_unique<ConcurrencyProbeWorker>(
+      &active_solves, &max_active_solves));
+
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+  const auto stats =
+      coordinator.runRound(/*round_id=*/1, /*scale=*/100,
+                           /*step_size=*/100, /*regularization_strength=*/0);
+
+  require(stats.disagreement_count == 0,
+          "concurrency probe should return agreeing labels");
+  require(max_active_solves.load() >= 2,
+          "coordinator should dispatch solveRound concurrently across workers");
+}
+
 } // namespace
 
 int main() {
@@ -1690,6 +1762,7 @@ int main() {
     fullSolveStopsOnGroupStopping();
     fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
+    coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;
