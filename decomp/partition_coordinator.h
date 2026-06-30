@@ -142,10 +142,10 @@ public:
       : packages_(packages), workers_(std::move(workers)), options_(options),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
-    if (packages_.size() != workers_.size()) {
-      throw std::runtime_error(
-          "partition package count must match worker count");
+    if (workers_.empty()) {
+      throw std::runtime_error("at least one partition worker is required");
     }
+    std::vector<bool> worker_has_partition(workers_.size(), false);
     for (size_t i = 0; i < packages_.size(); ++i) {
       const int partition_id = packages_[i].partition_id;
       if (partition_to_worker_index_.find(partition_id) !=
@@ -153,8 +153,14 @@ public:
         throw std::runtime_error("duplicate partition id " +
                                  std::to_string(partition_id));
       }
-      partition_to_worker_index_.emplace(partition_id, i);
-      workers_[i]->loadPartition(packages_[i]);
+      const size_t worker_index = i % workers_.size();
+      partition_to_worker_index_.emplace(partition_id, worker_index);
+      partition_to_package_index_.emplace(partition_id, i);
+      if (!worker_has_partition[worker_index]) {
+        worker_has_partition[worker_index] = true;
+        active_worker_indices_.push_back(worker_index);
+      }
+      workers_[worker_index]->loadPartition(packages_[i]);
     }
     buildConstraints();
     randomizeInitialAlphas();
@@ -162,25 +168,28 @@ public:
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
                                      int regularization_strength) {
-    std::vector<std::vector<AlphaUpdate>> alpha_updates(workers_.size());
+    std::vector<std::vector<AlphaUpdate>> alpha_updates(packages_.size());
     for (const auto &constraint : constraints_) {
       AlphaUpdate update{constraint.constraint_id, constraint.alpha,
                          constraint.last_alpha, constraint.alpha_momentum};
-      alpha_updates[workerIndexForPartition(
+      alpha_updates[packageIndexForPartition(
           constraint.source.partition_id)].push_back(update);
-      alpha_updates[workerIndexForPartition(
+      alpha_updates[packageIndexForPartition(
           constraint.target.partition_id)].push_back(update);
     }
 
     std::vector<PartitionSolveResult> results;
-    results.reserve(workers_.size());
-    for (size_t worker_index = 0; worker_index < workers_.size();
-         ++worker_index) {
+    results.reserve(packages_.size());
+    for (size_t package_index = 0; package_index < packages_.size();
+         ++package_index) {
+      const int partition_id = packages_[package_index].partition_id;
+      const size_t worker_index = workerIndexForPartition(partition_id);
       PartitionSolveRequest request;
       request.round_id = round_id;
+      request.partition_id = partition_id;
       request.scale = scale;
       request.regularization_strength = regularization_strength;
-      request.alpha_updates = std::move(alpha_updates[worker_index]);
+      request.alpha_updates = std::move(alpha_updates[package_index]);
       results.push_back(workers_[worker_index]->solveRound(request));
     }
 
@@ -559,6 +568,15 @@ private:
     return find_iter->second;
   }
 
+  size_t packageIndexForPartition(int partition_id) const {
+    auto find_iter = partition_to_package_index_.find(partition_id);
+    if (find_iter == partition_to_package_index_.end()) {
+      throw std::runtime_error("unknown package partition id " +
+                               std::to_string(partition_id));
+    }
+    return find_iter->second;
+  }
+
   void gatherRoundTerms(const std::vector<PartitionSolveResult> &results,
                         PartitionWorkerRoundStats *stats) const {
     for (const auto &result : results) {
@@ -717,8 +735,8 @@ private:
       constraint.alpha = checkedScaleLong(constraint.alpha, factor);
       constraint.last_alpha = checkedScaleLong(constraint.last_alpha, factor);
     }
-    for (auto &worker : workers_) {
-      worker->scaleObjective(factor);
+    for (const auto worker_index : active_worker_indices_) {
+      workers_[worker_index]->scaleObjective(factor);
     }
     warned_regularization_budget_exceeded_ = false;
   }
@@ -751,7 +769,9 @@ private:
   std::vector<std::unique_ptr<PartitionWorker>> workers_;
   PartitionWorkerCoordinatorOptions options_;
   bool warned_regularization_budget_exceeded_;
+  std::vector<size_t> active_worker_indices_;
   std::unordered_map<int, size_t> partition_to_worker_index_;
+  std::unordered_map<int, size_t> partition_to_package_index_;
   std::vector<CoordinatorConstraint> constraints_;
   std::unordered_map<int, size_t> constraint_index_by_id_;
 };

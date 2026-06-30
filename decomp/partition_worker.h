@@ -57,6 +57,7 @@ struct PartitionPackage {
 
 struct PartitionSolveRequest {
   long round_id = 0;
+  int partition_id = -1;
   long scale = 1;
   int regularization_strength = 0;
   std::vector<AlphaUpdate> alpha_updates;
@@ -86,82 +87,96 @@ class InProcessPartitionWorker final : public PartitionWorker {
 public:
   void loadPartition(const PartitionPackage &package) override {
     validatePackage(package);
-
-    package_ = package;
-    solver_.reset();
-    constraint_arcs_.clear();
-    constraint_arc_by_id_.clear();
+    if (partitions_.find(package.partition_id) != partitions_.end()) {
+      throw std::runtime_error("partition id " +
+                               std::to_string(package.partition_id) +
+                               " is already loaded");
+    }
 
     std::vector<int> arcs = package.arcs;
-    solver_ = std::make_unique<PrimalDualMinCutSolver>(
+    auto &loaded = partitions_[package.partition_id];
+    loaded.package = package;
+    loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
         package.local_node_count, static_cast<int>(package.arcs.size() / 2),
         std::move(arcs), package.arc_capacities, package.terminal_capacities);
 
     for (const auto &binding : package.constraint_endpoints) {
-      addConstraintEndpoint(binding);
+      addConstraintEndpoint(&loaded, binding);
     }
   }
 
   PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) override {
-    if (!solver_) {
+    if (partitions_.empty()) {
       throw std::runtime_error("partition must be loaded before solveRound");
     }
+    auto &loaded = loadedPartitionForRequest(request);
 
     for (const auto &update : request.alpha_updates) {
-      applyAlphaUpdate(update);
+      applyAlphaUpdate(&loaded, update);
     }
 
-    solver_->setRegularizationStrength(request.regularization_strength);
-    solver_->solve();
+    loaded.solver->setRegularizationStrength(request.regularization_strength);
+    loaded.solver->solve();
 
     PartitionSolveResult result;
     result.round_id = request.round_id;
-    result.partition_id = package_.partition_id;
-    result.lower_bound = solver_->getMinCutValue();
-    result.regularization_budget = solver_->getLastRegularizationBudget();
+    result.partition_id = loaded.package.partition_id;
+    result.lower_bound = loaded.solver->getMinCutValue();
+    result.regularization_budget = loaded.solver->getLastRegularizationBudget();
     result.regularization_contribution =
-        solver_->getLastRegularizationContribution();
+        loaded.solver->getLastRegularizationContribution();
     result.regularization_anchor_sink_count =
-        solver_->getLastRegularizationAnchorSinkCount();
+        loaded.solver->getLastRegularizationAnchorSinkCount();
     result.regularization_active_sink_count =
-        solver_->getLastRegularizationActiveSinkCount();
+        loaded.solver->getLastRegularizationActiveSinkCount();
 
-    result.constrained_labels.reserve(package_.constraint_endpoints.size());
-    for (const auto &binding : package_.constraint_endpoints) {
+    result.constrained_labels.reserve(loaded.package.constraint_endpoints.size());
+    for (const auto &binding : loaded.package.constraint_endpoints) {
       result.constrained_labels.push_back(ConstraintLabel{
           binding.constraint_id, binding.global_node_id, binding.local_index,
-          solver_->getMinCutSolution(binding.local_index)});
+          loaded.solver->getMinCutSolution(binding.local_index)});
     }
     return result;
   }
 
   void scaleObjective(long factor) override {
-    if (!solver_) {
+    if (partitions_.empty()) {
       throw std::runtime_error("partition must be loaded before scaleObjective");
     }
     if (factor <= 0) {
       throw std::runtime_error("objective scale factor must be positive");
     }
-    for (auto &capacity : package_.arc_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
+    for (auto &[partition_id, loaded] : partitions_) {
+      (void)partition_id;
+      for (auto &capacity : loaded.package.arc_capacities) {
+        capacity = checkedScaleInt(capacity, factor);
+      }
+      for (auto &capacity : loaded.package.terminal_capacities) {
+        capacity = checkedScaleInt(capacity, factor);
+      }
+      for (auto &binding : loaded.package.constraint_endpoints) {
+        binding.alpha = checkedScaleLong(binding.alpha, factor);
+        binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
+      }
+      for (auto &constraint_arc : loaded.constraint_arcs) {
+        constraint_arc.alpha = checkedScaleLong(constraint_arc.alpha, factor);
+        constraint_arc.last_alpha =
+            checkedScaleLong(constraint_arc.last_alpha, factor);
+      }
+      loaded.solver->scaleProblem(factor);
     }
-    for (auto &capacity : package_.terminal_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
-    }
-    for (auto &binding : package_.constraint_endpoints) {
-      binding.alpha = checkedScaleLong(binding.alpha, factor);
-      binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
-    }
-    for (auto &constraint_arc : constraint_arcs_) {
-      constraint_arc.alpha = checkedScaleLong(constraint_arc.alpha, factor);
-      constraint_arc.last_alpha =
-          checkedScaleLong(constraint_arc.last_alpha, factor);
-    }
-    solver_->scaleProblem(factor);
   }
 
 private:
+  struct LoadedPartition {
+    PartitionPackage package;
+    std::unique_ptr<PrimalDualMinCutSolver> solver;
+    std::list<DualDecompositionConstraintArc> constraint_arcs;
+    std::unordered_map<int, DualDecompositionConstraintArcReference>
+        constraint_arc_by_id;
+  };
+
   static long checkedScaleLong(long value, long scale) {
     if (scale <= 0) {
       throw std::runtime_error("scale factor must be positive");
@@ -225,35 +240,53 @@ private:
     }
   }
 
-  void addConstraintEndpoint(const ConstraintEndpointBinding &binding) {
-    if (constraint_arc_by_id_.find(binding.constraint_id) !=
-        constraint_arc_by_id_.end()) {
+  LoadedPartition &loadedPartitionForRequest(
+      const PartitionSolveRequest &request) {
+    if (request.partition_id < 0) {
+      if (partitions_.size() != 1) {
+        throw std::runtime_error(
+            "partition id is required when multiple partitions are loaded");
+      }
+      return partitions_.begin()->second;
+    }
+    auto find_iter = partitions_.find(request.partition_id);
+    if (find_iter == partitions_.end()) {
+      throw std::runtime_error("unknown solve request partition id " +
+                               std::to_string(request.partition_id));
+    }
+    return find_iter->second;
+  }
+
+  void addConstraintEndpoint(LoadedPartition *loaded,
+                             const ConstraintEndpointBinding &binding) {
+    if (loaded->constraint_arc_by_id.find(binding.constraint_id) !=
+        loaded->constraint_arc_by_id.end()) {
       throw std::runtime_error("duplicate constraint endpoint id " +
                                std::to_string(binding.constraint_id));
     }
 
     const int source_partition =
-        binding.is_source ? package_.partition_id : -1;
+        binding.is_source ? loaded->package.partition_id : -1;
     const int target_partition =
-        binding.is_source ? -1 : package_.partition_id;
+        binding.is_source ? -1 : loaded->package.partition_id;
     const int source_local_index = binding.is_source ? binding.local_index : -1;
     const int target_local_index = binding.is_source ? -1 : binding.local_index;
-    constraint_arcs_.emplace_back(binding.alpha, binding.last_alpha,
-                                  binding.alpha_momentum, source_partition,
-                                  target_partition, source_local_index,
-                                  target_local_index);
-    auto arc_reference = --constraint_arcs_.end();
-    constraint_arc_by_id_.emplace(binding.constraint_id, arc_reference);
+    loaded->constraint_arcs.emplace_back(
+        binding.alpha, binding.last_alpha, binding.alpha_momentum,
+        source_partition, target_partition, source_local_index,
+        target_local_index);
+    auto arc_reference = --loaded->constraint_arcs.end();
+    loaded->constraint_arc_by_id.emplace(binding.constraint_id, arc_reference);
     if (binding.is_source) {
-      solver_->addSourceDualDecompositionConstraint(arc_reference);
+      loaded->solver->addSourceDualDecompositionConstraint(arc_reference);
     } else {
-      solver_->addTargetDualDecompositionConstraint(arc_reference);
+      loaded->solver->addTargetDualDecompositionConstraint(arc_reference);
     }
   }
 
-  void applyAlphaUpdate(const AlphaUpdate &update) {
-    auto find_iter = constraint_arc_by_id_.find(update.constraint_id);
-    if (find_iter == constraint_arc_by_id_.end()) {
+  void applyAlphaUpdate(LoadedPartition *loaded, const AlphaUpdate &update) {
+    auto find_iter = loaded->constraint_arc_by_id.find(update.constraint_id);
+    if (find_iter == loaded->constraint_arc_by_id.end()) {
       throw std::runtime_error("unknown alpha update constraint id " +
                                std::to_string(update.constraint_id));
     }
@@ -263,11 +296,7 @@ private:
     arc_reference->alpha_momentum = update.alpha_momentum;
   }
 
-  PartitionPackage package_;
-  std::unique_ptr<PrimalDualMinCutSolver> solver_;
-  std::list<DualDecompositionConstraintArc> constraint_arcs_;
-  std::unordered_map<int, DualDecompositionConstraintArcReference>
-      constraint_arc_by_id_;
+  std::unordered_map<int, LoadedPartition> partitions_;
 };
 
 } // namespace mcpd3

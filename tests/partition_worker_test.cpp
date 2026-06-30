@@ -499,19 +499,20 @@ public:
       : script_(std::move(script)) {}
 
   void loadPartition(const mcpd3::PartitionPackage &package) override {
-    package_ = package;
+    packages_[package.partition_id] = package;
   }
 
   mcpd3::PartitionSolveResult solveRound(
       const mcpd3::PartitionSolveRequest &request) override {
     require(!script_.empty(), "scripted worker was called too many times");
+    const auto &package = packageForRequest(request);
     requests_.push_back(request);
     const auto round = script_.front();
     script_.pop_front();
 
     mcpd3::PartitionSolveResult result;
     result.round_id = request.round_id;
-    result.partition_id = package_.partition_id;
+    result.partition_id = package.partition_id;
     result.lower_bound = round.lower_bound;
     result.regularization_budget = round.regularization_budget;
     result.regularization_contribution = round.regularization_contribution;
@@ -519,7 +520,7 @@ public:
         round.regularization_anchor_sink_count;
     result.regularization_active_sink_count =
         round.regularization_active_sink_count;
-    for (const auto &endpoint : package_.constraint_endpoints) {
+    for (const auto &endpoint : package.constraint_endpoints) {
       result.constrained_labels.push_back(
           mcpd3::ConstraintLabel{endpoint.constraint_id,
                                  endpoint.global_node_id,
@@ -539,7 +540,20 @@ public:
   const std::vector<long> &scaleFactors() const { return scale_factors_; }
 
 private:
-  mcpd3::PartitionPackage package_;
+  const mcpd3::PartitionPackage &packageForRequest(
+      const mcpd3::PartitionSolveRequest &request) const {
+    if (request.partition_id < 0) {
+      require(packages_.size() == 1,
+              "scripted worker needs partition id with multiple packages");
+      return packages_.begin()->second;
+    }
+    auto find_iter = packages_.find(request.partition_id);
+    require(find_iter != packages_.end(),
+            "scripted worker received unknown partition id");
+    return find_iter->second;
+  }
+
+  std::map<int, mcpd3::PartitionPackage> packages_;
   std::deque<ScriptedRound> script_;
   std::vector<mcpd3::PartitionSolveRequest> requests_;
   std::vector<long> scale_factors_;
@@ -1008,6 +1022,82 @@ void fullSolveUsesScaledEpsilonRegularizationToReachAgreement() {
           "second low-scale round should report its regularization budget");
   require(result.progress_records[1].disagreement_count == 0,
           "second low-scale round should reach agreement");
+}
+
+void coordinatorRoutesMultiplePackagesToOneWorker() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 2;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  auto scripted_worker = std::make_unique<ScriptedPartitionWorker>(
+      std::deque<ScriptedRound>{{10, 0}, {20, 1}, {30, 1}, {40, 1}});
+  auto *worker_ptr = scripted_worker.get();
+  workers.push_back(std::move(scripted_worker));
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+
+  const auto first =
+      coordinator.runRound(/*round_id=*/1, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+  const auto second =
+      coordinator.runRound(/*round_id=*/2, /*scale=*/100, /*step_size=*/100,
+                           /*regularization_strength=*/0);
+
+  require(first.lower_bound == 30,
+          "single worker should solve all first-round packages");
+  require(first.disagreement_count == 1,
+          "first single-worker round should see disagreement");
+  require(second.lower_bound == 70,
+          "single worker should solve all second-round packages");
+  require(second.disagreement_count == 0,
+          "second single-worker round should reach agreement");
+  require(worker_ptr->requests().size() == 4,
+          "single worker should receive one request per package per round");
+  require(worker_ptr->requests()[0].partition_id == 0,
+          "first request should target partition 0");
+  require(worker_ptr->requests()[1].partition_id == 1,
+          "second request should target partition 1");
+  require(worker_ptr->requests()[2].partition_id == 0,
+          "third request should return to partition 0");
+  require(worker_ptr->requests()[3].partition_id == 1,
+          "fourth request should return to partition 1");
+  require(worker_ptr->requests()[2].alpha_updates.size() == 1,
+          "partition 0 should receive its alpha update");
+  require(worker_ptr->requests()[3].alpha_updates.size() == 1,
+          "partition 1 should receive its alpha update");
+  require(worker_ptr->requests()[2].alpha_updates[0].alpha == 100,
+          "partition 0 alpha should update after disagreement");
+  require(worker_ptr->requests()[3].alpha_updates[0].alpha == 100,
+          "partition 1 alpha should update after disagreement");
+}
+
+void inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10000;
+
+  const auto packages = makeTieBreakRegularizationPackages();
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      packages, makeInProcessWorkers(/*count=*/1), options);
+
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "single in-process worker should solve all owned packages");
+  require(result.final_disagreement_count == 0,
+          "single in-process worker solve should finish with agreement");
+  require(result.final_regularization_budget == 10,
+          "single in-process worker should preserve regularization diagnostics");
 }
 
 void unitScaleResolvesOppositeDirectionCycle() {
@@ -1585,6 +1675,8 @@ int main() {
     fullSolveReportsBestBoundUsingObjectiveScale();
     fullSolveReportsLowScaleRegularizedAgreementAsOptimal();
     fullSolveUsesScaledEpsilonRegularizationToReachAgreement();
+    coordinatorRoutesMultiplePackagesToOneWorker();
+    inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages();
     unitScaleResolvesOppositeDirectionCycle();
     lowObjectiveScaleCyclePromotesAndConverges();
     fullSolvePromotesObjectiveScaleOnOverBudget();
