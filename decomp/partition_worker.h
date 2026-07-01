@@ -316,9 +316,14 @@ private:
                                std::to_string(update.constraint_id));
     }
     auto arc_reference = find_iter->second;
+    arc_reference->last_alpha = arc_reference->alpha;
     arc_reference->alpha = update.alpha;
-    arc_reference->last_alpha = update.last_alpha;
-    arc_reference->alpha_momentum = update.alpha_momentum;
+  }
+
+  void markAlphaStateSolved(LoadedPartition *loaded) {
+    for (auto &constraint_arc : loaded->constraint_arcs) {
+      constraint_arc.last_alpha = constraint_arc.alpha;
+    }
   }
 
   PartitionSolveResult solveLoadedPartition(
@@ -350,6 +355,7 @@ private:
           binding.constraint_id, binding.global_node_id, binding.local_index,
           loaded->solver->getMinCutSolution(binding.local_index)});
     }
+    markAlphaStateSolved(loaded);
     return result;
   }
 
