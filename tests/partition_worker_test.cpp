@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <list>
@@ -110,6 +111,164 @@ mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
                                         /*last_alpha=*/last_alpha,
                                         /*alpha_momentum=*/0});
   return package;
+}
+
+mcpd3::PartitionPackage makeStreamingPackage(int partition_id,
+                                             int constraint_id,
+                                             int terminal_capacity) {
+  mcpd3::PartitionPackage package;
+  package.partition_id = partition_id;
+  package.local_node_count = 2;
+  package.arcs = {0, 1};
+  package.arc_capacities = {3 + partition_id, 5 + partition_id};
+  package.terminal_capacities = {terminal_capacity, -terminal_capacity - 1};
+  package.local_to_global = {100 + partition_id * 10,
+                             101 + partition_id * 10};
+  package.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                        /*global_node_id=*/101 +
+                                            partition_id * 10,
+                                        /*local_index=*/1,
+                                        /*is_source=*/true,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+  return package;
+}
+
+void requireSolveResultsMatch(const mcpd3::PartitionSolveResult &actual,
+                              const mcpd3::PartitionSolveResult &expected,
+                              const std::string &context) {
+  require(actual.round_id == expected.round_id,
+          context + ": round id differs");
+  require(actual.partition_id == expected.partition_id,
+          context + ": partition id differs");
+  require(actual.lower_bound == expected.lower_bound,
+          context + ": lower bound differs");
+  require(actual.regularization_budget == expected.regularization_budget,
+          context + ": regularization budget differs");
+  require(actual.regularization_contribution ==
+              expected.regularization_contribution,
+          context + ": regularization contribution differs");
+  require(actual.regularization_anchor_sink_count ==
+              expected.regularization_anchor_sink_count,
+          context + ": regularization anchor count differs");
+  require(actual.regularization_active_sink_count ==
+              expected.regularization_active_sink_count,
+          context + ": regularization active count differs");
+  require(actual.constrained_labels.size() ==
+              expected.constrained_labels.size(),
+          context + ": constrained label count differs");
+  for (size_t i = 0; i < actual.constrained_labels.size(); ++i) {
+    require(actual.constrained_labels[i].constraint_id ==
+                expected.constrained_labels[i].constraint_id,
+            context + ": constraint id differs");
+    require(actual.constrained_labels[i].global_node_id ==
+                expected.constrained_labels[i].global_node_id,
+            context + ": global node id differs");
+    require(actual.constrained_labels[i].local_index ==
+                expected.constrained_labels[i].local_index,
+            context + ": local index differs");
+    require(actual.constrained_labels[i].label ==
+                expected.constrained_labels[i].label,
+            context + ": label differs");
+  }
+}
+
+void streamingWorkerMatchesInProcessAcrossEviction() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/10,
+                                       /*terminal_capacity=*/2);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/11,
+                                       /*terminal_capacity=*/4);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  requireSolveResultsMatch(streaming.solveRound(first),
+                           reference.solveRound(first),
+                           "streaming first solve");
+
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 2;
+  second.partition_id = 1;
+  requireSolveResultsMatch(streaming.solveRound(second),
+                           reference.solveRound(second),
+                           "streaming eviction solve");
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming worker should keep only one resident partition");
+
+  mcpd3::PartitionSolveRequest third;
+  third.round_id = 3;
+  third.partition_id = 0;
+  third.regularization_strength = 1;
+  third.alpha_updates.push_back(
+      mcpd3::AlphaUpdate{/*constraint_id=*/10,
+                          /*alpha=*/7,
+                          /*last_alpha=*/0,
+                          /*alpha_momentum=*/0});
+  requireSolveResultsMatch(streaming.solveRound(third),
+                           reference.solveRound(third),
+                           "streaming reload with alpha update");
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming reload should preserve the resident budget");
+}
+
+void streamingWorkerScalesEvictedDiskPayload() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/20,
+                                       /*terminal_capacity=*/3);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/21,
+                                       /*terminal_capacity=*/5);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  (void)streaming.solveRound(first);
+  (void)reference.solveRound(first);
+
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 2;
+  second.partition_id = 1;
+  (void)streaming.solveRound(second);
+  (void)reference.solveRound(second);
+
+  streaming.scaleObjective(/*factor=*/2);
+  reference.scaleObjective(/*factor=*/2);
+
+  mcpd3::PartitionSolveRequest after_scale;
+  after_scale.round_id = 3;
+  after_scale.partition_id = 0;
+  after_scale.alpha_updates.push_back(
+      mcpd3::AlphaUpdate{/*constraint_id=*/20,
+                          /*alpha=*/4,
+                          /*last_alpha=*/0,
+                          /*alpha_momentum=*/0});
+  requireSolveResultsMatch(streaming.solveRound(after_scale),
+                           reference.solveRound(after_scale),
+                           "streaming scaled evicted payload");
 }
 
 struct DirectSolverResult {
@@ -2561,6 +2720,8 @@ int main() {
   try {
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
     solverMemoryEstimateReportsBkAndVectorBytes();
+    streamingWorkerMatchesInProcessAcrossEviction();
+    streamingWorkerScalesEvictedDiskPayload();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     disabledPartitionPackageExportPreservesNativeSolve();
