@@ -252,6 +252,61 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
           "worker disagreement count differs from DualDecomposition");
 }
 
+void disabledPartitionPackageExportPreservesNativeSolve() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = false;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::DualDecomposition native_only(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  bool package_access_threw = false;
+  try {
+    (void)native_only.getPartitionPackages();
+  } catch (const std::runtime_error &e) {
+    package_access_threw =
+        std::string(e.what()).find("partition package export is disabled") !=
+        std::string::npos;
+  }
+  require(package_access_threw,
+          "disabled partition package export should reject package access");
+
+  options.emit_partition_packages = true;
+  mcpd3::DualDecomposition exported(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  native_only.runOptimizationScale(
+      /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+  exported.runOptimizationScale(
+      /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+
+  require(native_only.getBestLowerBoundRaw() == exported.getBestLowerBoundRaw(),
+          "native-only lower bound should match package-export solve");
+  require(native_only.getLastDisagreementCount() ==
+              exported.getLastDisagreementCount(),
+          "native-only disagreement count should match package-export solve");
+  require(native_only.getTotalOptimizationIterations() == 1,
+          "native-only solve should run without exported packages");
+}
+
 mcpd3::DualDecomposition makeTinyDualDecomposition() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -2304,6 +2359,7 @@ int main() {
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
+    disabledPartitionPackageExportPreservesNativeSolve();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();

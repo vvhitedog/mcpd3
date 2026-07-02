@@ -94,6 +94,7 @@ struct DualDecompositionOptions {
   bool use_momentum = true;
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
+  bool emit_partition_packages = true;
   bool verbose = true;
   long min_step_size = 1;
   long max_step_size = 10000;
@@ -126,7 +127,8 @@ public:
         original_terminal_capacities_(options.track_primal_upper_bound
                                           ? terminal_capacities_
                                           : std::vector<int>()),
-        min_cut_sub_graphs_(npartition_), partition_packages_(npartition_),
+        min_cut_sub_graphs_(npartition_),
+        partition_packages_(options.emit_partition_packages ? npartition_ : 0),
         primal_solution_(nnode_), scale_(1),
         options_(options),
         thread_pool_(
@@ -202,6 +204,10 @@ public:
     return objective_scale_promotion_count_;
   }
   const std::vector<PartitionPackage> &getPartitionPackages() const {
+    if (!options_.emit_partition_packages) {
+      throw std::runtime_error(
+          "partition package export is disabled for this DualDecomposition");
+    }
     return partition_packages_;
   }
 
@@ -1130,14 +1136,17 @@ private:
     int solver_done = 0;
     for (int partition = 0; partition < npartition_; ++partition) {
       auto &min_cut_sub_graph = min_cut_sub_graphs_[partition];
-      auto &package = partition_packages_[partition];
-      package.partition_id = partition;
-      package.local_node_count = min_cut_sub_graph.graph.nnode;
-      package.arcs = min_cut_sub_graph.graph.arcs;
-      package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
-      package.terminal_capacities = min_cut_sub_graph.graph.terminal_capacities;
-      package.local_to_global = min_cut_sub_graph.local_to_global;
-      package.constraint_endpoints.clear();
+      if (options_.emit_partition_packages) {
+        auto &package = partition_packages_[partition];
+        package.partition_id = partition;
+        package.local_node_count = min_cut_sub_graph.graph.nnode;
+        package.arcs = min_cut_sub_graph.graph.arcs;
+        package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
+        package.terminal_capacities =
+            min_cut_sub_graph.graph.terminal_capacities;
+        package.local_to_global = min_cut_sub_graph.local_to_global;
+        package.constraint_endpoints.clear();
+      }
 
       solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
           std::move(min_cut_sub_graph.graph)));
@@ -1200,22 +1209,26 @@ private:
               arc_reference);
           solvers_[partition_target]->addTargetDualDecompositionConstraint(
               arc_reference);
-          partition_packages_[partition_source].constraint_endpoints.push_back(
-              ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
-                                        /*global_node_id=*/global_index,
-                                        /*local_index=*/local_index_source,
-                                        /*is_source=*/true,
-                                        /*alpha=*/alpha,
-                                        /*last_alpha=*/alpha,
-                                        /*alpha_momentum=*/0});
-          partition_packages_[partition_target].constraint_endpoints.push_back(
-              ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
-                                        /*global_node_id=*/global_index,
-                                        /*local_index=*/local_index_target,
-                                        /*is_source=*/false,
-                                        /*alpha=*/alpha,
-                                        /*last_alpha=*/alpha,
-                                        /*alpha_momentum=*/0});
+          if (options_.emit_partition_packages) {
+            partition_packages_[partition_source]
+                .constraint_endpoints.push_back(
+                    ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                              /*global_node_id=*/global_index,
+                                              /*local_index=*/local_index_source,
+                                              /*is_source=*/true,
+                                              /*alpha=*/alpha,
+                                              /*last_alpha=*/alpha,
+                                              /*alpha_momentum=*/0});
+            partition_packages_[partition_target]
+                .constraint_endpoints.push_back(
+                    ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                              /*global_node_id=*/global_index,
+                                              /*local_index=*/local_index_target,
+                                              /*is_source=*/false,
+                                              /*alpha=*/alpha,
+                                              /*last_alpha=*/alpha,
+                                              /*alpha_momentum=*/0});
+          }
           constrained_nodes_count_in_each_partition[partition_source]++;
           constrained_nodes_count_in_each_partition[partition_target]++;
         }
@@ -1245,19 +1258,21 @@ private:
     partitions_.shrink_to_fit();
     dualdecomp_progress_report("dd_initialize_decomposition_total", 1, 1,
                                init_start);
-    printf("partition counts: ");
-    for (const auto &count : constrained_nodes_partition_counts) {
-      printf("%d,", count);
+    if (options_.verbose) {
+      printf("partition counts: ");
+      for (const auto &count : constrained_nodes_partition_counts) {
+        printf("%d,", count);
+      }
+      printf("\n");
+      printf("max count of constrainted nodes in any one partition: %d\n",
+          *std::max_element(constrained_nodes_count_in_each_partition.begin(),
+            constrained_nodes_count_in_each_partition.end()));
+      printf("mean count of constrainted nodes in any one partition: %lf\n",
+             std::accumulate(constrained_nodes_count_in_each_partition.begin(),
+                             constrained_nodes_count_in_each_partition.end(), 0) /
+                 (static_cast<double>(
+                     constrained_nodes_count_in_each_partition.size())));
     }
-    printf("\n");
-    printf("max count of constrainted nodes in any one partition: %d\n",
-        *std::max_element(constrained_nodes_count_in_each_partition.begin(),
-          constrained_nodes_count_in_each_partition.end()));
-    printf("mean count of constrainted nodes in any one partition: %lf\n",
-           std::accumulate(constrained_nodes_count_in_each_partition.begin(),
-                           constrained_nodes_count_in_each_partition.end(), 0) /
-               (static_cast<double>(
-                   constrained_nodes_count_in_each_partition.size())));
     /**
      * step 5: create a min cut problem from the original problem to evaluate
      * the primal objective value

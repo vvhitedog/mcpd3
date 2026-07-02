@@ -126,6 +126,38 @@ Useful dual-decomposition options:
 --quiet
 ```
 
+## Native Monolith Benchmark
+
+`mcpd3_native_monolith_benchmark` is the clean native-local comparator for
+dual decomposition. It constructs `mcpd3::DualDecomposition` directly and, by
+default, disables partition-package export so local benchmarking does not copy
+subproblems into the distributed worker representation.
+
+Build it with the normal mcpd3 build:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+Run a directed DIMACS benchmark:
+
+```bash
+MCPD3_PARTITIONER=basic ./build/mcpd3_native_monolith_benchmark \
+  /data/adhead.n6c10.max \
+  --directed \
+  --partitions 10 \
+  --objective-scale 1000 \
+  --schedule-start 10000 \
+  --schedule-levels 5 \
+  --max-iterations 10000
+```
+
+The benchmark prints unbuffered key/value fields for graph size, memory
+snapshots, objective values, agreement status, objective-scale promotions, and
+separate read/scale/construct/solve timings. Use `--emit-partition-packages`
+only for diagnostics that intentionally compare against the worker export path.
+
 ## Programmatic Use
 
 For direct in-process solving, include the repository root and link the maxflow
@@ -154,6 +186,7 @@ int main() {
   mcpd3::DualDecompositionOptions options;
   options.thread_count = 4;
   options.track_primal_upper_bound = false;
+  options.emit_partition_packages = false;
   options.objective_scale = 10000;
 
   mcpd3::DualDecomposition solver(/*npartition=*/10, std::move(graph),

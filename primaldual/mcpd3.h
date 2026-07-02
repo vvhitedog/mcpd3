@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,11 @@
 #include <measure/timer.h>
 
 namespace mcpd3 {
+
+inline bool primaldual_timing_enabled() {
+  const char *value = std::getenv("MCPD3_SOLVER_TIMING");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
 
 class PrimalDualMinCutSolver {
 public:
@@ -233,12 +239,14 @@ public:
 
   void solve() {
     if (is_first_iteration_) {
-      auto init_time = time_lambda([&]{
-      shrinkToFitDualDecompositionConstraints(); // memory optimization
-      initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
-                        // complementary slackness conditions
+      auto init_time = time_lambda([&] {
+        shrinkToFitDualDecompositionConstraints(); // memory optimization
+        initializeFlow(); // finds a flow satisfying arc based lagrange
+                          // multiplier complementary slackness conditions
       });
-      printf("init_time: %ldms\n",init_time.count());
+      if (primaldual_timing_enabled()) {
+        printf("init_time: %ldms\n", init_time.count());
+      }
     }
     cacheLagrangeMultipliers(); // optimization
     resetRegularizationDiagnostics();
