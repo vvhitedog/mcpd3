@@ -622,7 +622,9 @@ public:
     return result;
   }
 
-  void scaleObjective(long factor) override {
+  void scaleObjective(long factor,
+                      bool saturate_capacity_overflow = false) override {
+    saturate_scale_objective_.push_back(saturate_capacity_overflow);
     scale_factors_.push_back(factor);
   }
 
@@ -631,6 +633,9 @@ public:
   }
 
   const std::vector<long> &scaleFactors() const { return scale_factors_; }
+  const std::vector<bool> &saturateScaleObjective() const {
+    return saturate_scale_objective_;
+  }
 
 private:
   const mcpd3::PartitionPackage &packageForRequest(
@@ -650,6 +655,7 @@ private:
   std::deque<ScriptedRound> script_;
   std::vector<mcpd3::PartitionSolveRequest> requests_;
   std::vector<long> scale_factors_;
+  std::vector<bool> saturate_scale_objective_;
 };
 
 class ConcurrencyProbeWorker final : public mcpd3::PartitionWorker {
@@ -687,13 +693,18 @@ public:
     return result;
   }
 
-  void scaleObjective(long factor) override { scale_factor_ = factor; }
+  void scaleObjective(long factor,
+                      bool saturate_capacity_overflow = false) override {
+    scale_factor_ = factor;
+    saturate_scale_objective_ = saturate_capacity_overflow;
+  }
 
 private:
   mcpd3::PartitionPackage package_;
   std::atomic<int> *active_solves_;
   std::atomic<int> *max_active_solves_;
   long scale_factor_ = 1;
+  bool saturate_scale_objective_ = false;
 };
 
 class BatchRecordingWorker final : public mcpd3::PartitionWorker {
@@ -747,7 +758,7 @@ public:
     return results;
   }
 
-  void scaleObjective(long) override {}
+  void scaleObjective(long, bool = false) override {}
 
   const std::vector<size_t> &batchSizes() const { return batch_sizes_; }
   int singleSolveCount() const { return single_solve_count_; }
@@ -1934,10 +1945,77 @@ void fullSolvePromotesObjectiveScaleOnOverBudget() {
           "source worker should receive objective rescale request");
   require(target_worker->scaleFactors() == std::vector<long>{10},
           "target worker should receive objective rescale request");
+  require(source_worker->saturateScaleObjective() == std::vector<bool>{false},
+          "strict promotion should not request worker saturation");
+  require(target_worker->saturateScaleObjective() == std::vector<bool>{false},
+          "strict promotion should not request worker saturation");
   require(source_worker->requests()[1].scale == 100,
           "promoted solve should restart at objective scale");
   require(source_worker->requests()[2].regularization_strength == 10,
           "promoted low-scale solve should re-enable scaled epsilon");
+}
+
+void fullSolvePromotionForwardsSaturationFlag() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 2;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
+  options.saturate_capacity_overflow = true;
+  options.max_objective_scale_promotions = 1;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{1000, 0, 10, 0, 1, 0},
+                                {40, 0, 0, 0, 0, 0},
+                                {400, 0, 1, 0, 1, 0}},
+      std::deque<ScriptedRound>{{2000, 0, 0, 0, 0, 0},
+                                {60, 1, 0, 0, 0, 0},
+                                {600, 0, 0, 0, 0, 0}},
+      options, &source_worker, &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.objective_scale_promotion_count == 1,
+          "saturated promotion test should promote once");
+  require(source_worker->scaleFactors() == std::vector<long>{10},
+          "source worker should receive saturated objective rescale request");
+  require(target_worker->scaleFactors() == std::vector<long>{10},
+          "target worker should receive saturated objective rescale request");
+  require(source_worker->saturateScaleObjective() == std::vector<bool>{true},
+          "source worker should receive saturation flag");
+  require(target_worker->saturateScaleObjective() == std::vector<bool>{true},
+          "target worker should receive saturation flag");
+}
+
+void inProcessWorkerSaturatesObjectiveScaleOverflow() {
+  mcpd3::PartitionPackage package;
+  package.partition_id = 0;
+  package.local_node_count = 1;
+  package.terminal_capacities = {std::numeric_limits<int>::max() / 2 + 1};
+  package.local_to_global = {0};
+
+  mcpd3::InProcessPartitionWorker strict_worker;
+  strict_worker.loadPartition(package);
+  bool strict_threw = false;
+  try {
+    strict_worker.scaleObjective(2);
+  } catch (const std::overflow_error &) {
+    strict_threw = true;
+  }
+  require(strict_threw,
+          "strict in-process worker objective scaling should reject overflow");
+
+  mcpd3::InProcessPartitionWorker saturated_worker;
+  saturated_worker.loadPartition(package);
+  saturated_worker.scaleObjective(2, /*saturate_capacity_overflow=*/true);
+  mcpd3::PartitionSolveRequest request;
+  request.round_id = 1;
+  request.partition_id = 0;
+  (void)saturated_worker.solveRound(request);
 }
 
 void fullSolveStopsOverBudgetWhenPromotionDisabled() {
@@ -2389,6 +2467,8 @@ int main() {
     unitScaleResolvesOppositeDirectionCycle();
     lowObjectiveScaleCyclePromotesAndConverges();
     fullSolvePromotesObjectiveScaleOnOverBudget();
+    fullSolvePromotionForwardsSaturationFlag();
+    inProcessWorkerSaturatesObjectiveScaleOverflow();
     fullSolveStopsOverBudgetWhenPromotionDisabled();
     inProcessCoordinatorPromotesObjectiveScaleOnOverBudget();
     randomInitialAlphaValidationAndZeroRadiusNoop();

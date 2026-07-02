@@ -99,7 +99,8 @@ public:
     }
     return results;
   }
-  virtual void scaleObjective(long factor) = 0;
+  virtual void scaleObjective(long factor,
+                              bool saturate_capacity_overflow = false) = 0;
 };
 
 class InProcessPartitionWorker final : public PartitionWorker {
@@ -165,7 +166,8 @@ public:
     return results;
   }
 
-  void scaleObjective(long factor) override {
+  void scaleObjective(long factor,
+                      bool saturate_capacity_overflow = false) override {
     if (partitions_.empty()) {
       throw std::runtime_error("partition must be loaded before scaleObjective");
     }
@@ -175,10 +177,12 @@ public:
     for (auto &[partition_id, loaded] : partitions_) {
       (void)partition_id;
       for (auto &capacity : loaded.package.arc_capacities) {
-        capacity = checkedScaleInt(capacity, factor);
+        capacity =
+            checkedScaleInt(capacity, factor, saturate_capacity_overflow);
       }
       for (auto &capacity : loaded.package.terminal_capacities) {
-        capacity = checkedScaleInt(capacity, factor);
+        capacity =
+            checkedScaleInt(capacity, factor, saturate_capacity_overflow);
       }
       for (auto &binding : loaded.package.constraint_endpoints) {
         binding.alpha = checkedScaleLong(binding.alpha, factor);
@@ -189,7 +193,7 @@ public:
         constraint_arc.last_alpha =
             checkedScaleLong(constraint_arc.last_alpha, factor);
       }
-      loaded.solver->scaleProblem(factor);
+      loaded.solver->scaleProblem(factor, saturate_capacity_overflow);
     }
   }
 
@@ -215,10 +219,15 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);

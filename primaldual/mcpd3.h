@@ -164,38 +164,44 @@ public:
 
   template <int scale> void scaleProblem() { scaleProblem(scale); }
 
-  void scaleProblem(long scale) {
+  void scaleProblem(long scale, bool saturate_capacity_overflow = false) {
     if (scale <= 0) {
       throw std::runtime_error("problem scale factor must be positive");
     }
     for (int i = 0; i < nnode_; ++i) {
       terminal_capacities_[i] =
-          checkedScaleInt(terminal_capacities_[i], scale);
+          checkedScaleInt(terminal_capacities_[i], scale,
+                          saturate_capacity_overflow);
       auto &flow = d_flow_[i];
-      flow = checkedScaleInt(flow, scale);
+      flow = checkedScaleInt(flow, scale, saturate_capacity_overflow);
     }
     for (int i = 0; i < narc_; ++i) {
       auto &forward_capacity = arc_capacities_[2 * i + 0];
       auto &backward_capacity = arc_capacities_[2 * i + 1];
-      forward_capacity = checkedScaleInt(forward_capacity, scale);
-      backward_capacity = checkedScaleInt(backward_capacity, scale);
+      forward_capacity =
+          checkedScaleInt(forward_capacity, scale, saturate_capacity_overflow);
+      backward_capacity =
+          checkedScaleInt(backward_capacity, scale, saturate_capacity_overflow);
       auto &flow = v_flow_[i];
-      flow = checkedScaleInt(flow, scale);
+      flow = checkedScaleInt(flow, scale, saturate_capacity_overflow);
     }
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
       int flow;
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_rcap(
+          a, checkedScaleInt(flow, scale, saturate_capacity_overflow));
       a = maxflow_graph_.get_next_arc(a);
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_rcap(
+          a, checkedScaleInt(flow, scale, saturate_capacity_overflow));
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
       int flow;
       flow = maxflow_graph_.get_trcap(i);
-      maxflow_graph_.set_trcap(i, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_trcap(
+          i, checkedScaleInt(flow, scale, saturate_capacity_overflow));
     }
     mincut_value_ = checkedScaleLong(mincut_value_, scale);
     // NOTE: after changing scale, the capacities from previous and this scale
@@ -371,10 +377,15 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);

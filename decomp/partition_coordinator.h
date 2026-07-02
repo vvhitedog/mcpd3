@@ -63,6 +63,7 @@ struct PartitionWorkerCoordinatorOptions {
   long objective_scale = 1;
   bool use_momentum = true;
   bool enable_group_stopping = true;
+  bool saturate_capacity_overflow = false;
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::SCALED_EPSILON;
   long regularization_budget_limit = 0;
@@ -973,10 +974,15 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);
@@ -984,10 +990,12 @@ private:
 
   void scalePackage(PartitionPackage *package, long factor) {
     for (auto &capacity : package->arc_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
+      capacity =
+          checkedScaleInt(capacity, factor, options_.saturate_capacity_overflow);
     }
     for (auto &capacity : package->terminal_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
+      capacity =
+          checkedScaleInt(capacity, factor, options_.saturate_capacity_overflow);
     }
     for (auto &binding : package->constraint_endpoints) {
       binding.alpha = checkedScaleLong(binding.alpha, factor);
@@ -1031,7 +1039,8 @@ private:
       constraint.last_alpha = checkedScaleLong(constraint.last_alpha, factor);
     }
     for (const auto worker_index : active_worker_indices_) {
-      workers_[worker_index]->scaleObjective(factor);
+      workers_[worker_index]->scaleObjective(
+          factor, options_.saturate_capacity_overflow);
     }
     warned_regularization_budget_exceeded_ = false;
   }

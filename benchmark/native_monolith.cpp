@@ -185,7 +185,8 @@ Config parseArgs(int argc, char **argv) {
     } else if (arg == "--symmetric-streaming" ||
                arg == "--stream-symmetric-input") {
       config.symmetric_streaming = true;
-    } else if (arg == "--saturate-capacity-overflow") {
+    } else if (arg == "--saturate-capacity-overflow" ||
+               arg == "--truncate-capacity-overflow") {
       config.saturate_capacity_overflow = true;
     } else if (arg == "--verbose") {
       config.verbose = true;
@@ -313,6 +314,7 @@ mcpd3::DualDecompositionOptions makeOptions(const Config &config) {
   options.enable_group_stopping = config.enable_group_stopping;
   options.track_primal_upper_bound = config.track_primal_upper_bound;
   options.emit_partition_packages = config.emit_partition_packages;
+  options.saturate_capacity_overflow = config.saturate_capacity_overflow;
   options.verbose = config.verbose;
   options.objective_scale = config.objective_scale;
   options.thread_count = config.thread_count;

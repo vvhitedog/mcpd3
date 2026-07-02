@@ -157,6 +157,9 @@ The benchmark prints unbuffered key/value fields for graph size, memory
 snapshots, objective values, agreement status, objective-scale promotions, and
 separate read/scale/construct/solve timings. Use `--emit-partition-packages`
 only for diagnostics that intentionally compare against the worker export path.
+`--saturate-capacity-overflow` and `--truncate-capacity-overflow` are opt-in
+compatibility modes that clamp scaled capacities to the 32-bit range, including
+during later objective-scale promotions.
 
 ## Programmatic Use
 

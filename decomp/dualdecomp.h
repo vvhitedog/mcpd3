@@ -95,6 +95,7 @@ struct DualDecompositionOptions {
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
   bool emit_partition_packages = true;
+  bool saturate_capacity_overflow = false;
   bool verbose = true;
   long min_step_size = 1;
   long max_step_size = 10000;
@@ -709,14 +710,18 @@ public:
     scale_ = checkedScaleLong(scale_, scale);
     options_.objective_scale = checkedScaleLong(options_.objective_scale, scale);
     for (auto &cap : original_arc_capacities_) {
-      cap = checkedScaleInt(cap, scale);
+      cap = checkedScaleInt(cap, scale, options_.saturate_capacity_overflow);
     }
     for (auto &cap : original_terminal_capacities_) {
-      cap = checkedScaleInt(cap, scale);
+      cap = checkedScaleInt(cap, scale, options_.saturate_capacity_overflow);
     }
     for (auto &solver_uptr : solvers_) {
       auto *solver = solver_uptr.get();
-      thread_pool_.push([solver, scale] { solver->scaleProblem(scale); });
+      const bool saturate_capacity_overflow =
+          options_.saturate_capacity_overflow;
+      thread_pool_.push([solver, scale, saturate_capacity_overflow] {
+        solver->scaleProblem(scale, saturate_capacity_overflow);
+      });
     }
     thread_pool_.wait();
     for (auto &[global_index, constraints] : constraint_arc_map_) {
@@ -755,10 +760,15 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);
