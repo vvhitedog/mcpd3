@@ -192,12 +192,11 @@ public:
         worker_has_partition[worker_index] = true;
         active_worker_indices_.push_back(worker_index);
       }
-      workers_[worker_index]->loadPartition(package);
-
       PartitionPackage coordinator_package;
       coordinator_package.partition_id = partition_id;
       coordinator_package.constraint_endpoints = package.constraint_endpoints;
       packages_.push_back(std::move(coordinator_package));
+      workers_[worker_index]->loadPartition(std::move(packages[i]));
     }
     buildConstraints();
     dropCoordinatorPackagePayloads();

@@ -88,6 +88,9 @@ public:
     return {};
   }
   virtual void loadPartition(const PartitionPackage &package) = 0;
+  virtual void loadPartition(PartitionPackage &&package) {
+    loadPartition(static_cast<const PartitionPackage &>(package));
+  }
   virtual PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) = 0;
   virtual std::vector<PartitionSolveResult> solveRoundBatch(
@@ -106,6 +109,11 @@ public:
 class InProcessPartitionWorker final : public PartitionWorker {
 public:
   void loadPartition(const PartitionPackage &package) override {
+    PartitionPackage copy = package;
+    loadPartition(std::move(copy));
+  }
+
+  void loadPartition(PartitionPackage &&package) override {
     validatePackage(package);
     if (partitions_.find(package.partition_id) != partitions_.end()) {
       throw std::runtime_error("partition id " +
@@ -113,14 +121,18 @@ public:
                                " is already loaded");
     }
 
-    std::vector<int> arcs = package.arcs;
+    const int partition_id = package.partition_id;
+    const int local_node_count = package.local_node_count;
+    const int arc_count = static_cast<int>(package.arcs.size() / 2);
     auto &loaded = partitions_[package.partition_id];
-    loaded.package = package;
+    loaded.partition_id = partition_id;
+    loaded.constraint_endpoints = std::move(package.constraint_endpoints);
     loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
-        package.local_node_count, static_cast<int>(package.arcs.size() / 2),
-        std::move(arcs), package.arc_capacities, package.terminal_capacities);
+        local_node_count, arc_count, std::move(package.arcs),
+        std::move(package.arc_capacities),
+        std::move(package.terminal_capacities));
 
-    for (const auto &binding : package.constraint_endpoints) {
+    for (const auto &binding : loaded.constraint_endpoints) {
       addConstraintEndpoint(&loaded, binding);
     }
   }
@@ -145,7 +157,7 @@ public:
     std::unordered_set<int> seen_partition_ids;
     for (const auto &request : requests) {
       auto &loaded = loadedPartitionForRequest(request);
-      if (!seen_partition_ids.insert(loaded.package.partition_id).second) {
+      if (!seen_partition_ids.insert(loaded.partition_id).second) {
         throw std::runtime_error(
             "batch solve requests must target distinct partitions");
       }
@@ -176,18 +188,6 @@ public:
     }
     for (auto &[partition_id, loaded] : partitions_) {
       (void)partition_id;
-      for (auto &capacity : loaded.package.arc_capacities) {
-        capacity =
-            checkedScaleInt(capacity, factor, saturate_capacity_overflow);
-      }
-      for (auto &capacity : loaded.package.terminal_capacities) {
-        capacity =
-            checkedScaleInt(capacity, factor, saturate_capacity_overflow);
-      }
-      for (auto &binding : loaded.package.constraint_endpoints) {
-        binding.alpha = checkedScaleLong(binding.alpha, factor);
-        binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
-      }
       for (auto &constraint_arc : loaded.constraint_arcs) {
         constraint_arc.alpha = checkedScaleLong(constraint_arc.alpha, factor);
         constraint_arc.last_alpha =
@@ -199,7 +199,8 @@ public:
 
 private:
   struct LoadedPartition {
-    PartitionPackage package;
+    int partition_id = -1;
+    std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::unique_ptr<PrimalDualMinCutSolver> solver;
     std::list<DualDecompositionConstraintArc> constraint_arcs;
     std::unordered_map<int, DualDecompositionConstraintArcReference>
@@ -217,20 +218,6 @@ private:
       throw std::overflow_error("objective scale promotion overflow");
     }
     return value * scale;
-  }
-
-  static int checkedScaleInt(int value, long scale,
-                             bool saturate_capacity_overflow = false) {
-    const long result = checkedScaleLong(value, scale);
-    if (result > std::numeric_limits<int>::max() ||
-        result < std::numeric_limits<int>::min()) {
-      if (saturate_capacity_overflow) {
-        return result < 0 ? std::numeric_limits<int>::min()
-                          : std::numeric_limits<int>::max();
-      }
-      throw std::overflow_error("objective scale promotion exceeds int");
-    }
-    return static_cast<int>(result);
   }
 
   static void validatePackage(const PartitionPackage &package) {
@@ -299,10 +286,8 @@ private:
                                std::to_string(binding.constraint_id));
     }
 
-    const int source_partition =
-        binding.is_source ? loaded->package.partition_id : -1;
-    const int target_partition =
-        binding.is_source ? -1 : loaded->package.partition_id;
+    const int source_partition = binding.is_source ? loaded->partition_id : -1;
+    const int target_partition = binding.is_source ? -1 : loaded->partition_id;
     const int source_local_index = binding.is_source ? binding.local_index : -1;
     const int target_local_index = binding.is_source ? -1 : binding.local_index;
     loaded->constraint_arcs.emplace_back(
@@ -346,7 +331,7 @@ private:
 
     PartitionSolveResult result;
     result.round_id = request.round_id;
-    result.partition_id = loaded->package.partition_id;
+    result.partition_id = loaded->partition_id;
     result.lower_bound = loaded->solver->getMinCutValue();
     result.regularization_budget =
         loaded->solver->getLastRegularizationBudget();
@@ -358,8 +343,8 @@ private:
         loaded->solver->getLastRegularizationActiveSinkCount();
 
     result.constrained_labels.reserve(
-        loaded->package.constraint_endpoints.size());
-    for (const auto &binding : loaded->package.constraint_endpoints) {
+        loaded->constraint_endpoints.size());
+    for (const auto &binding : loaded->constraint_endpoints) {
       result.constrained_labels.push_back(ConstraintLabel{
           binding.constraint_id, binding.global_node_id, binding.local_index,
           loaded->solver->getMinCutSolution(binding.local_index)});

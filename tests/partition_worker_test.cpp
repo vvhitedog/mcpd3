@@ -307,6 +307,107 @@ void disabledPartitionPackageExportPreservesNativeSolve() {
           "native-only solve should run without exported packages");
 }
 
+void requirePackagesEqual(const mcpd3::PartitionPackage &lhs,
+                          const mcpd3::PartitionPackage &rhs) {
+  require(lhs.partition_id == rhs.partition_id, "partition id differs");
+  require(lhs.local_node_count == rhs.local_node_count,
+          "local node count differs");
+  require(lhs.arcs == rhs.arcs, "package arcs differ");
+  require(lhs.arc_capacities == rhs.arc_capacities,
+          "package arc capacities differ");
+  require(lhs.terminal_capacities == rhs.terminal_capacities,
+          "package terminal capacities differ");
+  require(lhs.local_to_global == rhs.local_to_global,
+          "package local_to_global differs");
+  require(lhs.constraint_endpoints.size() ==
+              rhs.constraint_endpoints.size(),
+          "constraint endpoint count differs");
+  for (size_t i = 0; i < lhs.constraint_endpoints.size(); ++i) {
+    const auto &left = lhs.constraint_endpoints[i];
+    const auto &right = rhs.constraint_endpoints[i];
+    require(left.constraint_id == right.constraint_id,
+            "constraint endpoint id differs");
+    require(left.global_node_id == right.global_node_id,
+            "constraint endpoint global node differs");
+    require(left.local_index == right.local_index,
+            "constraint endpoint local index differs");
+    require(left.is_source == right.is_source,
+            "constraint endpoint side differs");
+    require(left.alpha == right.alpha, "constraint endpoint alpha differs");
+    require(left.last_alpha == right.last_alpha,
+            "constraint endpoint last alpha differs");
+    require(left.alpha_momentum == right.alpha_momentum,
+            "constraint endpoint alpha momentum differs");
+  }
+}
+
+void packageOnlyExportMatchesSolverBackedExport() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::DualDecomposition solver_backed(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  auto package_only_options = options;
+  package_only_options.construct_solvers = false;
+  mcpd3::DualDecomposition package_only(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, package_only_options);
+
+  const auto &solver_packages = solver_backed.getPartitionPackages();
+  const auto &package_only_packages = package_only.getPartitionPackages();
+  require(solver_packages.size() == package_only_packages.size(),
+          "package-only export count should match solver-backed export");
+  for (size_t i = 0; i < solver_packages.size(); ++i) {
+    requirePackagesEqual(solver_packages[i], package_only_packages[i]);
+  }
+
+  bool solve_threw = false;
+  try {
+    package_only.solve();
+  } catch (const std::runtime_error &e) {
+    solve_threw =
+        std::string(e.what()).find("requires constructed solvers") !=
+        std::string::npos;
+  }
+  require(solve_threw, "package-only DualDecomposition should reject solve");
+
+  auto invalid_options = package_only_options;
+  invalid_options.emit_partition_packages = false;
+  bool invalid_threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/2,
+        /*nnode=*/2,
+        /*narc=*/1,
+        /*arcs=*/std::vector<int>{0, 1},
+        /*arc_capacities=*/std::vector<int>{3, 5},
+        /*terminal_capacities=*/std::vector<int>{2, -4}, invalid_options);
+  } catch (const std::runtime_error &e) {
+    invalid_threw =
+        std::string(e.what()).find("solver construction") !=
+        std::string::npos;
+  }
+  require(invalid_threw,
+          "package-only construction should require package export");
+}
+
 mcpd3::DualDecomposition makeTinyDualDecomposition() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -2438,6 +2539,7 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     disabledPartitionPackageExportPreservesNativeSolve();
+    packageOnlyExportMatchesSolverBackedExport();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();

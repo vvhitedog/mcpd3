@@ -95,6 +95,7 @@ struct DualDecompositionOptions {
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
   bool emit_partition_packages = true;
+  bool construct_solvers = true;
   bool saturate_capacity_overflow = false;
   bool verbose = true;
   long min_step_size = 1;
@@ -221,6 +222,7 @@ public:
   }
 
   void runPrimalSolutionDecodingStep(bool do_narrow_band_decode = false) {
+    requireConstructedSolvers("primal decoding");
     for (int i = 0; i < npartition_; ++i) {
       const auto &min_cut_sub_graph = min_cut_sub_graphs_[i];
       const auto &solver = solvers_[i];
@@ -291,6 +293,7 @@ public:
 
   template <bool attempt_decoding, typename Decoder>
   void solve(Decoder decoder) {
+    requireConstructedSolvers("solve");
     const int scaling_factor = 10;
     long step_size = options_.initial_step_size;
     scale_ = options_.objective_scale;
@@ -349,6 +352,7 @@ public:
   OptimizationStatus runOptimizationScale(int nstep, long step_size,
                                           int max_cycle_count = 2,
                                           int use_momentum = false) {
+    requireConstructedSolvers("runOptimizationScale");
     OptimizationStatus opt_status = ITERATION_COUNT_EXCEEDED;
     const bool report_progress = dualdecomp_progress_enabled();
     const auto scale_start = std::chrono::steady_clock::now();
@@ -704,6 +708,7 @@ public:
   }
 
   void scaleProblem(long scale) {
+    requireConstructedSolvers("scaleProblem");
     if (scale <= 0) {
       throw std::runtime_error("problem scale factor must be positive");
     }
@@ -861,6 +866,25 @@ private:
     if (options_.max_objective_scale_promotions < 0) {
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
+    }
+    if (!options_.construct_solvers) {
+      if (!options_.emit_partition_packages) {
+        throw std::runtime_error(
+            "solver construction can only be disabled when partition package "
+            "export is enabled");
+      }
+      if (options_.track_primal_upper_bound) {
+        throw std::runtime_error(
+            "solver construction can only be disabled when primal upper bound "
+            "tracking is disabled");
+      }
+    }
+  }
+
+  void requireConstructedSolvers(const char *operation) const {
+    if (!options_.construct_solvers) {
+      throw std::runtime_error(std::string(operation) +
+                               " requires constructed solvers");
     }
   }
 
@@ -1150,16 +1174,28 @@ private:
         auto &package = partition_packages_[partition];
         package.partition_id = partition;
         package.local_node_count = min_cut_sub_graph.graph.nnode;
-        package.arcs = min_cut_sub_graph.graph.arcs;
-        package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
-        package.terminal_capacities =
-            min_cut_sub_graph.graph.terminal_capacities;
-        package.local_to_global = min_cut_sub_graph.local_to_global;
+        if (options_.construct_solvers) {
+          package.arcs = min_cut_sub_graph.graph.arcs;
+          package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
+          package.terminal_capacities =
+              min_cut_sub_graph.graph.terminal_capacities;
+          package.local_to_global = min_cut_sub_graph.local_to_global;
+        } else {
+          package.arcs = std::move(min_cut_sub_graph.graph.arcs);
+          package.arc_capacities =
+              std::move(min_cut_sub_graph.graph.arc_capacities);
+          package.terminal_capacities =
+              std::move(min_cut_sub_graph.graph.terminal_capacities);
+          package.local_to_global =
+              std::move(min_cut_sub_graph.local_to_global);
+        }
         package.constraint_endpoints.clear();
       }
 
-      solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
-          std::move(min_cut_sub_graph.graph)));
+      if (options_.construct_solvers) {
+        solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
+            std::move(min_cut_sub_graph.graph)));
+      }
       ++solver_done;
       dualdecomp_progress_report("dd_create_solvers", solver_done, npartition_,
                                  solver_start);
@@ -1215,10 +1251,12 @@ private:
               /*local_index_source=*/local_index_source,
               /*local_index_target=*/local_index_target);
           auto arc_reference = --constraint_arcs.end();
-          solvers_[partition_source]->addSourceDualDecompositionConstraint(
-              arc_reference);
-          solvers_[partition_target]->addTargetDualDecompositionConstraint(
-              arc_reference);
+          if (options_.construct_solvers) {
+            solvers_[partition_source]->addSourceDualDecompositionConstraint(
+                arc_reference);
+            solvers_[partition_target]->addTargetDualDecompositionConstraint(
+                arc_reference);
+          }
           if (options_.emit_partition_packages) {
             partition_packages_[partition_source]
                 .constraint_endpoints.push_back(
@@ -1266,6 +1304,16 @@ private:
     }
     partitions_.clear();
     partitions_.shrink_to_fit();
+    if (!options_.construct_solvers) {
+      constraint_arc_map_.clear();
+      constraint_arc_map_.shrink_to_fit();
+      min_cut_sub_graphs_.clear();
+      min_cut_sub_graphs_.shrink_to_fit();
+      primal_solution_.clear();
+      primal_solution_.shrink_to_fit();
+      best_primal_solution_.clear();
+      best_primal_solution_.shrink_to_fit();
+    }
     dualdecomp_progress_report("dd_initialize_decomposition_total", 1, 1,
                                init_start);
     if (options_.verbose) {
