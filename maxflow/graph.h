@@ -59,6 +59,7 @@ Vision (ICCV), 2005
 #define __GRAPH_H__
 
 #include "block.h"
+#include <cstddef>
 #include <string.h>
 #include <unordered_set>
 
@@ -183,6 +184,10 @@ public:
   int get_arc_num() { return (int)(arc_last - arcs); }
   void get_arc_ends(arc_id a, node_id &i,
                     node_id &j); // returns i,j to that a = i->j
+  static std::size_t estimated_node_array_bytes(int node_num_max);
+  static std::size_t estimated_arc_array_bytes(int edge_num_max);
+  static std::size_t estimated_storage_bytes(int node_num_max,
+                                             int edge_num_max);
 
   ///////////////////////////////////////////////////
   // 3. Functions for reading residual capacities. //
@@ -377,6 +382,34 @@ private:
 ///////////////////////////////////////
 // Implementation - inline functions //
 ///////////////////////////////////////
+
+template <typename captype, typename tcaptype, typename flowtype>
+inline std::size_t
+Graph<captype, tcaptype, flowtype>::estimated_node_array_bytes(
+    int node_num_max) {
+  if (node_num_max < 16) {
+    node_num_max = 16;
+  }
+  return static_cast<std::size_t>(node_num_max) * sizeof(node);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+inline std::size_t
+Graph<captype, tcaptype, flowtype>::estimated_arc_array_bytes(
+    int edge_num_max) {
+  if (edge_num_max < 16) {
+    edge_num_max = 16;
+  }
+  return 2 * static_cast<std::size_t>(edge_num_max) * sizeof(arc);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+inline std::size_t
+Graph<captype, tcaptype, flowtype>::estimated_storage_bytes(int node_num_max,
+                                                            int edge_num_max) {
+  return estimated_node_array_bytes(node_num_max) +
+         estimated_arc_array_bytes(edge_num_max);
+}
 
 template <typename captype, typename tcaptype, typename flowtype>
 inline typename Graph<captype, tcaptype, flowtype>::node_id

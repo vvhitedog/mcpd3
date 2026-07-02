@@ -343,6 +343,31 @@ public:
 
   int getMinCutSolution(int index) const { return x_[index]; }
 
+  struct MemoryEstimate {
+    std::size_t bk_node_bytes = 0;
+    std::size_t bk_arc_bytes = 0;
+    std::size_t bk_total_bytes = 0;
+    std::size_t solver_vector_bytes = 0;
+    std::size_t total_bytes = 0;
+  };
+
+  static MemoryEstimate estimateMemoryBytes(int nnode, int narc) {
+    using EstimateGraph =
+        Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
+    MemoryEstimate estimate;
+    estimate.bk_node_bytes = EstimateGraph::estimated_node_array_bytes(nnode);
+    estimate.bk_arc_bytes = EstimateGraph::estimated_arc_array_bytes(narc);
+    estimate.bk_total_bytes =
+        estimate.bk_node_bytes + estimate.bk_arc_bytes;
+    const auto arc_int_count = 5 * static_cast<std::size_t>(narc);
+    const auto node_int_count = 3 * static_cast<std::size_t>(nnode);
+    estimate.solver_vector_bytes =
+        (arc_int_count + node_int_count) * sizeof(int);
+    estimate.total_bytes =
+        estimate.bk_total_bytes + estimate.solver_vector_bytes;
+    return estimate;
+  }
+
   void setMinCutSolution(const std::vector<bool> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();

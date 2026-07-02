@@ -69,6 +69,30 @@ void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
   require(subtract_threw, "certified lower bound underflow should be detected");
 }
 
+void solverMemoryEstimateReportsBkAndVectorBytes() {
+  using GraphType = Graph<int, int, long>;
+  require(GraphType::estimated_node_array_bytes(1) ==
+              GraphType::estimated_node_array_bytes(16),
+          "BK node estimate should include constructor minimum capacity");
+  require(GraphType::estimated_arc_array_bytes(1) ==
+              GraphType::estimated_arc_array_bytes(16),
+          "BK arc estimate should include constructor minimum capacity");
+
+  const auto estimate =
+      mcpd3::PrimalDualMinCutSolver::estimateMemoryBytes(/*nnode=*/2,
+                                                         /*narc=*/1);
+  require(estimate.bk_node_bytes > 0, "BK node estimate should be positive");
+  require(estimate.bk_arc_bytes > 0, "BK arc estimate should be positive");
+  require(estimate.bk_total_bytes ==
+              estimate.bk_node_bytes + estimate.bk_arc_bytes,
+          "BK total estimate should sum node and arc arrays");
+  require(estimate.solver_vector_bytes == ((5 * 1 + 3 * 2) * sizeof(int)),
+          "solver vector estimate should account for arc and node vectors");
+  require(estimate.total_bytes ==
+              estimate.bk_total_bytes + estimate.solver_vector_bytes,
+          "solver total estimate should include BK and solver vectors");
+}
+
 mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
   mcpd3::PartitionPackage package;
   package.partition_id = 3;
@@ -2536,6 +2560,7 @@ void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
 int main() {
   try {
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
+    solverMemoryEstimateReportsBkAndVectorBytes();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     exportedPartitionPackagesMatchDualDecompositionRound();
     disabledPartitionPackageExportPreservesNativeSolve();
