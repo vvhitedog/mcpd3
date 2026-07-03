@@ -208,6 +208,10 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
                            "streaming eviction solve");
   require(streaming.residentPartitionCountForTesting() == 1,
           "streaming worker should keep only one resident partition");
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "streaming eviction should persist warm solver state");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "streaming worker should not restore warm state before reload");
 
   mcpd3::PartitionSolveRequest third;
   third.round_id = 3;
@@ -223,6 +227,10 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
                            "streaming reload with alpha update");
   require(streaming.residentPartitionCountForTesting() == 1,
           "streaming reload should preserve the resident budget");
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "streaming reload should evict the previous resident warm state");
+  require(streaming.warmStateRestoreCountForTesting() == 1,
+          "streaming reload should restore persisted warm solver state");
 }
 
 void streamingWorkerScalesEvictedDiskPayload() {
@@ -254,6 +262,8 @@ void streamingWorkerScalesEvictedDiskPayload() {
   second.partition_id = 1;
   (void)streaming.solveRound(second);
   (void)reference.solveRound(second);
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "streaming scale test should persist warm state before scaling");
 
   streaming.scaleObjective(/*factor=*/2);
   reference.scaleObjective(/*factor=*/2);
@@ -269,6 +279,10 @@ void streamingWorkerScalesEvictedDiskPayload() {
   requireSolveResultsMatch(streaming.solveRound(after_scale),
                            reference.solveRound(after_scale),
                            "streaming scaled evicted payload");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "streaming worker should not restore stale warm state after scaling");
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "streaming scaled reload should persist the evicted resident state");
 }
 
 struct DirectSolverResult {

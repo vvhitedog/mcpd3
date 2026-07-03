@@ -40,6 +40,28 @@ inline bool primaldual_timing_enabled() {
 
 class PrimalDualMinCutSolver {
 public:
+  using MaxflowGraph =
+      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
+
+  struct WarmState {
+    std::vector<int> v_flow;
+    std::vector<int> d_flow;
+    std::vector<int> x;
+    bool is_first_iteration = true;
+    bool is_first_iteration_of_new_scale = true;
+    bool has_solution = false;
+    long mincut_value = 0;
+    std::vector<int> cached_lagrange_multipliers;
+    std::vector<int> cached_last_lagrange_multipliers;
+    int regularization_str = 0;
+    long last_regularization_budget = 0;
+    long last_regularization_contribution = 0;
+    long last_regularization_anchor_sink_count = 0;
+    long last_regularization_active_sink_count = 0;
+    std::vector<unsigned char> regularization_anchor_sink;
+    MaxflowGraph::ReusableState maxflow_graph_state;
+  };
+
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<int> arc_capacities,
                          std::vector<int> terminal_capacities)
@@ -378,6 +400,66 @@ public:
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
     has_solution_ = true;
+  }
+
+  WarmState captureWarmState() const {
+    WarmState state;
+    state.v_flow = v_flow_;
+    state.d_flow = d_flow_;
+    state.x = x_;
+    state.is_first_iteration = is_first_iteration_;
+    state.is_first_iteration_of_new_scale = is_first_iteration_of_new_scale_;
+    state.has_solution = has_solution_;
+    state.mincut_value = mincut_value_;
+    state.cached_lagrange_multipliers = cached_lagrange_multipliers_;
+    state.cached_last_lagrange_multipliers =
+        cached_last_lagrange_multipliers_;
+    state.regularization_str = regularization_str_;
+    state.last_regularization_budget = last_regularization_budget_;
+    state.last_regularization_contribution =
+        last_regularization_contribution_;
+    state.last_regularization_anchor_sink_count =
+        last_regularization_anchor_sink_count_;
+    state.last_regularization_active_sink_count =
+        last_regularization_active_sink_count_;
+    state.regularization_anchor_sink = regularization_anchor_sink_;
+    state.maxflow_graph_state = maxflow_graph_.captureReusableState();
+    return state;
+  }
+
+  void restoreWarmState(const WarmState &state) {
+    if (state.v_flow.size() != static_cast<size_t>(narc_) ||
+        state.d_flow.size() != static_cast<size_t>(nnode_) ||
+        state.x.size() != static_cast<size_t>(nnode_)) {
+      throw std::runtime_error("solver warm state shape does not match graph");
+    }
+    v_flow_ = state.v_flow;
+    d_flow_ = state.d_flow;
+    x_ = state.x;
+    is_first_iteration_ = state.is_first_iteration;
+    is_first_iteration_of_new_scale_ = state.is_first_iteration_of_new_scale;
+    has_solution_ = state.has_solution;
+    mincut_value_ = state.mincut_value;
+    cached_lagrange_multipliers_ = state.cached_lagrange_multipliers;
+    cached_last_lagrange_multipliers_ =
+        state.cached_last_lagrange_multipliers;
+    regularization_str_ = state.regularization_str;
+    last_regularization_budget_ = state.last_regularization_budget;
+    last_regularization_contribution_ =
+        state.last_regularization_contribution;
+    last_regularization_anchor_sink_count_ =
+        state.last_regularization_anchor_sink_count;
+    last_regularization_active_sink_count_ =
+        state.last_regularization_active_sink_count;
+    regularization_anchor_sink_ = state.regularization_anchor_sink;
+    incremental_mincut_nodes_.clear();
+    incremental_arcs_.clear();
+    maxflow_changed_list_.Reset();
+    dual_decomposition_local_indices_set_.clear();
+    for (const auto &index : dual_decomposition_local_indices_) {
+      dual_decomposition_local_indices_set_.insert(index);
+    }
+    maxflow_graph_.restoreReusableState(state.maxflow_graph_state);
   }
 
 private:
@@ -868,8 +950,6 @@ private:
   std::vector<int> v_flow_; // flow on the arcs
   std::vector<int> d_flow_; // flow on the nodes
   std::vector<int> x_;      // mincut solution
-  using MaxflowGraph =
-      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;

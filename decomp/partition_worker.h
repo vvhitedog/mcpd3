@@ -304,6 +304,17 @@ public:
     loaded.solver->setMinCutSolution(solution);
   }
 
+  PrimalDualMinCutSolver::WarmState warmState(int partition_id) const {
+    const auto &loaded = loadedPartitionById(partition_id);
+    return loaded.solver->captureWarmState();
+  }
+
+  void restoreWarmState(int partition_id,
+                        const PrimalDualMinCutSolver::WarmState &state) {
+    auto &loaded = loadedPartitionById(partition_id);
+    loaded.solver->restoreWarmState(state);
+  }
+
 private:
   static long checkedScaleLong(long value, long scale) {
     if (scale <= 0) {
@@ -543,6 +554,9 @@ public:
     stored.path = storage_directory_ /
                   ("partition_" + std::to_string(package.partition_id) +
                    ".bin");
+    stored.warm_state_path =
+        storage_directory_ /
+        ("partition_" + std::to_string(package.partition_id) + ".warm");
     stored.constraint_endpoints = std::move(package.constraint_endpoints);
     std::sort(stored.constraint_endpoints.begin(),
               stored.constraint_endpoints.end(),
@@ -623,11 +637,17 @@ public:
       if (stored.resident_worker) {
         stored.resident_worker->scaleObjective(factor,
                                                saturate_capacity_overflow);
+      } else {
+        invalidateWarmState(&stored);
       }
     }
   }
 
   std::uint64_t residentBytesForTesting() const { return resident_bytes_; }
+  long warmStateWriteCountForTesting() const { return warm_state_write_count_; }
+  long warmStateRestoreCountForTesting() const {
+    return warm_state_restore_count_;
+  }
   long residentPartitionCountForTesting() const {
     long count = 0;
     for (const auto &entry : partitions_) {
@@ -644,9 +664,11 @@ private:
     int local_node_count = 0;
     int local_arc_count = 0;
     std::filesystem::path path;
+    std::filesystem::path warm_state_path;
     std::uint64_t resident_bytes = 0;
     std::uint64_t last_used = 0;
     bool has_solution = false;
+    bool has_warm_state = false;
     std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::vector<int> last_solution;
     std::unique_ptr<InProcessPartitionWorker> resident_worker;
@@ -683,36 +705,48 @@ private:
     return value;
   }
 
-  static void writeIntVector(std::ostream &out,
-                             const std::vector<int> &values,
-                             const std::string &name) {
+  template <typename T>
+  static void writeVector(std::ostream &out, const std::vector<T> &values,
+                          const std::string &name) {
     const std::uint64_t size = values.size();
     writeScalar(out, size, name + " size");
     if (!values.empty()) {
       out.write(reinterpret_cast<const char *>(values.data()),
-                static_cast<std::streamsize>(values.size() * sizeof(int)));
+                static_cast<std::streamsize>(values.size() * sizeof(T)));
       if (!out) {
         throw std::runtime_error("failed to write " + name);
       }
     }
   }
 
-  static std::vector<int> readIntVector(std::istream &in,
-                                        const std::string &name) {
+  template <typename T>
+  static std::vector<T> readVector(std::istream &in,
+                                   const std::string &name) {
     const auto size = readScalar<std::uint64_t>(in, name + " size");
     if (size >
         static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       throw std::runtime_error(name + " is too large");
     }
-    std::vector<int> values(static_cast<std::size_t>(size));
+    std::vector<T> values(static_cast<std::size_t>(size));
     if (!values.empty()) {
       in.read(reinterpret_cast<char *>(values.data()),
-              static_cast<std::streamsize>(values.size() * sizeof(int)));
+              static_cast<std::streamsize>(values.size() * sizeof(T)));
       if (!in) {
         throw std::runtime_error("failed to read " + name);
       }
     }
     return values;
+  }
+
+  static void writeIntVector(std::ostream &out,
+                             const std::vector<int> &values,
+                             const std::string &name) {
+    writeVector(out, values, name);
+  }
+
+  static std::vector<int> readIntVector(std::istream &in,
+                                        const std::string &name) {
+    return readVector<int>(in, name);
   }
 
   static void writePackagePayload(const std::filesystem::path &path,
@@ -738,6 +772,131 @@ private:
                                path.string());
     }
     std::filesystem::rename(tmp_path, path);
+  }
+
+  static void writeWarmState(
+      const std::filesystem::path &path,
+      const PrimalDualMinCutSolver::WarmState &state) {
+    const auto tmp_path = path.string() + ".tmp";
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error("failed to open streaming warm-state file for " +
+                               path.string());
+    }
+    const std::uint32_t magic = 0x4d435357;
+    const std::uint32_t version = 1;
+    writeScalar(out, magic, "warm state magic");
+    writeScalar(out, version, "warm state version");
+    writeVector(out, state.v_flow, "v flow");
+    writeVector(out, state.d_flow, "d flow");
+    writeVector(out, state.x, "min cut labels");
+    writeScalar(out, static_cast<std::uint8_t>(state.is_first_iteration ? 1 : 0),
+                "is first iteration");
+    writeScalar(out,
+                static_cast<std::uint8_t>(
+                    state.is_first_iteration_of_new_scale ? 1 : 0),
+                "is first iteration of new scale");
+    writeScalar(out, static_cast<std::uint8_t>(state.has_solution ? 1 : 0),
+                "has solution");
+    writeScalar(out, state.mincut_value, "mincut value");
+    writeVector(out, state.cached_lagrange_multipliers,
+                "cached lagrange multipliers");
+    writeVector(out, state.cached_last_lagrange_multipliers,
+                "cached last lagrange multipliers");
+    writeScalar(out, state.regularization_str, "regularization strength");
+    writeScalar(out, state.last_regularization_budget,
+                "last regularization budget");
+    writeScalar(out, state.last_regularization_contribution,
+                "last regularization contribution");
+    writeScalar(out, state.last_regularization_anchor_sink_count,
+                "last regularization anchor sink count");
+    writeScalar(out, state.last_regularization_active_sink_count,
+                "last regularization active sink count");
+    writeVector(out, state.regularization_anchor_sink,
+                "regularization anchor sink");
+    const auto &graph_state = state.maxflow_graph_state;
+    writeScalar(out, graph_state.node_num, "warm graph node count");
+    writeScalar(out, graph_state.arc_num, "warm graph arc count");
+    writeScalar(out, graph_state.flow, "warm graph flow");
+    writeScalar(out, graph_state.maxflow_iteration,
+                "warm graph maxflow iteration");
+    writeScalar(out, graph_state.time, "warm graph time");
+    writeVector(out, graph_state.node_tr_caps, "warm graph node tr caps");
+    writeVector(out, graph_state.node_parent_arc_indices,
+                "warm graph node parent arc indices");
+    writeVector(out, graph_state.node_timestamps,
+                "warm graph node timestamps");
+    writeVector(out, graph_state.node_distances, "warm graph node distances");
+    writeVector(out, graph_state.node_is_sink, "warm graph node is sink");
+    writeVector(out, graph_state.arc_residual_capacities,
+                "warm graph arc residual capacities");
+    out.close();
+    if (!out) {
+      throw std::runtime_error("failed to flush streaming warm-state file " +
+                               path.string());
+    }
+    std::filesystem::rename(tmp_path, path);
+  }
+
+  static PrimalDualMinCutSolver::WarmState
+  readWarmState(const std::filesystem::path &path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+      throw std::runtime_error("failed to open streaming warm-state file " +
+                               path.string());
+    }
+    const auto magic = readScalar<std::uint32_t>(in, "warm state magic");
+    const auto version = readScalar<std::uint32_t>(in, "warm state version");
+    if (magic != 0x4d435357 || version != 1) {
+      throw std::runtime_error("invalid streaming warm-state file " +
+                               path.string());
+    }
+    PrimalDualMinCutSolver::WarmState state;
+    state.v_flow = readVector<int>(in, "v flow");
+    state.d_flow = readVector<int>(in, "d flow");
+    state.x = readVector<int>(in, "min cut labels");
+    state.is_first_iteration =
+        readScalar<std::uint8_t>(in, "is first iteration") != 0;
+    state.is_first_iteration_of_new_scale =
+        readScalar<std::uint8_t>(in, "is first iteration of new scale") != 0;
+    state.has_solution = readScalar<std::uint8_t>(in, "has solution") != 0;
+    state.mincut_value = readScalar<long>(in, "mincut value");
+    state.cached_lagrange_multipliers =
+        readVector<int>(in, "cached lagrange multipliers");
+    state.cached_last_lagrange_multipliers =
+        readVector<int>(in, "cached last lagrange multipliers");
+    state.regularization_str =
+        readScalar<int>(in, "regularization strength");
+    state.last_regularization_budget =
+        readScalar<long>(in, "last regularization budget");
+    state.last_regularization_contribution =
+        readScalar<long>(in, "last regularization contribution");
+    state.last_regularization_anchor_sink_count =
+        readScalar<long>(in, "last regularization anchor sink count");
+    state.last_regularization_active_sink_count =
+        readScalar<long>(in, "last regularization active sink count");
+    state.regularization_anchor_sink =
+        readVector<unsigned char>(in, "regularization anchor sink");
+    auto &graph_state = state.maxflow_graph_state;
+    graph_state.node_num = readScalar<int>(in, "warm graph node count");
+    graph_state.arc_num = readScalar<int>(in, "warm graph arc count");
+    graph_state.flow = readScalar<long>(in, "warm graph flow");
+    graph_state.maxflow_iteration =
+        readScalar<int>(in, "warm graph maxflow iteration");
+    graph_state.time = readScalar<long>(in, "warm graph time");
+    graph_state.node_tr_caps =
+        readVector<int>(in, "warm graph node tr caps");
+    graph_state.node_parent_arc_indices =
+        readVector<int>(in, "warm graph node parent arc indices");
+    graph_state.node_timestamps =
+        readVector<long>(in, "warm graph node timestamps");
+    graph_state.node_distances =
+        readVector<int>(in, "warm graph node distances");
+    graph_state.node_is_sink =
+        readVector<unsigned char>(in, "warm graph node is sink");
+    graph_state.arc_residual_capacities =
+        readVector<int>(in, "warm graph arc residual capacities");
+    return state;
   }
 
   static PartitionPackage readPackagePayload(const StoredPartition &stored) {
@@ -820,7 +979,11 @@ private:
     auto package = readPackagePayload(*stored);
     stored->resident_worker = std::make_unique<InProcessPartitionWorker>();
     stored->resident_worker->loadPartition(std::move(package));
-    if (stored->has_solution) {
+    if (stored->has_warm_state) {
+      stored->resident_worker->restoreWarmState(
+          stored->partition_id, readWarmState(stored->warm_state_path));
+      ++warm_state_restore_count_;
+    } else if (stored->has_solution) {
       stored->resident_worker->restoreMinCutSolution(stored->partition_id,
                                                      stored->last_solution);
     }
@@ -851,18 +1014,30 @@ private:
     }
   }
 
-  void evictResident(StoredPartition *stored) {
+  void evictResident(StoredPartition *stored, bool persist_warm_state = true) {
     if (!stored->resident_worker) {
       return;
+    }
+    if (persist_warm_state) {
+      writeWarmState(stored->warm_state_path,
+                     stored->resident_worker->warmState(stored->partition_id));
+      stored->has_warm_state = true;
+      ++warm_state_write_count_;
     }
     stored->resident_worker.reset();
     resident_bytes_ -= stored->resident_bytes;
   }
 
+  void invalidateWarmState(StoredPartition *stored) {
+    stored->has_warm_state = false;
+    std::error_code ec;
+    std::filesystem::remove(stored->warm_state_path, ec);
+  }
+
   void evictAll() {
     for (auto &[partition_id, stored] : partitions_) {
       (void)partition_id;
-      evictResident(&stored);
+      evictResident(&stored, /*persist_warm_state=*/false);
     }
   }
 
@@ -871,6 +1046,8 @@ private:
   bool owns_storage_directory_ = false;
   std::uint64_t resident_bytes_ = 0;
   std::uint64_t use_clock_ = 0;
+  long warm_state_write_count_ = 0;
+  long warm_state_restore_count_ = 0;
   std::unordered_map<int, StoredPartition> partitions_;
 };
 

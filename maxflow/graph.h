@@ -60,8 +60,10 @@ Vision (ICCV), 2005
 
 #include "block.h"
 #include <cstddef>
+#include <stdexcept>
 #include <string.h>
 #include <unordered_set>
+#include <vector>
 
 #include <assert.h>
 // NOTE: in UNIX you need to use -DNDEBUG preprocessor option to supress
@@ -188,6 +190,23 @@ public:
   static std::size_t estimated_arc_array_bytes(int edge_num_max);
   static std::size_t estimated_storage_bytes(int node_num_max,
                                              int edge_num_max);
+
+  struct ReusableState {
+    int node_num = 0;
+    int arc_num = 0;
+    flowtype flow = 0;
+    int maxflow_iteration = 0;
+    long time = 0;
+    std::vector<tcaptype> node_tr_caps;
+    std::vector<int> node_parent_arc_indices;
+    std::vector<long> node_timestamps;
+    std::vector<int> node_distances;
+    std::vector<unsigned char> node_is_sink;
+    std::vector<captype> arc_residual_capacities;
+  };
+
+  ReusableState captureReusableState() const;
+  void restoreReusableState(const ReusableState &state);
 
   ///////////////////////////////////////////////////
   // 3. Functions for reading residual capacities. //
@@ -409,6 +428,100 @@ Graph<captype, tcaptype, flowtype>::estimated_storage_bytes(int node_num_max,
                                                             int edge_num_max) {
   return estimated_node_array_bytes(node_num_max) +
          estimated_arc_array_bytes(edge_num_max);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+inline typename Graph<captype, tcaptype, flowtype>::ReusableState
+Graph<captype, tcaptype, flowtype>::captureReusableState() const {
+  ReusableState state;
+  state.node_num = node_num;
+  state.arc_num = static_cast<int>(arc_last - arcs);
+  state.flow = flow;
+  state.maxflow_iteration = maxflow_iteration;
+  state.time = TIME;
+  state.node_tr_caps.reserve(static_cast<size_t>(state.node_num));
+  state.node_parent_arc_indices.reserve(static_cast<size_t>(state.node_num));
+  state.node_timestamps.reserve(static_cast<size_t>(state.node_num));
+  state.node_distances.reserve(static_cast<size_t>(state.node_num));
+  state.node_is_sink.reserve(static_cast<size_t>(state.node_num));
+  for (const node *i = nodes; i < node_last; ++i) {
+    state.node_tr_caps.push_back(i->tr_cap);
+    if (i->parent == NULL) {
+      state.node_parent_arc_indices.push_back(-1);
+    } else if (i->parent == ((arc *)1)) {
+      state.node_parent_arc_indices.push_back(-2);
+    } else if (i->parent == ((arc *)2)) {
+      state.node_parent_arc_indices.push_back(-3);
+    } else {
+      state.node_parent_arc_indices.push_back(
+          static_cast<int>(i->parent - arcs));
+    }
+    state.node_timestamps.push_back(i->TS);
+    state.node_distances.push_back(i->DIST);
+    state.node_is_sink.push_back(static_cast<unsigned char>(i->is_sink));
+  }
+  state.arc_residual_capacities.reserve(static_cast<size_t>(state.arc_num));
+  for (const arc *a = arcs; a < arc_last; ++a) {
+    state.arc_residual_capacities.push_back(a->r_cap);
+  }
+  return state;
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+inline void Graph<captype, tcaptype, flowtype>::restoreReusableState(
+    const ReusableState &state) {
+  const int current_node_num = node_num;
+  const int current_arc_num = static_cast<int>(arc_last - arcs);
+  if (state.node_num != current_node_num ||
+      state.arc_num != current_arc_num ||
+      state.node_tr_caps.size() != static_cast<size_t>(current_node_num) ||
+      state.node_parent_arc_indices.size() !=
+          static_cast<size_t>(current_node_num) ||
+      state.node_timestamps.size() != static_cast<size_t>(current_node_num) ||
+      state.node_distances.size() != static_cast<size_t>(current_node_num) ||
+      state.node_is_sink.size() != static_cast<size_t>(current_node_num) ||
+      state.arc_residual_capacities.size() !=
+          static_cast<size_t>(current_arc_num)) {
+    throw std::runtime_error("BK reusable state shape does not match graph");
+  }
+
+  if (nodeptr_block) {
+    delete nodeptr_block;
+    nodeptr_block = NULL;
+  }
+  queue_first[0] = queue_last[0] = NULL;
+  queue_first[1] = queue_last[1] = NULL;
+  orphan_first = orphan_last = NULL;
+  changed_list = NULL;
+  flow = state.flow;
+  maxflow_iteration = state.maxflow_iteration;
+  TIME = state.time;
+
+  for (int i = 0; i < current_node_num; ++i) {
+    nodes[i].tr_cap = state.node_tr_caps[static_cast<size_t>(i)];
+    nodes[i].next = NULL;
+    nodes[i].TS = state.node_timestamps[static_cast<size_t>(i)];
+    nodes[i].DIST = state.node_distances[static_cast<size_t>(i)];
+    nodes[i].is_sink = state.node_is_sink[static_cast<size_t>(i)] ? 1 : 0;
+    nodes[i].is_marked = 0;
+    nodes[i].is_in_changed_list = 0;
+    const int parent_index =
+        state.node_parent_arc_indices[static_cast<size_t>(i)];
+    if (parent_index == -1) {
+      nodes[i].parent = NULL;
+    } else if (parent_index == -2) {
+      nodes[i].parent = ((arc *)1);
+    } else if (parent_index == -3) {
+      nodes[i].parent = ((arc *)2);
+    } else if (parent_index >= 0 && parent_index < current_arc_num) {
+      nodes[i].parent = arcs + parent_index;
+    } else {
+      throw std::runtime_error("BK reusable state parent index is invalid");
+    }
+  }
+  for (int i = 0; i < current_arc_num; ++i) {
+    arcs[i].r_cap = state.arc_residual_capacities[static_cast<size_t>(i)];
+  }
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
