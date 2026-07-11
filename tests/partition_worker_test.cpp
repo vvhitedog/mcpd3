@@ -386,6 +386,45 @@ void inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate() {
   requireMatchesDirect(worker_second, direct_second, second_request.round_id);
 }
 
+void inProcessPartitionWorkerLoadsManyBoundaryEndpoints() {
+  constexpr int kEndpointCount = 256;
+  mcpd3::PartitionPackage package;
+  package.partition_id = 5;
+  package.local_node_count = kEndpointCount;
+  package.terminal_capacities.assign(kEndpointCount, 0);
+  package.local_to_global.reserve(kEndpointCount);
+  package.constraint_endpoints.reserve(kEndpointCount);
+  for (int i = 0; i < kEndpointCount; ++i) {
+    package.local_to_global.push_back(10000 + i);
+    package.constraint_endpoints.push_back(
+        mcpd3::ConstraintEndpointBinding{/*constraint_id=*/20000 + i,
+                                          /*global_node_id=*/10000 + i,
+                                          /*local_index=*/i,
+                                          /*is_source=*/(i % 2) == 0,
+                                          /*alpha=*/0,
+                                          /*last_alpha=*/0,
+                                          /*alpha_momentum=*/0});
+  }
+
+  mcpd3::InProcessPartitionWorker worker;
+  worker.loadPartition(std::move(package));
+
+  mcpd3::PartitionSolveRequest request;
+  request.round_id = 1;
+  request.partition_id = 5;
+  const auto result = worker.solveRound(request);
+  require(result.partition_id == 5, "many-endpoint partition id mismatch");
+  require(result.constrained_labels.size() == kEndpointCount,
+          "many-endpoint worker should return all boundary labels");
+  for (int i = 0; i < kEndpointCount; ++i) {
+    require(result.constrained_labels[static_cast<size_t>(i)].constraint_id ==
+                20000 + i,
+            "many-endpoint constraint id mismatch");
+    require(result.constrained_labels[static_cast<size_t>(i)].local_index == i,
+            "many-endpoint local index mismatch");
+  }
+}
+
 long countWorkerDisagreements(
     const std::vector<mcpd3::PartitionSolveResult> &results) {
   std::map<int, std::vector<int>> labels_by_constraint;
@@ -2798,6 +2837,7 @@ int main() {
     streamingWorkerMatchesInProcessAcrossEviction();
     streamingWorkerScalesEvictedDiskPayload();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
+    inProcessPartitionWorkerLoadsManyBoundaryEndpoints();
     exportedPartitionPackagesMatchDualDecompositionRound();
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();

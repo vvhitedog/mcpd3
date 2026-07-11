@@ -203,6 +203,7 @@ public:
     loaded.partition_id = partition_id;
     loaded.local_node_count = local_node_count;
     loaded.constraint_endpoints = std::move(package.constraint_endpoints);
+    loaded.constraint_arc_by_id.reserve(loaded.constraint_endpoints.size());
     loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
         local_node_count, arc_count, std::move(package.arcs),
         std::move(package.arc_capacities),
