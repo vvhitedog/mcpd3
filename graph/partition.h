@@ -60,18 +60,19 @@ inline void partition_progress_report(
   std::fflush(stderr);
 }
 
-std::vector<int> basic_graph_partition(int npartition, int narc, int nnode,
-                                       const std::vector<int> &arc) {
+inline std::vector<int> basic_graph_partition(int npartition, int narc,
+                                              int nnode,
+                                              const std::vector<int> &arc) {
   std::vector<int> partitions(nnode);
   int nnode_in_each_partition = (nnode + npartition - 1) / npartition;
   for (int i = 0; i < nnode; ++i) {
     partitions[i] = i / nnode_in_each_partition;
   }
-  return std::move(partitions);
+  return partitions;
 }
 
-std::vector<int> basic_graph_partition(int npartition,
-                                       const mcpd3::MinCutGraph &graph) {
+inline std::vector<int> basic_graph_partition(
+    int npartition, const mcpd3::MinCutGraph &graph) {
   return basic_graph_partition(npartition, graph.narc, graph.nnode, graph.arcs);
 }
 

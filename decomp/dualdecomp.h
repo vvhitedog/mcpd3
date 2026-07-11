@@ -141,6 +141,9 @@ public:
         max_regularized_objective_raw_(std::numeric_limits<long>::min()),
         best_upper_bound_(std::numeric_limits<long>::max()),
         current_upper_bound_(std::numeric_limits<long>::max()),
+        last_original_objective_raw_(0),
+        last_certified_lower_bound_raw_(0),
+        last_regularized_objective_raw_(0),
         last_disagreement_count_(0),
         last_disagreement_norm_sq_(0),
         last_regularization_budget_(0),
@@ -183,6 +186,15 @@ public:
                : double(best_upper_bound_) / scale_;
   }
   long getCurrentUpperBoundRaw() const { return current_upper_bound_; }
+  long getLastOriginalObjectiveRaw() const {
+    return last_original_objective_raw_;
+  }
+  long getLastCertifiedLowerBoundRaw() const {
+    return last_certified_lower_bound_raw_;
+  }
+  long getLastRegularizedObjectiveRaw() const {
+    return last_regularized_objective_raw_;
+  }
   long getLastDisagreementCount() const { return last_disagreement_count_; }
   double getLastDisagreementNormSq() const {
     return last_disagreement_norm_sq_;
@@ -432,6 +444,9 @@ public:
       const long lower_bound = certifiedOriginalLowerBoundRaw(
           original_objective, last_regularization_contribution_,
           last_regularization_budget_);
+      last_original_objective_raw_ = original_objective;
+      last_certified_lower_bound_raw_ = lower_bound;
+      last_regularized_objective_raw_ = regularized_objective;
       warnIfRegularizationBudgetExceeded(last_regularization_budget_,
                                          regularizationStrengthForStepSize(
                                              step_size));
@@ -1449,6 +1464,9 @@ private:
   long max_regularized_objective_raw_;
   long best_upper_bound_;
   long current_upper_bound_;
+  long last_original_objective_raw_;
+  long last_certified_lower_bound_raw_;
+  long last_regularized_objective_raw_;
   long last_disagreement_count_;
   double last_disagreement_norm_sq_;
   long last_regularization_budget_;
