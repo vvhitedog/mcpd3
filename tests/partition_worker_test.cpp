@@ -731,6 +731,28 @@ void directedStreamingDimacsMatchesGeneralReaderValue() {
   std::remove(path.c_str());
 }
 
+void directedStreamingDimacsUsesDeclaredNodeCount() {
+  const std::string path =
+      "/tmp/mcpd3-directed-streaming-declared-node-count-test.max";
+  {
+    std::ofstream out(path);
+    out << "c directed streaming reader declared node count test\n";
+    out << "p max 6 2\n";
+    out << "n 1 s\n";
+    out << "n 6 t\n";
+    out << "a 1 2 5\n";
+    out << "a 5 6 7\n";
+  }
+
+  auto directed_streaming = mcpd3::read_dimacs_directed_streaming(path);
+  require(directed_streaming.nnode == 4,
+          "directed streaming reader should preserve declared internal nodes");
+  require(directed_streaming.terminal_capacities ==
+              std::vector<int>({5, 0, 0, -7}),
+          "directed streaming reader should preserve isolated terminal slots");
+  std::remove(path.c_str());
+}
+
 void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -2843,6 +2865,7 @@ int main() {
     packageOnlyExportMatchesSolverBackedExport();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
+    directedStreamingDimacsUsesDeclaredNodeCount();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();

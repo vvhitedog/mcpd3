@@ -99,6 +99,69 @@ inline bool parse_char_token(const char *&p, char &value) {
   return true;
 }
 
+inline FILE *open_dimacs_file(const std::string &filename) {
+  FILE *stream = fopen(filename.c_str(), "r");
+  if (!stream) {
+    std::string err_msg = "failed to open file for reading: " + filename;
+    throw std::runtime_error(err_msg.c_str());
+  }
+  (void)setvbuf(stream, nullptr, _IOFBF, 1024 * 1024);
+  return stream;
+}
+
+struct DimacsHeader {
+  int declared_nodes = 0;
+  int declared_arcs = 0;
+  int source = -1;
+  int sink = -1;
+};
+
+inline DimacsHeader scan_dimacs_header(const std::string &filename) {
+  const int line_length = 1024;
+  char line[line_length];
+  DimacsHeader header;
+  FILE *stream = open_dimacs_file(filename);
+  while (fgets(line, line_length, stream)) {
+    switch (*line) {
+    case 'p': {
+      const char *p = line + 1;
+      p = skip_token(p); // max
+      if (!parse_int_token(p, header.declared_nodes) ||
+          !parse_int_token(p, header.declared_arcs)) {
+        fclose(stream);
+        throw std::runtime_error("p line is malformed in DIMACS file:" +
+                                 filename + "\n");
+      }
+      break;
+    }
+    case 'n': {
+      int node = 0;
+      char terminal = '\0';
+      const char *p = line + 1;
+      if (!parse_int_token(p, node) || !parse_char_token(p, terminal)) {
+        fclose(stream);
+        throw std::runtime_error("'n' line is malformed in DIMACS file:" +
+                                 filename + "\n");
+      }
+      if (terminal == 's') {
+        header.source = node;
+      } else if (terminal == 't') {
+        header.sink = node;
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    if (header.declared_nodes > 0 && header.declared_arcs >= 0 &&
+        header.source > 0 && header.sink > 0) {
+      break;
+    }
+  }
+  fclose(stream);
+  return header;
+}
+
 int remap_index(int original_index, int source_index, int sink_index) {
   int new_index = original_index;
   if (original_index > source_index) {
@@ -121,10 +184,7 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
   FILE *stream = nullptr;
   source = -1;
   sink = -1;
-  if (!(stream = fopen(filename.c_str(), "r"))) {
-    std::string err_msg = "failed to open file for reading: " + filename;
-    throw std::runtime_error(err_msg.c_str());
-  }
+  stream = open_dimacs_file(filename);
   while (fgets(line, line_length, stream)) {
     switch (*line) {
     case 'p':
@@ -265,9 +325,19 @@ MinCutGraph read_dimacs(const std::string &filename) {
 }
 
 MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
+  const auto header = _dimacs_implementation::scan_dimacs_header(filename);
   MinCutGraph g;
-  g.nnode = 0;
+  g.nnode = header.declared_nodes > 1 ? header.declared_nodes - 2 : 0;
   g.narc = 0;
+  if (header.declared_arcs > 0) {
+    const auto reserve_count =
+        static_cast<size_t>(2) * static_cast<size_t>(header.declared_arcs);
+    g.arcs.reserve(reserve_count);
+    g.arc_capacities.reserve(reserve_count);
+  }
+  if (g.nnode > 0) {
+    g.terminal_capacities.resize(g.nnode, 0);
+  }
 
   auto arc_op = [&](int s, int t, int cap) {
     g.nnode = std::max(g.nnode, s + 1);
@@ -282,7 +352,9 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   long imbalance = 0;
   auto term_op = [&](bool is_source, int n, int cap) {
     g.nnode = std::max(g.nnode, n + 1);
-    g.terminal_capacities.resize(g.nnode, 0);
+    if (static_cast<size_t>(n) >= g.terminal_capacities.size()) {
+      g.terminal_capacities.resize(static_cast<size_t>(n) + 1, 0);
+    }
     if (is_source) {
       auto old_cap = g.terminal_capacities[n];
       if (old_cap < 0) {
