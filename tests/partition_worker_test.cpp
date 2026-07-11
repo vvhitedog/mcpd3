@@ -173,6 +173,18 @@ void requireSolveResultsMatch(const mcpd3::PartitionSolveResult &actual,
                 expected.constrained_labels[i].label,
             context + ": label differs");
   }
+  require(actual.full_labels.size() == expected.full_labels.size(),
+          context + ": full label count differs");
+  for (size_t i = 0; i < actual.full_labels.size(); ++i) {
+    require(actual.full_labels[i].global_node_id ==
+                expected.full_labels[i].global_node_id,
+            context + ": full label global node differs");
+    require(actual.full_labels[i].local_index ==
+                expected.full_labels[i].local_index,
+            context + ": full label local index differs");
+    require(actual.full_labels[i].label == expected.full_labels[i].label,
+            context + ": full label value differs");
+  }
 }
 
 void streamingWorkerMatchesInProcessAcrossEviction() {
@@ -196,6 +208,7 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
   mcpd3::PartitionSolveRequest first;
   first.round_id = 1;
   first.partition_id = 0;
+  first.return_full_labels = true;
   requireSolveResultsMatch(streaming.solveRound(first),
                            reference.solveRound(first),
                            "streaming first solve");
@@ -203,6 +216,7 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
   mcpd3::PartitionSolveRequest second;
   second.round_id = 2;
   second.partition_id = 1;
+  second.return_full_labels = true;
   requireSolveResultsMatch(streaming.solveRound(second),
                            reference.solveRound(second),
                            "streaming eviction solve");
@@ -217,6 +231,7 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
   third.round_id = 3;
   third.partition_id = 0;
   third.regularization_strength = 1;
+  third.return_full_labels = true;
   third.alpha_updates.push_back(
       mcpd3::AlphaUpdate{/*constraint_id=*/10,
                           /*alpha=*/7,
@@ -386,6 +401,39 @@ void inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate() {
   requireMatchesDirect(worker_second, direct_second, second_request.round_id);
 }
 
+void inProcessPartitionWorkerReturnsFullLabelsOnRequest() {
+  auto package = makePackage(/*alpha=*/0, /*last_alpha=*/0);
+
+  mcpd3::InProcessPartitionWorker worker;
+  worker.loadPartition(package);
+
+  mcpd3::PartitionSolveRequest default_request;
+  default_request.round_id = 1;
+  default_request.partition_id = package.partition_id;
+  const auto default_result = worker.solveRound(default_request);
+  require(default_result.full_labels.empty(),
+          "worker should not return full labels unless requested");
+
+  mcpd3::PartitionSolveRequest full_request;
+  full_request.round_id = 2;
+  full_request.partition_id = package.partition_id;
+  full_request.return_full_labels = true;
+  const auto full_result = worker.solveRound(full_request);
+  require(full_result.full_labels.size() == 2,
+          "worker should return one full label per local node");
+  require(full_result.full_labels[0].global_node_id == 10,
+          "first full label global node id differs");
+  require(full_result.full_labels[0].local_index == 0,
+          "first full label local index differs");
+  require(full_result.full_labels[1].global_node_id == 20,
+          "second full label global node id differs");
+  require(full_result.full_labels[1].local_index == 1,
+          "second full label local index differs");
+  require(full_result.full_labels[0].label == worker.minCutSolution(3)[0] &&
+              full_result.full_labels[1].label == worker.minCutSolution(3)[1],
+          "full labels should match the worker min-cut solution");
+}
+
 long countWorkerDisagreements(
     const std::vector<mcpd3::PartitionSolveResult> &results) {
   std::map<int, std::vector<int>> labels_by_constraint;
@@ -447,6 +495,43 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
   require(countWorkerDisagreements(worker_results) ==
               dual_decomp.getLastDisagreementCount(),
           "worker disagreement count differs from DualDecomposition");
+}
+
+void exportedPartitionPackagesMaterializeBoundaryDuplicates() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.construct_solvers = false;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/5,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{1, 3},
+      /*arc_capacities=*/std::vector<int>{6, 6},
+      /*terminal_capacities=*/std::vector<int>{0, 0, 0, 0, 0}, options);
+
+  const auto &packages = dual_decomp.getPartitionPackages();
+  require(packages.size() == 2, "expected two exported partition packages");
+  require(packages[0].local_node_count == 2,
+          "owning partition should contain both arc endpoints");
+  require(packages[0].local_to_global == std::vector<int>({1, 3}),
+          "owning partition local_to_global should preserve arc endpoints");
+  require(packages[1].local_node_count == 1,
+          "target partition should contain an isolated boundary duplicate");
+  require(packages[1].terminal_capacities.size() == 1,
+          "target duplicate should have a zero terminal entry");
+  require(packages[1].terminal_capacities[0] == 0,
+          "target duplicate terminal should be zero");
+  require(packages[1].local_to_global == std::vector<int>({3}),
+          "target duplicate should map back to the constrained global node");
+  require(packages[0].constraint_endpoints.size() == 1 &&
+              packages[1].constraint_endpoints.size() == 1,
+          "cross-partition arc should emit one constraint endpoint per side");
 }
 
 void disabledPartitionPackageExportPreservesNativeSolve() {
@@ -1114,6 +1199,38 @@ mcpd3::PartitionPackage makeCoordinatorPackage(int partition_id,
 std::vector<mcpd3::PartitionPackage> makeCoordinatorPackages() {
   return {makeCoordinatorPackage(/*partition_id=*/0, /*is_source=*/true),
           makeCoordinatorPackage(/*partition_id=*/1, /*is_source=*/false)};
+}
+
+void coordinatorCollectsFinalLabelsWhenRequested() {
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 4;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.collect_final_labels = true;
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+  const auto result = coordinator.solve();
+
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "coordinator should solve the agreeing toy problem");
+  require(result.final_labels.size() == 2,
+          "coordinator should collect one full label per local node copy");
+  require(result.final_labels[0].global_node_id == 11 &&
+              result.final_labels[1].global_node_id == 11,
+          "coordinator final labels should preserve global node ids");
+  require(result.final_labels[0].local_index == 0 &&
+              result.final_labels[1].local_index == 0,
+          "coordinator final labels should preserve local indices");
+  require(result.final_labels[0].label == result.final_labels[1].label,
+          "coordinator final labels should agree at convergence");
 }
 
 mcpd3::PartitionWorkerResourceEstimate makeWorkerResources(int cpu_count,
@@ -2737,7 +2854,9 @@ int main() {
     streamingWorkerMatchesInProcessAcrossEviction();
     streamingWorkerScalesEvictedDiskPayload();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
+    inProcessPartitionWorkerReturnsFullLabelsOnRequest();
     exportedPartitionPackagesMatchDualDecompositionRound();
+    exportedPartitionPackagesMaterializeBoundaryDuplicates();
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
@@ -2764,6 +2883,7 @@ int main() {
     coordinatorUsesRamAsInitialAssignmentTieBreaker();
     coordinatorRejectsMalformedBatchResponses();
     inProcessWorkerBatchSolvesDistinctLoadedPartitions();
+    coordinatorCollectsFinalLabelsWhenRequested();
     coordinatorSendsOnlyDirtyAlphaUpdates();
     inProcessCoordinatorSolvesWithOneWorkerOwningAllPackages();
     unitScaleResolvesOppositeDirectionCycle();

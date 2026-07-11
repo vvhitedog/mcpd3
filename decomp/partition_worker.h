@@ -54,6 +54,12 @@ struct ConstraintLabel {
   int label = 0;
 };
 
+struct NodeLabel {
+  int global_node_id = -1;
+  int local_index = -1;
+  int label = 0;
+};
+
 struct PartitionPackage {
   int partition_id = -1;
   int local_node_count = 0;
@@ -69,6 +75,7 @@ struct PartitionSolveRequest {
   int partition_id = -1;
   long scale = 1;
   int regularization_strength = 0;
+  bool return_full_labels = false;
   std::vector<AlphaUpdate> alpha_updates;
 };
 
@@ -81,6 +88,7 @@ struct PartitionSolveResult {
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
   std::vector<ConstraintLabel> constrained_labels;
+  std::vector<NodeLabel> full_labels;
 };
 
 struct PartitionWorkerResourceEstimate {
@@ -202,6 +210,7 @@ public:
     auto &loaded = partitions_[package.partition_id];
     loaded.partition_id = partition_id;
     loaded.local_node_count = local_node_count;
+    loaded.local_to_global = std::move(package.local_to_global);
     loaded.constraint_endpoints = std::move(package.constraint_endpoints);
     loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
         local_node_count, arc_count, std::move(package.arcs),
@@ -277,6 +286,7 @@ private:
   struct LoadedPartition {
     int partition_id = -1;
     int local_node_count = 0;
+    std::vector<int> local_to_global;
     std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::unique_ptr<PrimalDualMinCutSolver> solver;
     std::list<DualDecompositionConstraintArc> constraint_arcs;
@@ -490,6 +500,19 @@ private:
           binding.constraint_id, binding.global_node_id, binding.local_index,
           loaded->solver->getMinCutSolution(binding.local_index)});
     }
+    if (request.return_full_labels) {
+      result.full_labels.reserve(static_cast<size_t>(loaded->local_node_count));
+      for (int local_index = 0; local_index < loaded->local_node_count;
+           ++local_index) {
+        const int global_node_id =
+            loaded->local_to_global.empty()
+                ? local_index
+                : loaded->local_to_global[static_cast<size_t>(local_index)];
+        result.full_labels.push_back(
+            NodeLabel{global_node_id, local_index,
+                      loaded->solver->getMinCutSolution(local_index)});
+      }
+    }
     markAlphaStateSolved(loaded);
     return result;
   }
@@ -557,6 +580,7 @@ public:
     stored.warm_state_path =
         storage_directory_ /
         ("partition_" + std::to_string(package.partition_id) + ".warm");
+    stored.local_to_global = package.local_to_global;
     stored.constraint_endpoints = std::move(package.constraint_endpoints);
     std::sort(stored.constraint_endpoints.begin(),
               stored.constraint_endpoints.end(),
@@ -669,6 +693,7 @@ private:
     std::uint64_t last_used = 0;
     bool has_solution = false;
     bool has_warm_state = false;
+    std::vector<int> local_to_global;
     std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::vector<int> last_solution;
     std::unique_ptr<InProcessPartitionWorker> resident_worker;
@@ -679,11 +704,16 @@ private:
            static_cast<std::uint64_t>(sizeof(ConstraintEndpointBinding));
   }
 
+  static std::uint64_t localToGlobalBytes(const StoredPartition &stored) {
+    return static_cast<std::uint64_t>(stored.local_to_global.size()) *
+           static_cast<std::uint64_t>(sizeof(int));
+  }
+
   static std::uint64_t estimateResidentBytes(const StoredPartition &stored) {
     const auto estimate = PrimalDualMinCutSolver::estimateMemoryBytes(
         stored.local_node_count, stored.local_arc_count);
     return static_cast<std::uint64_t>(estimate.total_bytes) +
-           endpointBytes(stored);
+           endpointBytes(stored) + localToGlobalBytes(stored);
   }
 
   template <typename T>
@@ -758,7 +788,7 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435033;
-    const std::uint32_t version = 1;
+    const std::uint32_t version = 2;
     writeScalar(out, magic, "package magic");
     writeScalar(out, version, "package version");
     writeScalar(out, package.partition_id, "partition id");
@@ -766,6 +796,7 @@ private:
     writeIntVector(out, package.arcs, "arcs");
     writeIntVector(out, package.arc_capacities, "arc capacities");
     writeIntVector(out, package.terminal_capacities, "terminal capacities");
+    writeIntVector(out, package.local_to_global, "local to global");
     out.close();
     if (!out) {
       throw std::runtime_error("failed to flush streaming package file " +
@@ -907,7 +938,7 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "package magic");
     const auto version = readScalar<std::uint32_t>(in, "package version");
-    if (magic != 0x4d435033 || version != 1) {
+    if (magic != 0x4d435033 || (version != 1 && version != 2)) {
       throw std::runtime_error("invalid streaming package file " +
                                stored.path.string());
     }
@@ -918,6 +949,11 @@ private:
     package.arcs = readIntVector(in, "arcs");
     package.arc_capacities = readIntVector(in, "arc capacities");
     package.terminal_capacities = readIntVector(in, "terminal capacities");
+    if (version >= 2) {
+      package.local_to_global = readIntVector(in, "local to global");
+    } else {
+      package.local_to_global = stored.local_to_global;
+    }
     package.constraint_endpoints = stored.constraint_endpoints;
     validatePartitionPackage(package);
     return package;

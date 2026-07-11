@@ -1153,6 +1153,12 @@ private:
     }
     dualdecomp_progress_report("dd_distribute_terminals", nnode_, nnode_,
                                terminal_start);
+    for (auto &[global_index, partitions] : constrained_nodes) {
+      partitions.insert(partitions_[global_index]);
+      for (const int partition : partitions) {
+        min_cut_sub_graphs_[partition].getOrInsertNode(global_index);
+      }
+    }
     auto finalize_start = std::chrono::steady_clock::now();
     int finalize_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
@@ -1222,9 +1228,6 @@ private:
       return initial_alpha_distribution(initial_alpha_generator);
     };
     for (auto &[global_index, partitions] : constrained_nodes) {
-      partitions.insert(
-          partitions_[global_index]); // list each constrained node in its
-                                      // original partition
       constraint_arc_map_.push_back({global_index, {}});
       auto &constraint_arcs = constraint_arc_map_.back().second;
       assert(partitions.size() >

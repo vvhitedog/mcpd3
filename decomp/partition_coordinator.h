@@ -73,6 +73,7 @@ struct PartitionWorkerCoordinatorOptions {
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
   int progress_report_interval = 0;
+  bool collect_final_labels = false;
   std::function<void(const PartitionWorkerProgressRecord &)> progress_callback;
 };
 
@@ -158,6 +159,7 @@ struct PartitionWorkerCoordinatorSolveResult {
   long final_regularization_anchor_sink_count = 0;
   long final_regularization_active_sink_count = 0;
   long objective_scale_promotion_count = 0;
+  std::vector<NodeLabel> final_labels;
   std::vector<PartitionWorkerProgressRecord> progress_records;
   std::vector<PartitionWorkerScaleResult> scale_results;
 };
@@ -205,6 +207,41 @@ public:
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
                                      int regularization_strength) {
+    const auto results =
+        solvePartitions(round_id, scale, regularization_strength,
+                        /*return_full_labels=*/false);
+
+    PartitionWorkerRoundStats stats;
+    stats.round_id = round_id;
+    stats.effective_step_size =
+        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
+    gatherRoundTerms(results, &stats);
+    warnIfRegularizationBudgetExceeded(stats.regularization_budget,
+                                       regularization_strength);
+    updateConstraintsFromLabels(
+        results, &stats,
+        !isRegularizationBudgetExceeded(stats.regularization_budget,
+                                        regularization_strength));
+    return stats;
+  }
+
+  std::vector<NodeLabel> collectFullLabels(long round_id, long scale,
+                                           int regularization_strength) {
+    const auto results =
+        solvePartitions(round_id, scale, regularization_strength,
+                        /*return_full_labels=*/true);
+    std::vector<NodeLabel> labels;
+    for (const auto &result : results) {
+      labels.insert(labels.end(), result.full_labels.begin(),
+                    result.full_labels.end());
+    }
+    return labels;
+  }
+
+private:
+  std::vector<PartitionSolveResult> solvePartitions(
+      long round_id, long scale, int regularization_strength,
+      bool return_full_labels) {
     std::vector<std::vector<AlphaUpdate>> alpha_updates(packages_.size());
     std::vector<size_t> synced_constraint_indices;
     for (size_t constraint_index = 0; constraint_index < constraints_.size();
@@ -246,6 +283,7 @@ public:
               request.partition_id = partition_id;
               request.scale = scale;
               request.regularization_strength = regularization_strength;
+              request.return_full_labels = return_full_labels;
               request.alpha_updates = std::move(alpha_updates[package_index]);
               requests.push_back(std::move(request));
             }
@@ -273,21 +311,10 @@ public:
     for (const auto constraint_index : synced_constraint_indices) {
       constraints_[constraint_index].needs_sync = false;
     }
-
-    PartitionWorkerRoundStats stats;
-    stats.round_id = round_id;
-    stats.effective_step_size =
-        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
-    gatherRoundTerms(results, &stats);
-    warnIfRegularizationBudgetExceeded(stats.regularization_budget,
-                                       regularization_strength);
-    updateConstraintsFromLabels(
-        results, &stats,
-        !isRegularizationBudgetExceeded(stats.regularization_budget,
-                                        regularization_strength));
-    return stats;
+    return results;
   }
 
+public:
   PartitionWorkerCoordinatorSolveResult solve() {
     PartitionWorkerCoordinatorSolveResult result;
     result.scale = options_.objective_scale;
@@ -309,6 +336,11 @@ public:
         continue;
       }
       if (scale_result.status == PartitionWorkerOptimizationStatus::OPTIMAL) {
+        if (options_.collect_final_labels) {
+          result.final_labels =
+              collectFullLabels(result.total_iterations + 1, schedule_scale,
+                                localRegularizationStrength(step_size));
+        }
         break;
       }
       schedule_scale /= 10;
