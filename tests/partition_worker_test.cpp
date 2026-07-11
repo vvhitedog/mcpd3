@@ -6,10 +6,12 @@
 // Software Foundation, either version 3 of the License, or (at your option)
 // any later version.
 
+#include <algorithm>
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <list>
@@ -69,6 +71,30 @@ void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
   require(subtract_threw, "certified lower bound underflow should be detected");
 }
 
+void solverMemoryEstimateReportsBkAndVectorBytes() {
+  using GraphType = Graph<int, int, long>;
+  require(GraphType::estimated_node_array_bytes(1) ==
+              GraphType::estimated_node_array_bytes(16),
+          "BK node estimate should include constructor minimum capacity");
+  require(GraphType::estimated_arc_array_bytes(1) ==
+              GraphType::estimated_arc_array_bytes(16),
+          "BK arc estimate should include constructor minimum capacity");
+
+  const auto estimate =
+      mcpd3::PrimalDualMinCutSolver::estimateMemoryBytes(/*nnode=*/2,
+                                                         /*narc=*/1);
+  require(estimate.bk_node_bytes > 0, "BK node estimate should be positive");
+  require(estimate.bk_arc_bytes > 0, "BK arc estimate should be positive");
+  require(estimate.bk_total_bytes ==
+              estimate.bk_node_bytes + estimate.bk_arc_bytes,
+          "BK total estimate should sum node and arc arrays");
+  require(estimate.solver_vector_bytes == ((5 * 1 + 3 * 2) * sizeof(int)),
+          "solver vector estimate should account for arc and node vectors");
+  require(estimate.total_bytes ==
+              estimate.bk_total_bytes + estimate.solver_vector_bytes,
+          "solver total estimate should include BK and solver vectors");
+}
+
 mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
   mcpd3::PartitionPackage package;
   package.partition_id = 3;
@@ -86,6 +112,245 @@ mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
                                         /*last_alpha=*/last_alpha,
                                         /*alpha_momentum=*/0});
   return package;
+}
+
+mcpd3::PartitionPackage makeStreamingPackage(int partition_id,
+                                             int constraint_id,
+                                             int terminal_capacity) {
+  mcpd3::PartitionPackage package;
+  package.partition_id = partition_id;
+  package.local_node_count = 2;
+  package.arcs = {0, 1};
+  package.arc_capacities = {3 + partition_id, 5 + partition_id};
+  package.terminal_capacities = {terminal_capacity, -terminal_capacity - 1};
+  package.local_to_global = {100 + partition_id * 10,
+                             101 + partition_id * 10};
+  package.constraint_endpoints.push_back(
+      mcpd3::ConstraintEndpointBinding{/*constraint_id=*/constraint_id,
+                                        /*global_node_id=*/101 +
+                                            partition_id * 10,
+                                        /*local_index=*/1,
+                                        /*is_source=*/true,
+                                        /*alpha=*/0,
+                                        /*last_alpha=*/0,
+                                        /*alpha_momentum=*/0});
+  return package;
+}
+
+void requireSolveResultsMatch(const mcpd3::PartitionSolveResult &actual,
+                              const mcpd3::PartitionSolveResult &expected,
+                              const std::string &context) {
+  require(actual.round_id == expected.round_id,
+          context + ": round id differs");
+  require(actual.partition_id == expected.partition_id,
+          context + ": partition id differs");
+  require(actual.lower_bound == expected.lower_bound,
+          context + ": lower bound differs");
+  require(actual.regularization_budget == expected.regularization_budget,
+          context + ": regularization budget differs");
+  require(actual.regularization_contribution ==
+              expected.regularization_contribution,
+          context + ": regularization contribution differs");
+  require(actual.regularization_anchor_sink_count ==
+              expected.regularization_anchor_sink_count,
+          context + ": regularization anchor count differs");
+  require(actual.regularization_active_sink_count ==
+              expected.regularization_active_sink_count,
+          context + ": regularization active count differs");
+  require(actual.constrained_labels.size() ==
+              expected.constrained_labels.size(),
+          context + ": constrained label count differs");
+  for (size_t i = 0; i < actual.constrained_labels.size(); ++i) {
+    require(actual.constrained_labels[i].constraint_id ==
+                expected.constrained_labels[i].constraint_id,
+            context + ": constraint id differs");
+    require(actual.constrained_labels[i].global_node_id ==
+                expected.constrained_labels[i].global_node_id,
+            context + ": global node id differs");
+    require(actual.constrained_labels[i].local_index ==
+                expected.constrained_labels[i].local_index,
+            context + ": local index differs");
+    require(actual.constrained_labels[i].label ==
+                expected.constrained_labels[i].label,
+            context + ": label differs");
+  }
+}
+
+void streamingWorkerMatchesInProcessAcrossEviction() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/10,
+                                       /*terminal_capacity=*/2);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/11,
+                                       /*terminal_capacity=*/4);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  requireSolveResultsMatch(streaming.solveRound(first),
+                           reference.solveRound(first),
+                           "streaming first solve");
+
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 2;
+  second.partition_id = 1;
+  requireSolveResultsMatch(streaming.solveRound(second),
+                           reference.solveRound(second),
+                           "streaming eviction solve");
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming worker should keep only one resident partition");
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "streaming eviction should persist warm solver state");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "streaming worker should not restore warm state before reload");
+
+  mcpd3::PartitionSolveRequest third;
+  third.round_id = 3;
+  third.partition_id = 0;
+  third.regularization_strength = 1;
+  third.alpha_updates.push_back(
+      mcpd3::AlphaUpdate{/*constraint_id=*/10,
+                          /*alpha=*/7,
+                          /*last_alpha=*/0,
+                          /*alpha_momentum=*/0});
+  requireSolveResultsMatch(streaming.solveRound(third),
+                           reference.solveRound(third),
+                           "streaming reload with alpha update");
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming reload should preserve the resident budget");
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "streaming reload should evict the previous resident warm state");
+  require(streaming.warmStateRestoreCountForTesting() == 1,
+          "streaming reload should restore persisted warm solver state");
+}
+
+void streamingWorkerScalesEvictedDiskPayload() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/20,
+                                       /*terminal_capacity=*/3);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/21,
+                                       /*terminal_capacity=*/5);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  (void)streaming.solveRound(first);
+  (void)reference.solveRound(first);
+
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 2;
+  second.partition_id = 1;
+  (void)streaming.solveRound(second);
+  (void)reference.solveRound(second);
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "streaming scale test should persist warm state before scaling");
+
+  streaming.scaleObjective(/*factor=*/2);
+  reference.scaleObjective(/*factor=*/2);
+
+  mcpd3::PartitionSolveRequest after_scale;
+  after_scale.round_id = 3;
+  after_scale.partition_id = 0;
+  after_scale.alpha_updates.push_back(
+      mcpd3::AlphaUpdate{/*constraint_id=*/20,
+                          /*alpha=*/4,
+                          /*last_alpha=*/0,
+                          /*alpha_momentum=*/0});
+  requireSolveResultsMatch(streaming.solveRound(after_scale),
+                           reference.solveRound(after_scale),
+                           "streaming scaled evicted payload");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "streaming worker should not restore stale warm state after scaling");
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "streaming scaled reload should persist the evicted resident state");
+}
+
+void streamingBatchSolvesResidentPartitionsFirst() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/30,
+                                       /*terminal_capacity=*/2);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/31,
+                                       /*terminal_capacity=*/4);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 1;
+  second.partition_id = 1;
+
+  const auto first_streaming_batch = streaming.solveRoundBatch({first, second});
+  const auto first_reference_batch = reference.solveRoundBatch({first, second});
+  require(first_streaming_batch.size() == first_reference_batch.size(),
+          "streaming first batch should return both results");
+  for (size_t i = 0; i < first_reference_batch.size(); ++i) {
+    requireSolveResultsMatch(first_streaming_batch[i],
+                             first_reference_batch[i],
+                             "streaming first batch result");
+  }
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming batch should keep one resident partition");
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "first streaming batch should evict one partition");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "first streaming batch should not restore before reload");
+
+  first.round_id = 2;
+  second.round_id = 2;
+  const auto second_streaming_batch =
+      streaming.solveRoundBatch({first, second});
+  const auto second_reference_batch = reference.solveRoundBatch({first, second});
+  require(second_streaming_batch.size() == second_reference_batch.size(),
+          "streaming second batch should return both results");
+  for (const auto &expected : second_reference_batch) {
+    const int partition_id = expected.partition_id;
+    auto result_iter = std::find_if(
+        second_streaming_batch.begin(), second_streaming_batch.end(),
+        [partition_id](const mcpd3::PartitionSolveResult &result) {
+          return result.partition_id == partition_id;
+        });
+    require(result_iter != second_streaming_batch.end(),
+            "streaming second batch should return reference partition");
+    requireSolveResultsMatch(*result_iter, expected,
+                             "streaming second batch result");
+  }
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "resident-first second batch should evict only once");
+  require(streaming.warmStateRestoreCountForTesting() == 1,
+          "resident-first second batch should restore only the nonresident "
+          "partition");
 }
 
 struct DirectSolverResult {
@@ -189,6 +454,45 @@ void inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate() {
   requireMatchesDirect(worker_second, direct_second, second_request.round_id);
 }
 
+void inProcessPartitionWorkerLoadsManyBoundaryEndpoints() {
+  constexpr int kEndpointCount = 256;
+  mcpd3::PartitionPackage package;
+  package.partition_id = 5;
+  package.local_node_count = kEndpointCount;
+  package.terminal_capacities.assign(kEndpointCount, 0);
+  package.local_to_global.reserve(kEndpointCount);
+  package.constraint_endpoints.reserve(kEndpointCount);
+  for (int i = 0; i < kEndpointCount; ++i) {
+    package.local_to_global.push_back(10000 + i);
+    package.constraint_endpoints.push_back(
+        mcpd3::ConstraintEndpointBinding{/*constraint_id=*/20000 + i,
+                                          /*global_node_id=*/10000 + i,
+                                          /*local_index=*/i,
+                                          /*is_source=*/(i % 2) == 0,
+                                          /*alpha=*/0,
+                                          /*last_alpha=*/0,
+                                          /*alpha_momentum=*/0});
+  }
+
+  mcpd3::InProcessPartitionWorker worker;
+  worker.loadPartition(std::move(package));
+
+  mcpd3::PartitionSolveRequest request;
+  request.round_id = 1;
+  request.partition_id = 5;
+  const auto result = worker.solveRound(request);
+  require(result.partition_id == 5, "many-endpoint partition id mismatch");
+  require(result.constrained_labels.size() == kEndpointCount,
+          "many-endpoint worker should return all boundary labels");
+  for (int i = 0; i < kEndpointCount; ++i) {
+    require(result.constrained_labels[static_cast<size_t>(i)].constraint_id ==
+                20000 + i,
+            "many-endpoint constraint id mismatch");
+    require(result.constrained_labels[static_cast<size_t>(i)].local_index == i,
+            "many-endpoint local index mismatch");
+  }
+}
+
 long countWorkerDisagreements(
     const std::vector<mcpd3::PartitionSolveResult> &results) {
   std::map<int, std::vector<int>> labels_by_constraint;
@@ -250,6 +554,228 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
   require(countWorkerDisagreements(worker_results) ==
               dual_decomp.getLastDisagreementCount(),
           "worker disagreement count differs from DualDecomposition");
+}
+
+void disabledPartitionPackageExportPreservesNativeSolve() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = false;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::DualDecomposition native_only(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  bool package_access_threw = false;
+  try {
+    (void)native_only.getPartitionPackages();
+  } catch (const std::runtime_error &e) {
+    package_access_threw =
+        std::string(e.what()).find("partition package export is disabled") !=
+        std::string::npos;
+  }
+  require(package_access_threw,
+          "disabled partition package export should reject package access");
+
+  options.emit_partition_packages = true;
+  mcpd3::DualDecomposition exported(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  native_only.runOptimizationScale(
+      /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+  exported.runOptimizationScale(
+      /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+      /*use_momentum=*/false);
+
+  require(native_only.getBestLowerBoundRaw() == exported.getBestLowerBoundRaw(),
+          "native-only lower bound should match package-export solve");
+  require(native_only.getLastDisagreementCount() ==
+              exported.getLastDisagreementCount(),
+          "native-only disagreement count should match package-export solve");
+  require(native_only.getTotalOptimizationIterations() == 1,
+          "native-only solve should run without exported packages");
+}
+
+void requirePackagesEqual(const mcpd3::PartitionPackage &lhs,
+                          const mcpd3::PartitionPackage &rhs) {
+  require(lhs.partition_id == rhs.partition_id, "partition id differs");
+  require(lhs.local_node_count == rhs.local_node_count,
+          "local node count differs");
+  require(lhs.arcs == rhs.arcs, "package arcs differ");
+  require(lhs.arc_capacities == rhs.arc_capacities,
+          "package arc capacities differ");
+  require(lhs.terminal_capacities == rhs.terminal_capacities,
+          "package terminal capacities differ");
+  require(lhs.local_to_global == rhs.local_to_global,
+          "package local_to_global differs");
+  require(lhs.constraint_endpoints.size() ==
+              rhs.constraint_endpoints.size(),
+          "constraint endpoint count differs");
+  for (size_t i = 0; i < lhs.constraint_endpoints.size(); ++i) {
+    const auto &left = lhs.constraint_endpoints[i];
+    const auto &right = rhs.constraint_endpoints[i];
+    require(left.constraint_id == right.constraint_id,
+            "constraint endpoint id differs");
+    require(left.global_node_id == right.global_node_id,
+            "constraint endpoint global node differs");
+    require(left.local_index == right.local_index,
+            "constraint endpoint local index differs");
+    require(left.is_source == right.is_source,
+            "constraint endpoint side differs");
+    require(left.alpha == right.alpha, "constraint endpoint alpha differs");
+    require(left.last_alpha == right.last_alpha,
+            "constraint endpoint last alpha differs");
+    require(left.alpha_momentum == right.alpha_momentum,
+            "constraint endpoint alpha momentum differs");
+  }
+}
+
+void packageOnlyExportMatchesSolverBackedExport() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::DualDecomposition solver_backed(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  auto package_only_options = options;
+  package_only_options.construct_solvers = false;
+  mcpd3::DualDecomposition package_only(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, package_only_options);
+
+  const auto &solver_packages = solver_backed.getPartitionPackages();
+  const auto &package_only_packages = package_only.getPartitionPackages();
+  require(solver_packages.size() == package_only_packages.size(),
+          "package-only export count should match solver-backed export");
+  for (size_t i = 0; i < solver_packages.size(); ++i) {
+    requirePackagesEqual(solver_packages[i], package_only_packages[i]);
+  }
+
+  bool solve_threw = false;
+  try {
+    package_only.solve();
+  } catch (const std::runtime_error &e) {
+    solve_threw =
+        std::string(e.what()).find("requires constructed solvers") !=
+        std::string::npos;
+  }
+  require(solve_threw, "package-only DualDecomposition should reject solve");
+
+  auto invalid_options = package_only_options;
+  invalid_options.emit_partition_packages = false;
+  bool invalid_threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/2,
+        /*nnode=*/2,
+        /*narc=*/1,
+        /*arcs=*/std::vector<int>{0, 1},
+        /*arc_capacities=*/std::vector<int>{3, 5},
+        /*terminal_capacities=*/std::vector<int>{2, -4}, invalid_options);
+  } catch (const std::runtime_error &e) {
+    invalid_threw =
+        std::string(e.what()).find("solver construction") !=
+        std::string::npos;
+  }
+  require(invalid_threw,
+          "package-only construction should require package export");
+}
+
+void packageOnlyExportWithManyArcsProducesLoadablePackages() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  std::vector<int> arcs;
+  std::vector<int> arc_capacities;
+  const auto add_arc = [&](int s, int t, int forward, int backward) {
+    arcs.push_back(s);
+    arcs.push_back(t);
+    arc_capacities.push_back(forward);
+    arc_capacities.push_back(backward);
+  };
+  add_arc(0, 1, 3, 0);
+  add_arc(0, 1, 5, 1);
+  add_arc(0, 1, 7, 0);
+  add_arc(0, 1, 11, 2);
+  add_arc(0, 1, 13, 0);
+  add_arc(0, 1, 17, 3);
+  add_arc(0, 1, 19, 0);
+  add_arc(0, 1, 23, 4);
+  add_arc(0, 1, 29, 0);
+  add_arc(0, 1, 31, 5);
+  std::vector<int> terminal_capacities{2, -7};
+
+  auto package_only_options = options;
+  package_only_options.construct_solvers = false;
+  mcpd3::DualDecomposition package_only(
+      /*npartition=*/4,
+      /*nnode=*/2,
+      /*narc=*/static_cast<int>(arcs.size() / 2),
+      std::move(arcs), std::move(arc_capacities),
+      std::move(terminal_capacities), package_only_options);
+
+  const auto &package_only_packages = package_only.getPartitionPackages();
+  require(package_only_packages.size() == 4,
+          "many-arc package-only export should produce one package per "
+          "partition");
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.reserve(package_only_packages.size());
+  for (const auto &package : package_only_packages) {
+    mcpd3::validatePartitionPackage(package);
+    workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  }
+
+  mcpd3::PartitionWorkerCoordinatorOptions coordinator_options;
+  coordinator_options.max_iteration_count = 1;
+  coordinator_options.num_optimization_scales = 1;
+  coordinator_options.initial_step_size = 100;
+  coordinator_options.use_momentum = false;
+  coordinator_options.enable_group_stopping = false;
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      package_only_packages, std::move(workers), coordinator_options);
+  const auto stats = coordinator.runRound(
+      /*round_id=*/1, /*scale=*/100, /*step_size=*/100,
+      /*regularization_strength=*/0);
+  require(stats.round_id == 1,
+          "many-arc package-only packages should load and solve");
 }
 
 mcpd3::DualDecomposition makeTinyDualDecomposition() {
@@ -326,7 +852,9 @@ void directedStreamingDimacsMatchesGeneralReaderValue() {
   auto general = mcpd3::read_dimacs(path);
   auto directed_streaming = mcpd3::read_dimacs_directed_streaming(path);
   require(general.nnode == directed_streaming.nnode,
-          "directed streaming reader should preserve node count");
+          "directed streaming reader should preserve node count: general=" +
+              std::to_string(general.nnode) + " directed=" +
+              std::to_string(directed_streaming.nnode));
   require(general.terminal_capacities ==
               directed_streaming.terminal_capacities,
           "directed streaming reader should preserve terminal capacities");
@@ -336,6 +864,161 @@ void directedStreamingDimacsMatchesGeneralReaderValue() {
       std::move(directed_streaming));
   require(general_solver.maxflow() == directed_streaming_solver.maxflow(),
           "directed streaming reader should preserve maxflow value");
+  std::remove(path.c_str());
+}
+
+void directedStreamingDimacsUsesDeclaredNodeCount() {
+  const std::string path =
+      "/tmp/mcpd3-directed-streaming-declared-node-count-test.max";
+  {
+    std::ofstream out(path);
+    out << "c directed streaming reader declared node count test\n";
+    out << "p max 6 2\n";
+    out << "n 1 s\n";
+    out << "n 6 t\n";
+    out << "a 1 2 5\n";
+    out << "a 5 6 7\n";
+  }
+
+  auto directed_streaming = mcpd3::read_dimacs_directed_streaming(path);
+  require(directed_streaming.nnode == 4,
+          "directed streaming reader should preserve declared internal nodes");
+  require(directed_streaming.terminal_capacities ==
+              std::vector<int>({5, 0, 0, -7}),
+          "directed streaming reader should preserve isolated terminal slots");
+  std::remove(path.c_str());
+}
+
+void scaleGraphForDimacsTest(mcpd3::MinCutGraph *graph, int factor) {
+  for (auto &capacity : graph->arc_capacities) {
+    capacity *= factor;
+  }
+  for (auto &capacity : graph->terminal_capacities) {
+    capacity *= factor;
+  }
+}
+
+void scaledDirectedStreamingDimacsMatchesPostLoadScaling() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-dimacs-test.max";
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming reader test\n";
+    out << "p max 5 6\n";
+    out << "n 1 s\n";
+    out << "n 5 t\n";
+    out << "a 1 2 3\n";
+    out << "a 1 4 5\n";
+    out << "a 2 3 7\n";
+    out << "a 3 2 11\n";
+    out << "a 4 5 13\n";
+    out << "a 3 5 17\n";
+  }
+
+  auto expected = mcpd3::read_dimacs_directed_streaming(path);
+  scaleGraphForDimacsTest(&expected, /*factor=*/4);
+
+  mcpd3::DimacsScaleStats stats;
+  auto scaled = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/4, /*saturate_capacity_overflow=*/false,
+      &stats);
+  require(stats.arc_saturation_count == 0,
+          "exact scaled directed reader should not report arc saturations");
+  require(stats.terminal_saturation_count == 0,
+          "exact scaled directed reader should not report terminal saturations");
+  require(scaled.nnode == expected.nnode,
+          "scaled directed reader should preserve node count");
+  require(scaled.narc == expected.narc,
+          "scaled directed reader should preserve arc count");
+  require(scaled.arcs == expected.arcs,
+          "scaled directed reader should preserve arc endpoints");
+  require(scaled.arc_capacities == expected.arc_capacities,
+          "scaled directed reader should scale arc capacities during load");
+  require(scaled.terminal_capacities == expected.terminal_capacities,
+          "scaled directed reader should scale terminal capacities after "
+          "aggregation");
+  std::remove(path.c_str());
+}
+
+void scaledDirectedStreamingDimacsHandlesFinalLineWithoutNewline() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-final-line-test.max";
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming final line test\n";
+    out << "p max 5 5\n";
+    out << "n 1 s\n";
+    out << "n 5 t\n";
+    out << "a 1 2 3\n";
+    out << "a 2 3 4\n";
+    out << "a 3 4 5\n";
+    out << "a 4 5 6\n";
+    out << "a 1 3 7";
+  }
+
+  mcpd3::DimacsScaleStats stats;
+  auto scaled = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/3, /*saturate_capacity_overflow=*/false,
+      &stats);
+  require(stats.arc_saturation_count == 0,
+          "final-line reader test should not saturate arcs");
+  require(stats.terminal_saturation_count == 0,
+          "final-line reader test should not saturate terminals");
+  require(scaled.nnode == 3,
+          "final-line reader test should preserve declared internal nodes");
+  require(scaled.narc == 2,
+          "final-line reader test should preserve internal arc count");
+  require(scaled.arcs == std::vector<int>({0, 1, 1, 2}),
+          "final-line reader test should preserve internal arc endpoints");
+  require(scaled.arc_capacities == std::vector<int>({12, 0, 15, 0}),
+          "final-line reader test should scale internal arcs");
+  require(scaled.terminal_capacities == std::vector<int>({9, 21, -18}),
+          "final-line reader test should scale aggregated terminals");
+  std::remove(path.c_str());
+}
+
+void scaledDirectedStreamingDimacsHandlesOverflowMode() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-overflow-test.max";
+  const int max_int = std::numeric_limits<int>::max();
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming overflow test\n";
+    out << "p max 4 3\n";
+    out << "n 1 s\n";
+    out << "n 4 t\n";
+    out << "a 1 2 " << max_int << "\n";
+    out << "a 2 3 " << max_int << "\n";
+    out << "a 3 4 " << max_int << "\n";
+  }
+
+  bool strict_threw = false;
+  try {
+    (void)mcpd3::read_dimacs_directed_streaming_scaled(
+        path, /*objective_scale=*/2, /*saturate_capacity_overflow=*/false);
+  } catch (const std::overflow_error &) {
+    strict_threw = true;
+  }
+  require(strict_threw,
+          "strict scaled directed reader should reject int overflow");
+
+  mcpd3::DimacsScaleStats stats;
+  auto saturated = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/2, /*saturate_capacity_overflow=*/true,
+      &stats);
+  require(stats.arc_saturation_count == 1,
+          "saturating scaled directed reader should count arc saturations");
+  require(stats.terminal_saturation_count == 2,
+          "saturating scaled directed reader should count terminal "
+          "saturations");
+  require(saturated.arc_capacities ==
+              std::vector<int>({std::numeric_limits<int>::max(), 0}),
+          "saturating scaled directed reader should clip positive arc caps");
+  require(saturated.terminal_capacities ==
+              std::vector<int>({std::numeric_limits<int>::max(),
+                                std::numeric_limits<int>::min()}),
+          "saturating scaled directed reader should clip terminal caps by "
+          "sign");
   std::remove(path.c_str());
 }
 
@@ -567,7 +1250,9 @@ public:
     return result;
   }
 
-  void scaleObjective(long factor) override {
+  void scaleObjective(long factor,
+                      bool saturate_capacity_overflow = false) override {
+    saturate_scale_objective_.push_back(saturate_capacity_overflow);
     scale_factors_.push_back(factor);
   }
 
@@ -576,6 +1261,9 @@ public:
   }
 
   const std::vector<long> &scaleFactors() const { return scale_factors_; }
+  const std::vector<bool> &saturateScaleObjective() const {
+    return saturate_scale_objective_;
+  }
 
 private:
   const mcpd3::PartitionPackage &packageForRequest(
@@ -595,6 +1283,7 @@ private:
   std::deque<ScriptedRound> script_;
   std::vector<mcpd3::PartitionSolveRequest> requests_;
   std::vector<long> scale_factors_;
+  std::vector<bool> saturate_scale_objective_;
 };
 
 class ConcurrencyProbeWorker final : public mcpd3::PartitionWorker {
@@ -632,13 +1321,59 @@ public:
     return result;
   }
 
-  void scaleObjective(long factor) override { scale_factor_ = factor; }
+  void scaleObjective(long factor,
+                      bool saturate_capacity_overflow = false) override {
+    scale_factor_ = factor;
+    saturate_scale_objective_ = saturate_capacity_overflow;
+  }
 
 private:
   mcpd3::PartitionPackage package_;
   std::atomic<int> *active_solves_;
   std::atomic<int> *max_active_solves_;
   long scale_factor_ = 1;
+  bool saturate_scale_objective_ = false;
+};
+
+class LoadConcurrencyProbeWorker final : public mcpd3::PartitionWorker {
+public:
+  LoadConcurrencyProbeWorker(std::atomic<int> *active_loads,
+                             std::atomic<int> *max_active_loads)
+      : active_loads_(active_loads), max_active_loads_(max_active_loads) {}
+
+  void loadPartition(const mcpd3::PartitionPackage &package) override {
+    const int active = active_loads_->fetch_add(1) + 1;
+    int previous_max = max_active_loads_->load();
+    while (active > previous_max &&
+           !max_active_loads_->compare_exchange_weak(previous_max, active)) {
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    package_ = package;
+    active_loads_->fetch_sub(1);
+  }
+
+  mcpd3::PartitionSolveResult solveRound(
+      const mcpd3::PartitionSolveRequest &request) override {
+    mcpd3::PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = package_.partition_id;
+    result.lower_bound = package_.partition_id + 1;
+    for (const auto &endpoint : package_.constraint_endpoints) {
+      result.constrained_labels.push_back(
+          mcpd3::ConstraintLabel{endpoint.constraint_id,
+                                 endpoint.global_node_id,
+                                 endpoint.local_index, 0});
+    }
+    return result;
+  }
+
+  void scaleObjective(long, bool = false) override {}
+
+private:
+  mcpd3::PartitionPackage package_;
+  std::atomic<int> *active_loads_;
+  std::atomic<int> *max_active_loads_;
 };
 
 class BatchRecordingWorker final : public mcpd3::PartitionWorker {
@@ -692,7 +1427,7 @@ public:
     return results;
   }
 
-  void scaleObjective(long) override {}
+  void scaleObjective(long, bool = false) override {}
 
   const std::vector<size_t> &batchSizes() const { return batch_sizes_; }
   int singleSolveCount() const { return single_solve_count_; }
@@ -1879,10 +2614,77 @@ void fullSolvePromotesObjectiveScaleOnOverBudget() {
           "source worker should receive objective rescale request");
   require(target_worker->scaleFactors() == std::vector<long>{10},
           "target worker should receive objective rescale request");
+  require(source_worker->saturateScaleObjective() == std::vector<bool>{false},
+          "strict promotion should not request worker saturation");
+  require(target_worker->saturateScaleObjective() == std::vector<bool>{false},
+          "strict promotion should not request worker saturation");
   require(source_worker->requests()[1].scale == 100,
           "promoted solve should restart at objective scale");
   require(source_worker->requests()[2].regularization_strength == 10,
           "promoted low-scale solve should re-enable scaled epsilon");
+}
+
+void fullSolvePromotionForwardsSaturationFlag() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 2;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
+  options.saturate_capacity_overflow = true;
+  options.max_objective_scale_promotions = 1;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{1000, 0, 10, 0, 1, 0},
+                                {40, 0, 0, 0, 0, 0},
+                                {400, 0, 1, 0, 1, 0}},
+      std::deque<ScriptedRound>{{2000, 0, 0, 0, 0, 0},
+                                {60, 1, 0, 0, 0, 0},
+                                {600, 0, 0, 0, 0, 0}},
+      options, &source_worker, &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.objective_scale_promotion_count == 1,
+          "saturated promotion test should promote once");
+  require(source_worker->scaleFactors() == std::vector<long>{10},
+          "source worker should receive saturated objective rescale request");
+  require(target_worker->scaleFactors() == std::vector<long>{10},
+          "target worker should receive saturated objective rescale request");
+  require(source_worker->saturateScaleObjective() == std::vector<bool>{true},
+          "source worker should receive saturation flag");
+  require(target_worker->saturateScaleObjective() == std::vector<bool>{true},
+          "target worker should receive saturation flag");
+}
+
+void inProcessWorkerSaturatesObjectiveScaleOverflow() {
+  mcpd3::PartitionPackage package;
+  package.partition_id = 0;
+  package.local_node_count = 1;
+  package.terminal_capacities = {std::numeric_limits<int>::max() / 2 + 1};
+  package.local_to_global = {0};
+
+  mcpd3::InProcessPartitionWorker strict_worker;
+  strict_worker.loadPartition(package);
+  bool strict_threw = false;
+  try {
+    strict_worker.scaleObjective(2);
+  } catch (const std::overflow_error &) {
+    strict_threw = true;
+  }
+  require(strict_threw,
+          "strict in-process worker objective scaling should reject overflow");
+
+  mcpd3::InProcessPartitionWorker saturated_worker;
+  saturated_worker.loadPartition(package);
+  saturated_worker.scaleObjective(2, /*saturate_capacity_overflow=*/true);
+  mcpd3::PartitionSolveRequest request;
+  request.round_id = 1;
+  request.partition_id = 0;
+  (void)saturated_worker.solveRound(request);
 }
 
 void fullSolveStopsOverBudgetWhenPromotionDisabled() {
@@ -2297,15 +3099,47 @@ void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
           "coordinator should dispatch solveRound concurrently across workers");
 }
 
+void coordinatorLoadsPartitionsAcrossWorkersConcurrently() {
+  std::atomic<int> active_loads{0};
+  std::atomic<int> max_active_loads{0};
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<LoadConcurrencyProbeWorker>(
+      &active_loads, &max_active_loads));
+  workers.push_back(std::make_unique<LoadConcurrencyProbeWorker>(
+      &active_loads, &max_active_loads));
+
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+
+  require(max_active_loads.load() >= 2,
+          "coordinator should load partitions concurrently across workers");
+}
+
 } // namespace
 
 int main() {
   try {
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
+    solverMemoryEstimateReportsBkAndVectorBytes();
+    streamingWorkerMatchesInProcessAcrossEviction();
+    streamingWorkerScalesEvictedDiskPayload();
+    streamingBatchSolvesResidentPartitionsFirst();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
+    inProcessPartitionWorkerLoadsManyBoundaryEndpoints();
     exportedPartitionPackagesMatchDualDecompositionRound();
+    disabledPartitionPackageExportPreservesNativeSolve();
+    packageOnlyExportMatchesSolverBackedExport();
+    packageOnlyExportWithManyArcsProducesLoadablePackages();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
+    directedStreamingDimacsUsesDeclaredNodeCount();
+    scaledDirectedStreamingDimacsMatchesPostLoadScaling();
+    scaledDirectedStreamingDimacsHandlesFinalLineWithoutNewline();
+    scaledDirectedStreamingDimacsHandlesOverflowMode();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
@@ -2333,6 +3167,8 @@ int main() {
     unitScaleResolvesOppositeDirectionCycle();
     lowObjectiveScaleCyclePromotesAndConverges();
     fullSolvePromotesObjectiveScaleOnOverBudget();
+    fullSolvePromotionForwardsSaturationFlag();
+    inProcessWorkerSaturatesObjectiveScaleOverflow();
     fullSolveStopsOverBudgetWhenPromotionDisabled();
     inProcessCoordinatorPromotesObjectiveScaleOnOverBudget();
     randomInitialAlphaValidationAndZeroRadiusNoop();
@@ -2344,6 +3180,7 @@ int main() {
     fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
+    coordinatorLoadsPartitionsAcrossWorkersConcurrently();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;

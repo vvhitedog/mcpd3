@@ -63,6 +63,7 @@ struct PartitionWorkerCoordinatorOptions {
   long objective_scale = 1;
   bool use_momentum = true;
   bool enable_group_stopping = true;
+  bool saturate_capacity_overflow = false;
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::SCALED_EPSILON;
   long regularization_budget_limit = 0;
@@ -175,6 +176,7 @@ public:
     }
     packages_.reserve(packages.size());
     const auto package_to_worker_index = assignPackagesToWorkers(packages);
+    std::vector<std::vector<size_t>> package_indices_by_worker(workers_.size());
     std::vector<bool> worker_has_partition(workers_.size(), false);
     for (size_t i = 0; i < packages.size(); ++i) {
       const auto &package = packages[i];
@@ -185,21 +187,35 @@ public:
                                  std::to_string(partition_id));
       }
       const size_t worker_index = package_to_worker_index[i];
+      package_indices_by_worker[worker_index].push_back(i);
       partition_to_worker_index_.emplace(partition_id, worker_index);
       partition_to_package_index_.emplace(partition_id, packages_.size());
       if (!worker_has_partition[worker_index]) {
         worker_has_partition[worker_index] = true;
         active_worker_indices_.push_back(worker_index);
       }
-      workers_[worker_index]->loadPartition(package);
-
       PartitionPackage coordinator_package;
       coordinator_package.partition_id = partition_id;
-      coordinator_package.constraint_endpoints = package.constraint_endpoints;
       packages_.push_back(std::move(coordinator_package));
     }
-    buildConstraints();
-    dropCoordinatorPackagePayloads();
+    buildConstraints(packages);
+
+    std::vector<std::future<void>> load_futures;
+    load_futures.reserve(active_worker_indices_.size());
+    for (const auto worker_index : active_worker_indices_) {
+      load_futures.push_back(std::async(
+          std::launch::async,
+          [&, worker_index] {
+            for (const auto package_index :
+                 package_indices_by_worker[worker_index]) {
+              workers_[worker_index]->loadPartition(
+                  std::move(packages[package_index]));
+            }
+          }));
+    }
+    for (auto &future : load_futures) {
+      future.get();
+    }
     randomizeInitialAlphas();
   }
 
@@ -605,9 +621,9 @@ private:
     return scale_result;
   }
 
-  void buildConstraints() {
+  void buildConstraints(const std::vector<PartitionPackage> &packages) {
     std::map<int, ConstraintAccumulator> accumulators;
-    for (const auto &package : packages_) {
+    for (const auto &package : packages) {
       for (const auto &binding : package.constraint_endpoints) {
         auto &accumulator = accumulators[binding.constraint_id];
         if (accumulator.constraint_id == -1) {
@@ -656,22 +672,6 @@ private:
       constraint.alpha_momentum = accumulator.alpha_momentum;
       constraint_index_by_id_[constraint.constraint_id] = constraints_.size();
       constraints_.push_back(constraint);
-    }
-  }
-
-  void dropCoordinatorPackagePayloads() {
-    for (auto &package : packages_) {
-      package.local_node_count = 0;
-      package.arcs.clear();
-      package.arc_capacities.clear();
-      package.terminal_capacities.clear();
-      package.local_to_global.clear();
-      package.constraint_endpoints.clear();
-      package.arcs.shrink_to_fit();
-      package.arc_capacities.shrink_to_fit();
-      package.terminal_capacities.shrink_to_fit();
-      package.local_to_global.shrink_to_fit();
-      package.constraint_endpoints.shrink_to_fit();
     }
   }
 
@@ -973,26 +973,18 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);
-  }
-
-  void scalePackage(PartitionPackage *package, long factor) {
-    for (auto &capacity : package->arc_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
-    }
-    for (auto &capacity : package->terminal_capacities) {
-      capacity = checkedScaleInt(capacity, factor);
-    }
-    for (auto &binding : package->constraint_endpoints) {
-      binding.alpha = checkedScaleLong(binding.alpha, factor);
-      binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
-    }
   }
 
   void scaleObjectiveState(long factor,
@@ -1023,15 +1015,13 @@ private:
         checkedScaleLong(result->final_regularization_budget, factor);
     result->final_regularization_contribution =
         checkedScaleLong(result->final_regularization_contribution, factor);
-    for (auto &package : packages_) {
-      scalePackage(&package, factor);
-    }
     for (auto &constraint : constraints_) {
       constraint.alpha = checkedScaleLong(constraint.alpha, factor);
       constraint.last_alpha = checkedScaleLong(constraint.last_alpha, factor);
     }
     for (const auto worker_index : active_worker_indices_) {
-      workers_[worker_index]->scaleObjective(factor);
+      workers_[worker_index]->scaleObjective(
+          factor, options_.saturate_capacity_overflow);
     }
     warned_regularization_budget_exceeded_ = false;
   }

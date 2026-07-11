@@ -82,6 +82,14 @@ if (METIS_ENABLED AND GKLIB_LIBRARY)
   target_link_libraries(dimacs_dual_decomp_example PUBLIC ${GKLIB_LIBRARY} m)
 endif ()
 
+## Native monolith benchmark. This intentionally uses DualDecomposition
+## directly and does not go through the worker/distributed package path.
+add_executable(mcpd3_native_monolith_benchmark benchmark/native_monolith.cpp ${MAXFLOW_SRC})
+target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
+if (METIS_ENABLED AND GKLIB_LIBRARY)
+  target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC ${GKLIB_LIBRARY} m)
+endif ()
+
 if (BUILD_TESTING)
   add_executable(partition_worker_test tests/partition_worker_test.cpp ${MAXFLOW_SRC})
   target_link_libraries(partition_worker_test PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})

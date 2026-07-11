@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -32,8 +33,35 @@
 
 namespace mcpd3 {
 
+inline bool primaldual_timing_enabled() {
+  const char *value = std::getenv("MCPD3_SOLVER_TIMING");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 class PrimalDualMinCutSolver {
 public:
+  using MaxflowGraph =
+      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
+
+  struct WarmState {
+    std::vector<int> v_flow;
+    std::vector<int> d_flow;
+    std::vector<int> x;
+    bool is_first_iteration = true;
+    bool is_first_iteration_of_new_scale = true;
+    bool has_solution = false;
+    long mincut_value = 0;
+    std::vector<int> cached_lagrange_multipliers;
+    std::vector<int> cached_last_lagrange_multipliers;
+    int regularization_str = 0;
+    long last_regularization_budget = 0;
+    long last_regularization_contribution = 0;
+    long last_regularization_anchor_sink_count = 0;
+    long last_regularization_active_sink_count = 0;
+    std::vector<unsigned char> regularization_anchor_sink;
+    MaxflowGraph::ReusableState maxflow_graph_state;
+  };
+
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<int> arc_capacities,
                          std::vector<int> terminal_capacities)
@@ -158,38 +186,44 @@ public:
 
   template <int scale> void scaleProblem() { scaleProblem(scale); }
 
-  void scaleProblem(long scale) {
+  void scaleProblem(long scale, bool saturate_capacity_overflow = false) {
     if (scale <= 0) {
       throw std::runtime_error("problem scale factor must be positive");
     }
     for (int i = 0; i < nnode_; ++i) {
       terminal_capacities_[i] =
-          checkedScaleInt(terminal_capacities_[i], scale);
+          checkedScaleInt(terminal_capacities_[i], scale,
+                          saturate_capacity_overflow);
       auto &flow = d_flow_[i];
-      flow = checkedScaleInt(flow, scale);
+      flow = checkedScaleInt(flow, scale, saturate_capacity_overflow);
     }
     for (int i = 0; i < narc_; ++i) {
       auto &forward_capacity = arc_capacities_[2 * i + 0];
       auto &backward_capacity = arc_capacities_[2 * i + 1];
-      forward_capacity = checkedScaleInt(forward_capacity, scale);
-      backward_capacity = checkedScaleInt(backward_capacity, scale);
+      forward_capacity =
+          checkedScaleInt(forward_capacity, scale, saturate_capacity_overflow);
+      backward_capacity =
+          checkedScaleInt(backward_capacity, scale, saturate_capacity_overflow);
       auto &flow = v_flow_[i];
-      flow = checkedScaleInt(flow, scale);
+      flow = checkedScaleInt(flow, scale, saturate_capacity_overflow);
     }
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
       int flow;
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_rcap(
+          a, checkedScaleInt(flow, scale, saturate_capacity_overflow));
       a = maxflow_graph_.get_next_arc(a);
       flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(a, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_rcap(
+          a, checkedScaleInt(flow, scale, saturate_capacity_overflow));
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
       int flow;
       flow = maxflow_graph_.get_trcap(i);
-      maxflow_graph_.set_trcap(i, checkedScaleInt(flow, scale));
+      maxflow_graph_.set_trcap(
+          i, checkedScaleInt(flow, scale, saturate_capacity_overflow));
     }
     mincut_value_ = checkedScaleLong(mincut_value_, scale);
     // NOTE: after changing scale, the capacities from previous and this scale
@@ -233,12 +267,14 @@ public:
 
   void solve() {
     if (is_first_iteration_) {
-      auto init_time = time_lambda([&]{
-      shrinkToFitDualDecompositionConstraints(); // memory optimization
-      initializeFlow(); // finds a flow satisfying arc based lagrange multiplier
-                        // complementary slackness conditions
+      auto init_time = time_lambda([&] {
+        shrinkToFitDualDecompositionConstraints(); // memory optimization
+        initializeFlow(); // finds a flow satisfying arc based lagrange
+                          // multiplier complementary slackness conditions
       });
-      printf("init_time: %ldms\n",init_time.count());
+      if (primaldual_timing_enabled()) {
+        printf("init_time: %ldms\n", init_time.count());
+      }
     }
     cacheLagrangeMultipliers(); // optimization
     resetRegularizationDiagnostics();
@@ -329,6 +365,31 @@ public:
 
   int getMinCutSolution(int index) const { return x_[index]; }
 
+  struct MemoryEstimate {
+    std::size_t bk_node_bytes = 0;
+    std::size_t bk_arc_bytes = 0;
+    std::size_t bk_total_bytes = 0;
+    std::size_t solver_vector_bytes = 0;
+    std::size_t total_bytes = 0;
+  };
+
+  static MemoryEstimate estimateMemoryBytes(int nnode, int narc) {
+    using EstimateGraph =
+        Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
+    MemoryEstimate estimate;
+    estimate.bk_node_bytes = EstimateGraph::estimated_node_array_bytes(nnode);
+    estimate.bk_arc_bytes = EstimateGraph::estimated_arc_array_bytes(narc);
+    estimate.bk_total_bytes =
+        estimate.bk_node_bytes + estimate.bk_arc_bytes;
+    const auto arc_int_count = 5 * static_cast<std::size_t>(narc);
+    const auto node_int_count = 3 * static_cast<std::size_t>(nnode);
+    estimate.solver_vector_bytes =
+        (arc_int_count + node_int_count) * sizeof(int);
+    estimate.total_bytes =
+        estimate.bk_total_bytes + estimate.solver_vector_bytes;
+    return estimate;
+  }
+
   void setMinCutSolution(const std::vector<bool> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
@@ -339,6 +400,66 @@ public:
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
     has_solution_ = true;
+  }
+
+  WarmState captureWarmState() const {
+    WarmState state;
+    state.v_flow = v_flow_;
+    state.d_flow = d_flow_;
+    state.x = x_;
+    state.is_first_iteration = is_first_iteration_;
+    state.is_first_iteration_of_new_scale = is_first_iteration_of_new_scale_;
+    state.has_solution = has_solution_;
+    state.mincut_value = mincut_value_;
+    state.cached_lagrange_multipliers = cached_lagrange_multipliers_;
+    state.cached_last_lagrange_multipliers =
+        cached_last_lagrange_multipliers_;
+    state.regularization_str = regularization_str_;
+    state.last_regularization_budget = last_regularization_budget_;
+    state.last_regularization_contribution =
+        last_regularization_contribution_;
+    state.last_regularization_anchor_sink_count =
+        last_regularization_anchor_sink_count_;
+    state.last_regularization_active_sink_count =
+        last_regularization_active_sink_count_;
+    state.regularization_anchor_sink = regularization_anchor_sink_;
+    state.maxflow_graph_state = maxflow_graph_.captureReusableState();
+    return state;
+  }
+
+  void restoreWarmState(const WarmState &state) {
+    if (state.v_flow.size() != static_cast<size_t>(narc_) ||
+        state.d_flow.size() != static_cast<size_t>(nnode_) ||
+        state.x.size() != static_cast<size_t>(nnode_)) {
+      throw std::runtime_error("solver warm state shape does not match graph");
+    }
+    v_flow_ = state.v_flow;
+    d_flow_ = state.d_flow;
+    x_ = state.x;
+    is_first_iteration_ = state.is_first_iteration;
+    is_first_iteration_of_new_scale_ = state.is_first_iteration_of_new_scale;
+    has_solution_ = state.has_solution;
+    mincut_value_ = state.mincut_value;
+    cached_lagrange_multipliers_ = state.cached_lagrange_multipliers;
+    cached_last_lagrange_multipliers_ =
+        state.cached_last_lagrange_multipliers;
+    regularization_str_ = state.regularization_str;
+    last_regularization_budget_ = state.last_regularization_budget;
+    last_regularization_contribution_ =
+        state.last_regularization_contribution;
+    last_regularization_anchor_sink_count_ =
+        state.last_regularization_anchor_sink_count;
+    last_regularization_active_sink_count_ =
+        state.last_regularization_active_sink_count;
+    regularization_anchor_sink_ = state.regularization_anchor_sink;
+    incremental_mincut_nodes_.clear();
+    incremental_arcs_.clear();
+    maxflow_changed_list_.Reset();
+    dual_decomposition_local_indices_set_.clear();
+    for (const auto &index : dual_decomposition_local_indices_) {
+      dual_decomposition_local_indices_set_.insert(index);
+    }
+    maxflow_graph_.restoreReusableState(state.maxflow_graph_state);
   }
 
 private:
@@ -363,10 +484,15 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale) {
+  static int checkedScaleInt(int value, long scale,
+                             bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
     if (result > std::numeric_limits<int>::max() ||
         result < std::numeric_limits<int>::min()) {
+      if (saturate_capacity_overflow) {
+        return result < 0 ? std::numeric_limits<int>::min()
+                          : std::numeric_limits<int>::max();
+      }
       throw std::overflow_error("objective scale promotion exceeds int");
     }
     return static_cast<int>(result);
@@ -824,8 +950,6 @@ private:
   std::vector<int> v_flow_; // flow on the arcs
   std::vector<int> d_flow_; // flow on the nodes
   std::vector<int> x_;      // mincut solution
-  using MaxflowGraph =
-      Graph</*captype=*/int, /*tcaptype=*/int, /*flowtype=*/long>;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;
