@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -28,6 +29,11 @@
 #include <graph/mcgraph.h>
 
 namespace mcpd3 {
+
+struct DimacsScaleStats {
+  long arc_saturation_count = 0;
+  long terminal_saturation_count = 0;
+};
 
 namespace _dimacs_implementation {
 
@@ -172,6 +178,41 @@ int remap_index(int original_index, int source_index, int sink_index) {
   }
   return --new_index; // indices in DIMACS start at 1 but we wish for them
                       // to start at 0
+}
+
+inline bool would_overflow_int_scale(int value, long factor) {
+  if (value > 0 && value > std::numeric_limits<int>::max() / factor) {
+    return true;
+  }
+  if (value < 0 && value < std::numeric_limits<int>::min() / factor) {
+    return true;
+  }
+  return false;
+}
+
+inline int scale_int_capacity(int value, long factor,
+                              bool saturate_capacity_overflow,
+                              long *saturation_count) {
+  if (factor <= 0) {
+    throw std::runtime_error("objective scale must be positive");
+  }
+  if (factor == 1) {
+    return value;
+  }
+  if (would_overflow_int_scale(value, factor)) {
+    if (!saturate_capacity_overflow) {
+      throw std::overflow_error("objective scale exceeds int range");
+    }
+    ++(*saturation_count);
+    return value < 0 ? std::numeric_limits<int>::min()
+                     : std::numeric_limits<int>::max();
+  }
+  const long scaled = static_cast<long>(value) * factor;
+  if (scaled > std::numeric_limits<int>::max() ||
+      scaled < std::numeric_limits<int>::min()) {
+    throw std::overflow_error("objective scale exceeds int range");
+  }
+  return static_cast<int>(scaled);
 }
 
 template <typename ArcOperator, typename TerminalOperator>
@@ -324,7 +365,16 @@ MinCutGraph read_dimacs(const std::string &filename) {
   return std::move(g);
 }
 
-MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
+MinCutGraph read_dimacs_directed_streaming_scaled(
+    const std::string &filename, long objective_scale,
+    bool saturate_capacity_overflow,
+    DimacsScaleStats *scale_stats = nullptr) {
+  if (objective_scale <= 0) {
+    throw std::runtime_error("objective scale must be positive");
+  }
+  DimacsScaleStats local_stats;
+  DimacsScaleStats *stats = scale_stats != nullptr ? scale_stats : &local_stats;
+  *stats = {};
   const auto header = _dimacs_implementation::scan_dimacs_header(filename);
   MinCutGraph g;
   g.nnode = header.declared_nodes > 1 ? header.declared_nodes - 2 : 0;
@@ -342,7 +392,9 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   auto arc_op = [&](int s, int t, int cap) {
     g.nnode = std::max(g.nnode, s + 1);
     g.nnode = std::max(g.nnode, t + 1);
-    g.arc_capacities.push_back(cap);
+    g.arc_capacities.push_back(_dimacs_implementation::scale_int_capacity(
+        cap, objective_scale, saturate_capacity_overflow,
+        &stats->arc_saturation_count));
     g.arc_capacities.push_back(0);
     g.arcs.push_back(s);
     g.arcs.push_back(t);
@@ -377,10 +429,22 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   }
 
   g.terminal_capacities.resize(g.nnode, 0);
+  if (objective_scale != 1) {
+    for (auto &capacity : g.terminal_capacities) {
+      capacity = _dimacs_implementation::scale_int_capacity(
+          capacity, objective_scale, saturate_capacity_overflow,
+          &stats->terminal_saturation_count);
+    }
+  }
   g.arcs.shrink_to_fit();
   g.terminal_capacities.shrink_to_fit();
   g.arc_capacities.shrink_to_fit();
   return std::move(g);
+}
+
+MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
+  return read_dimacs_directed_streaming_scaled(
+      filename, /*objective_scale=*/1, /*saturate_capacity_overflow=*/false);
 }
 
 MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {

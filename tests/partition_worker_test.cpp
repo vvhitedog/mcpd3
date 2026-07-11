@@ -753,6 +753,102 @@ void directedStreamingDimacsUsesDeclaredNodeCount() {
   std::remove(path.c_str());
 }
 
+void scaleGraphForDimacsTest(mcpd3::MinCutGraph *graph, int factor) {
+  for (auto &capacity : graph->arc_capacities) {
+    capacity *= factor;
+  }
+  for (auto &capacity : graph->terminal_capacities) {
+    capacity *= factor;
+  }
+}
+
+void scaledDirectedStreamingDimacsMatchesPostLoadScaling() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-dimacs-test.max";
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming reader test\n";
+    out << "p max 5 6\n";
+    out << "n 1 s\n";
+    out << "n 5 t\n";
+    out << "a 1 2 3\n";
+    out << "a 1 4 5\n";
+    out << "a 2 3 7\n";
+    out << "a 3 2 11\n";
+    out << "a 4 5 13\n";
+    out << "a 3 5 17\n";
+  }
+
+  auto expected = mcpd3::read_dimacs_directed_streaming(path);
+  scaleGraphForDimacsTest(&expected, /*factor=*/4);
+
+  mcpd3::DimacsScaleStats stats;
+  auto scaled = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/4, /*saturate_capacity_overflow=*/false,
+      &stats);
+  require(stats.arc_saturation_count == 0,
+          "exact scaled directed reader should not report arc saturations");
+  require(stats.terminal_saturation_count == 0,
+          "exact scaled directed reader should not report terminal saturations");
+  require(scaled.nnode == expected.nnode,
+          "scaled directed reader should preserve node count");
+  require(scaled.narc == expected.narc,
+          "scaled directed reader should preserve arc count");
+  require(scaled.arcs == expected.arcs,
+          "scaled directed reader should preserve arc endpoints");
+  require(scaled.arc_capacities == expected.arc_capacities,
+          "scaled directed reader should scale arc capacities during load");
+  require(scaled.terminal_capacities == expected.terminal_capacities,
+          "scaled directed reader should scale terminal capacities after "
+          "aggregation");
+  std::remove(path.c_str());
+}
+
+void scaledDirectedStreamingDimacsHandlesOverflowMode() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-overflow-test.max";
+  const int max_int = std::numeric_limits<int>::max();
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming overflow test\n";
+    out << "p max 4 3\n";
+    out << "n 1 s\n";
+    out << "n 4 t\n";
+    out << "a 1 2 " << max_int << "\n";
+    out << "a 2 3 " << max_int << "\n";
+    out << "a 3 4 " << max_int << "\n";
+  }
+
+  bool strict_threw = false;
+  try {
+    (void)mcpd3::read_dimacs_directed_streaming_scaled(
+        path, /*objective_scale=*/2, /*saturate_capacity_overflow=*/false);
+  } catch (const std::overflow_error &) {
+    strict_threw = true;
+  }
+  require(strict_threw,
+          "strict scaled directed reader should reject int overflow");
+
+  mcpd3::DimacsScaleStats stats;
+  auto saturated = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/2, /*saturate_capacity_overflow=*/true,
+      &stats);
+  require(stats.arc_saturation_count == 1,
+          "saturating scaled directed reader should count arc saturations");
+  require(stats.terminal_saturation_count == 2,
+          "saturating scaled directed reader should count terminal "
+          "saturations");
+  require(saturated.arc_capacities ==
+              std::vector<int>({std::numeric_limits<int>::max(), 0}),
+          "saturating scaled directed reader should clip positive arc caps");
+  require(saturated.terminal_capacities ==
+              std::vector<int>({std::numeric_limits<int>::max(),
+                                std::numeric_limits<int>::min()}),
+          "saturating scaled directed reader should clip terminal caps by "
+          "sign");
+  std::remove(path.c_str());
+}
+
 void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -2866,6 +2962,8 @@ int main() {
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     directedStreamingDimacsUsesDeclaredNodeCount();
+    scaledDirectedStreamingDimacsMatchesPostLoadScaling();
+    scaledDirectedStreamingDimacsHandlesOverflowMode();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
