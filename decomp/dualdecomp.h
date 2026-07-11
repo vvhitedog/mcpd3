@@ -1100,6 +1100,19 @@ private:
       dualdecomp_progress_report("dd_initialize_mapping", mapping_done,
                                  npartition_, mapping_start);
     }
+    std::vector<int> arc_count_by_partition(npartition_, 0);
+    for (int i = 0; i < narc_; ++i) {
+      int s = arcs_[2 * i + 0];
+      int t = arcs_[2 * i + 1];
+      if (s > t) {
+        std::swap(s, t);
+      }
+      ++arc_count_by_partition[partitions_[s]];
+    }
+    for (int partition = 0; partition < npartition_; ++partition) {
+      min_cut_sub_graphs_[partition].reserveArcs(
+          arc_count_by_partition[partition]);
+    }
     /**
      * step 1: distribute all arcs into one and only one sub graph
      */
@@ -1378,6 +1391,16 @@ private:
     void initializeMapping(int global_node_count) {
       global_to_local_map.assign(global_node_count, -1);
       local_to_global.clear();
+    }
+
+    void reserveArcs(int arc_count) {
+      if (arc_count <= 0) {
+        return;
+      }
+      const auto capacity_count =
+          static_cast<size_t>(arc_count) * static_cast<size_t>(2);
+      graph.arcs.reserve(capacity_count);
+      graph.arc_capacities.reserve(capacity_count);
     }
 
     int getOrInsertNode(int global_index) {

@@ -644,6 +644,72 @@ void packageOnlyExportMatchesSolverBackedExport() {
           "package-only construction should require package export");
 }
 
+void packageOnlyExportWithManyArcsProducesLoadablePackages() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  std::vector<int> arcs;
+  std::vector<int> arc_capacities;
+  const auto add_arc = [&](int s, int t, int forward, int backward) {
+    arcs.push_back(s);
+    arcs.push_back(t);
+    arc_capacities.push_back(forward);
+    arc_capacities.push_back(backward);
+  };
+  add_arc(0, 1, 3, 0);
+  add_arc(0, 1, 5, 1);
+  add_arc(0, 1, 7, 0);
+  add_arc(0, 1, 11, 2);
+  add_arc(0, 1, 13, 0);
+  add_arc(0, 1, 17, 3);
+  add_arc(0, 1, 19, 0);
+  add_arc(0, 1, 23, 4);
+  add_arc(0, 1, 29, 0);
+  add_arc(0, 1, 31, 5);
+  std::vector<int> terminal_capacities{2, -7};
+
+  auto package_only_options = options;
+  package_only_options.construct_solvers = false;
+  mcpd3::DualDecomposition package_only(
+      /*npartition=*/4,
+      /*nnode=*/2,
+      /*narc=*/static_cast<int>(arcs.size() / 2),
+      std::move(arcs), std::move(arc_capacities),
+      std::move(terminal_capacities), package_only_options);
+
+  const auto &package_only_packages = package_only.getPartitionPackages();
+  require(package_only_packages.size() == 4,
+          "many-arc package-only export should produce one package per "
+          "partition");
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.reserve(package_only_packages.size());
+  for (const auto &package : package_only_packages) {
+    mcpd3::validatePartitionPackage(package);
+    workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  }
+
+  mcpd3::PartitionWorkerCoordinatorOptions coordinator_options;
+  coordinator_options.max_iteration_count = 1;
+  coordinator_options.num_optimization_scales = 1;
+  coordinator_options.initial_step_size = 100;
+  coordinator_options.use_momentum = false;
+  coordinator_options.enable_group_stopping = false;
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      package_only_packages, std::move(workers), coordinator_options);
+  const auto stats = coordinator.runRound(
+      /*round_id=*/1, /*scale=*/100, /*step_size=*/100,
+      /*regularization_strength=*/0);
+  require(stats.round_id == 1,
+          "many-arc package-only packages should load and solve");
+}
+
 mcpd3::DualDecomposition makeTinyDualDecomposition() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -2959,6 +3025,7 @@ int main() {
     exportedPartitionPackagesMatchDualDecompositionRound();
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();
+    packageOnlyExportWithManyArcsProducesLoadablePackages();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     directedStreamingDimacsUsesDeclaredNodeCount();
