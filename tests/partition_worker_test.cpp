@@ -6,6 +6,7 @@
 // Software Foundation, either version 3 of the License, or (at your option)
 // any later version.
 
+#include <algorithm>
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -283,6 +284,73 @@ void streamingWorkerScalesEvictedDiskPayload() {
           "streaming worker should not restore stale warm state after scaling");
   require(streaming.warmStateWriteCountForTesting() == 2,
           "streaming scaled reload should persist the evicted resident state");
+}
+
+void streamingBatchSolvesResidentPartitionsFirst() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/30,
+                                       /*terminal_capacity=*/2);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/31,
+                                       /*terminal_capacity=*/4);
+
+  mcpd3::InProcessPartitionWorker reference;
+  reference.loadPartition(package0);
+  reference.loadPartition(package1);
+
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.resident_byte_limit = 1;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+
+  mcpd3::PartitionSolveRequest first;
+  first.round_id = 1;
+  first.partition_id = 0;
+  mcpd3::PartitionSolveRequest second;
+  second.round_id = 1;
+  second.partition_id = 1;
+
+  const auto first_streaming_batch = streaming.solveRoundBatch({first, second});
+  const auto first_reference_batch = reference.solveRoundBatch({first, second});
+  require(first_streaming_batch.size() == first_reference_batch.size(),
+          "streaming first batch should return both results");
+  for (size_t i = 0; i < first_reference_batch.size(); ++i) {
+    requireSolveResultsMatch(first_streaming_batch[i],
+                             first_reference_batch[i],
+                             "streaming first batch result");
+  }
+  require(streaming.residentPartitionCountForTesting() == 1,
+          "streaming batch should keep one resident partition");
+  require(streaming.warmStateWriteCountForTesting() == 1,
+          "first streaming batch should evict one partition");
+  require(streaming.warmStateRestoreCountForTesting() == 0,
+          "first streaming batch should not restore before reload");
+
+  first.round_id = 2;
+  second.round_id = 2;
+  const auto second_streaming_batch =
+      streaming.solveRoundBatch({first, second});
+  const auto second_reference_batch = reference.solveRoundBatch({first, second});
+  require(second_streaming_batch.size() == second_reference_batch.size(),
+          "streaming second batch should return both results");
+  for (const auto &expected : second_reference_batch) {
+    const int partition_id = expected.partition_id;
+    auto result_iter = std::find_if(
+        second_streaming_batch.begin(), second_streaming_batch.end(),
+        [partition_id](const mcpd3::PartitionSolveResult &result) {
+          return result.partition_id == partition_id;
+        });
+    require(result_iter != second_streaming_batch.end(),
+            "streaming second batch should return reference partition");
+    requireSolveResultsMatch(*result_iter, expected,
+                             "streaming second batch result");
+  }
+  require(streaming.warmStateWriteCountForTesting() == 2,
+          "resident-first second batch should evict only once");
+  require(streaming.warmStateRestoreCountForTesting() == 1,
+          "resident-first second batch should restore only the nonresident "
+          "partition");
 }
 
 struct DirectSolverResult {
@@ -3059,6 +3127,7 @@ int main() {
     solverMemoryEstimateReportsBkAndVectorBytes();
     streamingWorkerMatchesInProcessAcrossEviction();
     streamingWorkerScalesEvictedDiskPayload();
+    streamingBatchSolvesResidentPartitionsFirst();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     inProcessPartitionWorkerLoadsManyBoundaryEndpoints();
     exportedPartitionPackagesMatchDualDecompositionRound();

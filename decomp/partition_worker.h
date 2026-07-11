@@ -598,15 +598,27 @@ public:
     std::vector<PartitionSolveResult> results;
     results.reserve(requests.size());
     std::unordered_set<int> seen_partition_ids;
+    std::vector<const PartitionSolveRequest *> resident_requests;
+    std::vector<const PartitionSolveRequest *> nonresident_requests;
+    resident_requests.reserve(requests.size());
+    nonresident_requests.reserve(requests.size());
     for (const auto &request : requests) {
       auto &stored = storedPartitionForRequest(request);
       if (!seen_partition_ids.insert(stored.partition_id).second) {
         throw std::runtime_error(
             "batch solve requests must target distinct partitions");
       }
+      if (stored.resident_worker) {
+        resident_requests.push_back(&request);
+      } else {
+        nonresident_requests.push_back(&request);
+      }
     }
-    for (const auto &request : requests) {
-      results.push_back(solveRound(request));
+    for (const auto *request : resident_requests) {
+      results.push_back(solveRound(*request));
+    }
+    for (const auto *request : nonresident_requests) {
+      results.push_back(solveRound(*request));
     }
     return results;
   }
