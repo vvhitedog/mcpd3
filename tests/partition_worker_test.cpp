@@ -1005,6 +1005,47 @@ private:
   bool saturate_scale_objective_ = false;
 };
 
+class LoadConcurrencyProbeWorker final : public mcpd3::PartitionWorker {
+public:
+  LoadConcurrencyProbeWorker(std::atomic<int> *active_loads,
+                             std::atomic<int> *max_active_loads)
+      : active_loads_(active_loads), max_active_loads_(max_active_loads) {}
+
+  void loadPartition(const mcpd3::PartitionPackage &package) override {
+    const int active = active_loads_->fetch_add(1) + 1;
+    int previous_max = max_active_loads_->load();
+    while (active > previous_max &&
+           !max_active_loads_->compare_exchange_weak(previous_max, active)) {
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    package_ = package;
+    active_loads_->fetch_sub(1);
+  }
+
+  mcpd3::PartitionSolveResult solveRound(
+      const mcpd3::PartitionSolveRequest &request) override {
+    mcpd3::PartitionSolveResult result;
+    result.round_id = request.round_id;
+    result.partition_id = package_.partition_id;
+    result.lower_bound = package_.partition_id + 1;
+    for (const auto &endpoint : package_.constraint_endpoints) {
+      result.constrained_labels.push_back(
+          mcpd3::ConstraintLabel{endpoint.constraint_id,
+                                 endpoint.global_node_id,
+                                 endpoint.local_index, 0});
+    }
+    return result;
+  }
+
+  void scaleObjective(long, bool = false) override {}
+
+private:
+  mcpd3::PartitionPackage package_;
+  std::atomic<int> *active_loads_;
+  std::atomic<int> *max_active_loads_;
+};
+
 class BatchRecordingWorker final : public mcpd3::PartitionWorker {
 public:
   enum class Mode {
@@ -2728,6 +2769,26 @@ void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
           "coordinator should dispatch solveRound concurrently across workers");
 }
 
+void coordinatorLoadsPartitionsAcrossWorkersConcurrently() {
+  std::atomic<int> active_loads{0};
+  std::atomic<int> max_active_loads{0};
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<LoadConcurrencyProbeWorker>(
+      &active_loads, &max_active_loads));
+  workers.push_back(std::make_unique<LoadConcurrencyProbeWorker>(
+      &active_loads, &max_active_loads));
+
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      makeCoordinatorPackages(), std::move(workers), options);
+
+  require(max_active_loads.load() >= 2,
+          "coordinator should load partitions concurrently across workers");
+}
+
 } // namespace
 
 int main() {
@@ -2782,6 +2843,7 @@ int main() {
     fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
+    coordinatorLoadsPartitionsAcrossWorkersConcurrently();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;

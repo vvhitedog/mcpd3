@@ -176,6 +176,7 @@ public:
     }
     packages_.reserve(packages.size());
     const auto package_to_worker_index = assignPackagesToWorkers(packages);
+    std::vector<std::vector<size_t>> package_indices_by_worker(workers_.size());
     std::vector<bool> worker_has_partition(workers_.size(), false);
     for (size_t i = 0; i < packages.size(); ++i) {
       const auto &package = packages[i];
@@ -186,6 +187,7 @@ public:
                                  std::to_string(partition_id));
       }
       const size_t worker_index = package_to_worker_index[i];
+      package_indices_by_worker[worker_index].push_back(i);
       partition_to_worker_index_.emplace(partition_id, worker_index);
       partition_to_package_index_.emplace(partition_id, packages_.size());
       if (!worker_has_partition[worker_index]) {
@@ -196,7 +198,23 @@ public:
       coordinator_package.partition_id = partition_id;
       coordinator_package.constraint_endpoints = package.constraint_endpoints;
       packages_.push_back(std::move(coordinator_package));
-      workers_[worker_index]->loadPartition(std::move(packages[i]));
+    }
+
+    std::vector<std::future<void>> load_futures;
+    load_futures.reserve(active_worker_indices_.size());
+    for (const auto worker_index : active_worker_indices_) {
+      load_futures.push_back(std::async(
+          std::launch::async,
+          [&, worker_index] {
+            for (const auto package_index :
+                 package_indices_by_worker[worker_index]) {
+              workers_[worker_index]->loadPartition(
+                  std::move(packages[package_index]));
+            }
+          }));
+    }
+    for (auto &future : load_futures) {
+      future.get();
     }
     buildConstraints();
     dropCoordinatorPackagePayloads();
