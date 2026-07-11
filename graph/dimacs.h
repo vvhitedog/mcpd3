@@ -21,10 +21,16 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unordered_map>
+#include <unistd.h>
 
 #include <graph/mcgraph.h>
 
@@ -36,6 +42,59 @@ struct DimacsScaleStats {
 };
 
 namespace _dimacs_implementation {
+
+class ReadOnlyMmapFile {
+public:
+  explicit ReadOnlyMmapFile(const std::string &filename)
+      : filename_(filename) {
+    fd_ = open(filename.c_str(), O_RDONLY);
+    if (fd_ == -1) {
+      throw std::runtime_error("failed to open file for reading: " + filename);
+    }
+    struct stat st {};
+    if (fstat(fd_, &st) != 0) {
+      close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("failed to stat file for reading: " + filename);
+    }
+    if (st.st_size <= 0) {
+      close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("DIMACS file is empty: " + filename);
+    }
+    size_ = static_cast<size_t>(st.st_size);
+    data_ = static_cast<const char *>(
+        mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0));
+    if (data_ == MAP_FAILED) {
+      data_ = nullptr;
+      close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("failed to mmap file for reading: " + filename);
+    }
+    (void)madvise(const_cast<char *>(data_), size_, MADV_SEQUENTIAL);
+  }
+
+  ~ReadOnlyMmapFile() {
+    if (data_ != nullptr) {
+      munmap(const_cast<char *>(data_), size_);
+    }
+    if (fd_ != -1) {
+      close(fd_);
+    }
+  }
+
+  ReadOnlyMmapFile(const ReadOnlyMmapFile &) = delete;
+  ReadOnlyMmapFile &operator=(const ReadOnlyMmapFile &) = delete;
+
+  const char *data() const { return data_; }
+  size_t size() const { return size_; }
+
+private:
+  std::string filename_;
+  int fd_ = -1;
+  const char *data_ = nullptr;
+  size_t size_ = 0;
+};
 
 inline bool progress_enabled() {
   const char *value = std::getenv("MCPD3_PROGRESS");
@@ -103,6 +162,66 @@ inline bool parse_char_token(const char *&p, char &value) {
   }
   value = *p++;
   return true;
+}
+
+inline const char *skip_space_bounded(const char *p, const char *end) {
+  while (p < end && std::isspace(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  return p;
+}
+
+inline const char *skip_token_bounded(const char *p, const char *end) {
+  p = skip_space_bounded(p, end);
+  while (p < end && !std::isspace(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  return p;
+}
+
+inline bool parse_int_token_bounded(const char *&p, const char *end,
+                                    int &value) {
+  p = skip_space_bounded(p, end);
+  bool negative = false;
+  if (p < end && *p == '-') {
+    negative = true;
+    ++p;
+  }
+  if (p >= end || !std::isdigit(static_cast<unsigned char>(*p))) {
+    return false;
+  }
+  int parsed = 0;
+  while (p < end && std::isdigit(static_cast<unsigned char>(*p))) {
+    parsed = parsed * 10 + (*p - '0');
+    ++p;
+  }
+  value = negative ? -parsed : parsed;
+  return true;
+}
+
+inline bool parse_char_token_bounded(const char *&p, const char *end,
+                                     char &value) {
+  p = skip_space_bounded(p, end);
+  if (p >= end) {
+    return false;
+  }
+  value = *p++;
+  return true;
+}
+
+inline const char *line_end(const char *p, const char *end) {
+  while (p < end && *p != '\n') {
+    ++p;
+  }
+  return p;
+}
+
+inline const char *next_line(const char *p, const char *end) {
+  p = line_end(p, end);
+  if (p < end && *p == '\n') {
+    ++p;
+  }
+  return p;
 }
 
 inline FILE *open_dimacs_file(const std::string &filename) {
@@ -300,6 +419,94 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
   }
   fclose(stream);
 }
+
+template <typename ProblemOperator, typename ArcOperator,
+          typename TerminalOperator>
+void read_dimacs_general_mapped(const std::string &filename,
+                                ProblemOperator problem_op,
+                                ArcOperator arc_op,
+                                TerminalOperator term_op) {
+  ReadOnlyMmapFile file(filename);
+  const char *p = file.data();
+  const char *end = file.data() + file.size();
+  int source = -1;
+  int sink = -1;
+
+  while (p < end) {
+    const char type = *p;
+    const char *line = p + 1;
+    const char *line_limit = line_end(line, end);
+    switch (type) {
+    case 'p':
+      {
+      int n = 0;
+      int m = 0;
+      const char *q = line;
+      q = skip_token_bounded(q, line_limit); // max
+      if (!parse_int_token_bounded(q, line_limit, n) ||
+          !parse_int_token_bounded(q, line_limit, m)) {
+        throw std::runtime_error("p line is malformed in DIMACS file:" +
+                                 filename + "\n");
+      }
+      problem_op(n, m);
+      }
+      break;
+    case 'a':
+      if (source == -1 || sink == -1) {
+        throw std::runtime_error(
+            "'a' line occured beforce setting source/sink in DIMACS file:" +
+            filename + "\n");
+      }
+      {
+      int s = 0;
+      int t = 0;
+      int cap = 0;
+      const char *q = line;
+      if (!parse_int_token_bounded(q, line_limit, s) ||
+          !parse_int_token_bounded(q, line_limit, t) ||
+          !parse_int_token_bounded(q, line_limit, cap)) {
+        throw std::runtime_error("'a' line is malformed in DIMACS file:" +
+                                 filename + "\n");
+      }
+      if (t == source || s == sink) {
+        throw std::runtime_error(
+            "specified source or sink as target or source node incorrectly:" +
+            filename + "\n");
+      }
+      if (s != source && t != sink) {
+        arc_op(remap_index(s, source, sink), remap_index(t, source, sink),
+               cap);
+      } else if (s == source) {
+        term_op(true, remap_index(t, source, sink), cap);
+      } else if (t == sink) {
+        term_op(false, remap_index(s, source, sink), cap);
+      }
+      }
+      break;
+    case 'n':
+      {
+      int n = 0;
+      char terminal = '\0';
+      const char *q = line;
+      if (!parse_int_token_bounded(q, line_limit, n) ||
+          !parse_char_token_bounded(q, line_limit, terminal)) {
+        throw std::runtime_error("'n' line is malformed in DIMACS file:" +
+                                 filename + "\n");
+      }
+      if (terminal == 's') {
+        source = n;
+      } else if (terminal == 't') {
+        sink = n;
+      }
+      }
+      break;
+    case 'c':
+    default:
+      break;
+    }
+    p = next_line(p, end);
+  }
+}
 } // namespace _dimacs_implementation
 
 MinCutGraph read_dimacs(const std::string &filename) {
@@ -375,19 +582,22 @@ MinCutGraph read_dimacs_directed_streaming_scaled(
   DimacsScaleStats local_stats;
   DimacsScaleStats *stats = scale_stats != nullptr ? scale_stats : &local_stats;
   *stats = {};
-  const auto header = _dimacs_implementation::scan_dimacs_header(filename);
   MinCutGraph g;
-  g.nnode = header.declared_nodes > 1 ? header.declared_nodes - 2 : 0;
+  g.nnode = 0;
   g.narc = 0;
-  if (header.declared_arcs > 0) {
-    const auto reserve_count =
-        static_cast<size_t>(2) * static_cast<size_t>(header.declared_arcs);
-    g.arcs.reserve(reserve_count);
-    g.arc_capacities.reserve(reserve_count);
-  }
-  if (g.nnode > 0) {
-    g.terminal_capacities.resize(g.nnode, 0);
-  }
+
+  auto problem_op = [&](int declared_nodes, int declared_arcs) {
+    if (declared_nodes > 1) {
+      g.nnode = std::max(g.nnode, declared_nodes - 2);
+      g.terminal_capacities.resize(g.nnode, 0);
+    }
+    if (declared_arcs > 0) {
+      const auto reserve_count =
+          static_cast<size_t>(2) * static_cast<size_t>(declared_arcs);
+      g.arcs.reserve(reserve_count);
+      g.arc_capacities.reserve(reserve_count);
+    }
+  };
 
   auto arc_op = [&](int s, int t, int cap) {
     g.nnode = std::max(g.nnode, s + 1);
@@ -422,7 +632,8 @@ MinCutGraph read_dimacs_directed_streaming_scaled(
     }
   };
 
-  _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
+  _dimacs_implementation::read_dimacs_general_mapped(
+      filename, problem_op, arc_op, term_op);
 
   if (imbalance > 0) {
     printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);

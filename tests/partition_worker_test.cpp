@@ -784,7 +784,9 @@ void directedStreamingDimacsMatchesGeneralReaderValue() {
   auto general = mcpd3::read_dimacs(path);
   auto directed_streaming = mcpd3::read_dimacs_directed_streaming(path);
   require(general.nnode == directed_streaming.nnode,
-          "directed streaming reader should preserve node count");
+          "directed streaming reader should preserve node count: general=" +
+              std::to_string(general.nnode) + " directed=" +
+              std::to_string(directed_streaming.nnode));
   require(general.terminal_capacities ==
               directed_streaming.terminal_capacities,
           "directed streaming reader should preserve terminal capacities");
@@ -867,6 +869,43 @@ void scaledDirectedStreamingDimacsMatchesPostLoadScaling() {
   require(scaled.terminal_capacities == expected.terminal_capacities,
           "scaled directed reader should scale terminal capacities after "
           "aggregation");
+  std::remove(path.c_str());
+}
+
+void scaledDirectedStreamingDimacsHandlesFinalLineWithoutNewline() {
+  const std::string path =
+      "/tmp/mcpd3-scaled-directed-streaming-final-line-test.max";
+  {
+    std::ofstream out(path);
+    out << "c scaled directed streaming final line test\n";
+    out << "p max 5 5\n";
+    out << "n 1 s\n";
+    out << "n 5 t\n";
+    out << "a 1 2 3\n";
+    out << "a 2 3 4\n";
+    out << "a 3 4 5\n";
+    out << "a 4 5 6\n";
+    out << "a 1 3 7";
+  }
+
+  mcpd3::DimacsScaleStats stats;
+  auto scaled = mcpd3::read_dimacs_directed_streaming_scaled(
+      path, /*objective_scale=*/3, /*saturate_capacity_overflow=*/false,
+      &stats);
+  require(stats.arc_saturation_count == 0,
+          "final-line reader test should not saturate arcs");
+  require(stats.terminal_saturation_count == 0,
+          "final-line reader test should not saturate terminals");
+  require(scaled.nnode == 3,
+          "final-line reader test should preserve declared internal nodes");
+  require(scaled.narc == 2,
+          "final-line reader test should preserve internal arc count");
+  require(scaled.arcs == std::vector<int>({0, 1, 1, 2}),
+          "final-line reader test should preserve internal arc endpoints");
+  require(scaled.arc_capacities == std::vector<int>({12, 0, 15, 0}),
+          "final-line reader test should scale internal arcs");
+  require(scaled.terminal_capacities == std::vector<int>({9, 21, -18}),
+          "final-line reader test should scale aggregated terminals");
   std::remove(path.c_str());
 }
 
@@ -3030,6 +3069,7 @@ int main() {
     directedStreamingDimacsMatchesGeneralReaderValue();
     directedStreamingDimacsUsesDeclaredNodeCount();
     scaledDirectedStreamingDimacsMatchesPostLoadScaling();
+    scaledDirectedStreamingDimacsHandlesFinalLineWithoutNewline();
     scaledDirectedStreamingDimacsHandlesOverflowMode();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
