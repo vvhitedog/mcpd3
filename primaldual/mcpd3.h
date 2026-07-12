@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <deque>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -32,6 +33,12 @@
 #include <measure/timer.h>
 
 namespace mcpd3 {
+
+enum class CanonicalCutSelection {
+  SOLVER_DEFAULT,
+  MINIMUM_LABELS,
+  MAXIMUM_LABELS
+};
 
 inline bool primaldual_timing_enabled() {
   const char *value = std::getenv("MCPD3_SOLVER_TIMING");
@@ -79,7 +86,10 @@ public:
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
         d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
-        has_solution_(false), maxflow_changed_list_(128),
+        has_solution_(false),
+        canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
+        force_full_mincut_recompute_(false),
+        maxflow_changed_list_(128),
         regularization_str_(0),
         last_regularization_budget_(0), last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
@@ -246,6 +256,18 @@ public:
       throw std::runtime_error("regularization strength must be non-negative");
     }
     regularization_str_ = str;
+  }
+
+  void setCanonicalCutSelection(CanonicalCutSelection selection) {
+    canonical_cut_selection_ = selection;
+  }
+
+  CanonicalCutSelection getCanonicalCutSelection() const {
+    return canonical_cut_selection_;
+  }
+
+  void setForceFullMinCutRecompute(bool enabled) {
+    force_full_mincut_recompute_ = enabled;
   }
 
   long maxflow() {
@@ -832,12 +854,69 @@ private:
   }
 
   void updateMinCut() {
-    if (is_first_iteration_) {
+    if (canonical_cut_selection_ != CanonicalCutSelection::SOLVER_DEFAULT) {
+      updateCanonicalMinCut();
+      computeMinCutValueInitial();
+    } else if (is_first_iteration_ || force_full_mincut_recompute_) {
       updateMinCutInitial();
+      if (!is_first_iteration_) {
+        computeMinCutValueInitial();
+      }
     } else {
       updateMinCutIncremental();
     }
     updateRegularizationContribution();
+  }
+
+  void updateCanonicalMinCut() {
+    std::vector<unsigned char> reached(static_cast<size_t>(nnode_), 0);
+    std::deque<int> queue;
+    auto enqueue = [&](int node) {
+      if (!reached[static_cast<size_t>(node)]) {
+        reached[static_cast<size_t>(node)] = 1;
+        queue.push_back(node);
+      }
+    };
+
+    if (canonical_cut_selection_ == CanonicalCutSelection::MAXIMUM_LABELS) {
+      for (int node = 0; node < nnode_; ++node) {
+        if (maxflow_graph_.get_trcap(node) > 0) {
+          enqueue(node);
+        }
+      }
+    } else {
+      for (int node = 0; node < nnode_; ++node) {
+        if (maxflow_graph_.get_trcap(node) < 0) {
+          enqueue(node);
+        }
+      }
+    }
+
+    auto nodes = maxflow_graph_.get_nodes();
+    while (!queue.empty()) {
+      const int node = queue.front();
+      queue.pop_front();
+      for (MaxflowGraph::arc_id arc = nodes[node].first; arc;
+           arc = arc->next) {
+        const bool traversable =
+            canonical_cut_selection_ == CanonicalCutSelection::MAXIMUM_LABELS
+                ? maxflow_graph_.get_rcap(arc) > 0
+                : maxflow_graph_.get_rcap(arc->sister) > 0;
+        if (traversable) {
+          enqueue(static_cast<int>(std::distance(nodes, arc->head)));
+        }
+      }
+    }
+
+    for (int node = 0; node < nnode_; ++node) {
+      if (canonical_cut_selection_ == CanonicalCutSelection::MAXIMUM_LABELS) {
+        // Source-reachable nodes form the minimum source-side min-cut.
+        x_[node] = reached[static_cast<size_t>(node)] ? 0 : 1;
+      } else {
+        // Its dual: nodes that can reach the sink must remain sink-side.
+        x_[node] = reached[static_cast<size_t>(node)] ? 1 : 0;
+      }
+    }
   }
 
   void updateRegularizationContribution() {
@@ -1064,6 +1143,8 @@ private:
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;
   bool has_solution_;
+  CanonicalCutSelection canonical_cut_selection_;
+  bool force_full_mincut_recompute_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
   std::list<int> incremental_mincut_nodes_;

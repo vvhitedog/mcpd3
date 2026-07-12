@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -3211,6 +3212,7 @@ void primalDualFlowWarmStartMatchesColdPromotedSolve() {
   mcpd3::PrimalDualMinCutSolver warmed(
       /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
       std::vector<int>{9, 9}, std::vector<int>{10, -2});
+  warmed.setForceFullMinCutRecompute(true);
   warmed.restoreFlowWarmStart(warm_start);
   warmed.solve();
 
@@ -3275,6 +3277,136 @@ void primalDualCapacityRefreshCanResetFlowState() {
   require(std::all_of(reset.v_flow.begin(), reset.v_flow.end(),
                       [](int flow) { return flow == 0; }),
           "capacity refresh should reset arc flow when requested");
+}
+
+long binaryCutValue(const std::vector<int> &labels,
+                    const std::vector<int> &arcs,
+                    const std::vector<int> &arc_capacities,
+                    const std::vector<int> &terminal_capacities) {
+  long value = 0;
+  for (size_t arc = 0; arc < arcs.size() / 2; ++arc) {
+    const int source = arcs[2 * arc];
+    const int target = arcs[2 * arc + 1];
+    if (labels[source] == 0 && labels[target] == 1) {
+      value += arc_capacities[2 * arc];
+    } else if (labels[source] == 1 && labels[target] == 0) {
+      value += arc_capacities[2 * arc + 1];
+    }
+  }
+  for (size_t node = 0; node < labels.size(); ++node) {
+    if (labels[node] == 0 && terminal_capacities[node] < 0) {
+      value -= terminal_capacities[node];
+    } else if (labels[node] == 1 && terminal_capacities[node] > 0) {
+      value += terminal_capacities[node];
+    }
+  }
+  return value;
+}
+
+void canonicalCutSelectionMatchesExhaustiveLatticeExtremes() {
+  std::mt19937 rng(20260712);
+  std::uniform_int_distribution<int> node_count_dist(1, 5);
+  std::uniform_int_distribution<int> capacity_dist(0, 4);
+  std::uniform_int_distribution<int> terminal_dist(-3, 3);
+
+  for (int trial = 0; trial < 500; ++trial) {
+    const int node_count = node_count_dist(rng);
+    std::vector<int> arcs;
+    std::vector<int> arc_capacities;
+    for (int source = 0; source < node_count; ++source) {
+      for (int target = source + 1; target < node_count; ++target) {
+        if ((rng() & 1U) == 0) {
+          continue;
+        }
+        arcs.push_back(source);
+        arcs.push_back(target);
+        arc_capacities.push_back(capacity_dist(rng));
+        arc_capacities.push_back(capacity_dist(rng));
+      }
+    }
+    std::vector<int> terminal_capacities(static_cast<size_t>(node_count));
+    for (int &capacity : terminal_capacities) {
+      capacity = terminal_dist(rng);
+    }
+
+    long optimum = std::numeric_limits<long>::max();
+    std::vector<int> minimum_labels(static_cast<size_t>(node_count), 1);
+    std::vector<int> maximum_labels(static_cast<size_t>(node_count), 0);
+    for (int mask = 0; mask < (1 << node_count); ++mask) {
+      std::vector<int> labels(static_cast<size_t>(node_count));
+      for (int node = 0; node < node_count; ++node) {
+        labels[static_cast<size_t>(node)] = (mask >> node) & 1;
+      }
+      const long value = binaryCutValue(labels, arcs, arc_capacities,
+                                        terminal_capacities);
+      if (value < optimum) {
+        optimum = value;
+        minimum_labels = labels;
+        maximum_labels = labels;
+      } else if (value == optimum) {
+        for (int node = 0; node < node_count; ++node) {
+          minimum_labels[static_cast<size_t>(node)] &=
+              labels[static_cast<size_t>(node)];
+          maximum_labels[static_cast<size_t>(node)] |=
+              labels[static_cast<size_t>(node)];
+        }
+      }
+    }
+
+    auto solve = [&](mcpd3::CanonicalCutSelection selection) {
+      mcpd3::PrimalDualMinCutSolver solver(
+          node_count, static_cast<int>(arcs.size() / 2),
+          std::vector<int>(arcs), arc_capacities, terminal_capacities);
+      solver.setCanonicalCutSelection(selection);
+      solver.solve();
+      std::vector<int> labels(static_cast<size_t>(node_count));
+      for (int node = 0; node < node_count; ++node) {
+        labels[static_cast<size_t>(node)] = solver.getMinCutSolution(node);
+      }
+      require(solver.getMinCutValue() == optimum,
+              "canonical cut must preserve the primary min-cut value");
+      return labels;
+    };
+
+    require(solve(mcpd3::CanonicalCutSelection::MINIMUM_LABELS) ==
+                minimum_labels,
+            "canonical minimum-label cut differs from exhaustive lattice");
+    require(solve(mcpd3::CanonicalCutSelection::MAXIMUM_LABELS) ==
+                maximum_labels,
+            "canonical maximum-label cut differs from exhaustive lattice");
+  }
+}
+
+void dualDecompositionPropagatesCanonicalCutSelection() {
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+  mcpd3::DualDecompositionOptions options;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 20;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.objective_scale = 1;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.enable_group_stopping = false;
+  options.track_primal_upper_bound = false;
+  options.materialize_all_partition_nodes = true;
+  options.canonical_cut_selection =
+      mcpd3::CanonicalCutSelection::MAXIMUM_LABELS;
+
+  mcpd3::DualDecomposition decomposition(
+      /*npartition=*/2, /*nnode=*/2, /*narc=*/1,
+      std::vector<int>{0, 1}, std::vector<int>{0, 0},
+      std::vector<int>{0, 0}, options);
+  decomposition.solve();
+
+  require(decomposition.getLastDisagreementCount() == 0,
+          "canonical maximum labels should agree on a tied decomposition");
+  for (const auto &snapshot : decomposition.getPartitionSnapshots()) {
+    for (const int label : snapshot.local_labels) {
+      require(label == 1,
+              "dual decomposition did not propagate canonical selection");
+    }
+  }
 }
 
 mcpd3::DualDecompositionOptions warmStartDdOptions() {
@@ -3573,6 +3705,8 @@ int main() {
     primalDualFlowWarmStartMatchesColdPromotedSolve();
     primalDualFlowWarmStartRejectsUnsafeReuse();
     primalDualCapacityRefreshCanResetFlowState();
+    canonicalCutSelectionMatchesExhaustiveLatticeExtremes();
+    dualDecompositionPropagatesCanonicalCutSelection();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
     dualDecompositionCapacityRefreshPreservesPersistentState();
   } catch (const std::exception &e) {

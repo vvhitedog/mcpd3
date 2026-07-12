@@ -113,6 +113,9 @@ struct DualDecompositionOptions {
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
+  CanonicalCutSelection canonical_cut_selection =
+      CanonicalCutSelection::SOLVER_DEFAULT;
+  bool force_full_mincut_recompute = false;
 };
 
 class DualDecomposition {
@@ -1488,8 +1491,12 @@ private:
       }
 
       if (options_.construct_solvers) {
-        solvers_.emplace_back(std::make_unique<PrimalDualMinCutSolver>(
-            std::move(min_cut_sub_graph.graph)));
+        auto solver = std::make_unique<PrimalDualMinCutSolver>(
+            std::move(min_cut_sub_graph.graph));
+        solver->setCanonicalCutSelection(options_.canonical_cut_selection);
+        solver->setForceFullMinCutRecompute(
+            options_.force_full_mincut_recompute);
+        solvers_.emplace_back(std::move(solver));
       }
       ++solver_done;
       dualdecomp_progress_report("dd_create_solvers", solver_done, npartition_,
