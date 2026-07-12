@@ -736,6 +736,70 @@ void requireConstraintSnapshotsEqual(
   }
 }
 
+std::vector<mcpd3::DualDecompositionPartitionSnapshot>
+partitionSnapshotsFromTrace(const mcpd3::PartitionWorkerRoundTrace &trace) {
+  std::vector<mcpd3::DualDecompositionPartitionSnapshot> snapshots;
+  snapshots.reserve(trace.partition_results.size());
+  for (const auto &result : trace.partition_results) {
+    mcpd3::DualDecompositionPartitionSnapshot snapshot;
+    snapshot.partition_id = result.partition_id;
+    snapshot.lower_bound = result.lower_bound;
+    snapshot.regularization_budget = result.regularization_budget;
+    snapshot.regularization_contribution =
+        result.regularization_contribution;
+    snapshot.regularization_anchor_sink_count =
+        result.regularization_anchor_sink_count;
+    snapshot.regularization_active_sink_count =
+        result.regularization_active_sink_count;
+    snapshot.local_labels.assign(result.full_labels.size(), 0);
+    for (const auto &label : result.full_labels) {
+      require(label.local_index >= 0 &&
+                  static_cast<size_t>(label.local_index) <
+                      snapshot.local_labels.size(),
+              "trace full label local index out of range");
+      snapshot.local_labels[static_cast<size_t>(label.local_index)] =
+          label.label;
+    }
+    snapshots.push_back(std::move(snapshot));
+  }
+  std::sort(snapshots.begin(), snapshots.end(), [](const auto &lhs,
+                                                   const auto &rhs) {
+    return lhs.partition_id < rhs.partition_id;
+  });
+  return snapshots;
+}
+
+void requirePartitionSnapshotsEqual(
+    const std::vector<mcpd3::DualDecompositionPartitionSnapshot> &actual,
+    const std::vector<mcpd3::DualDecompositionPartitionSnapshot> &expected,
+    const std::string &context) {
+  require(actual.size() == expected.size(),
+          context + ": partition snapshot count differs");
+  for (size_t i = 0; i < actual.size(); ++i) {
+    const auto &lhs = actual[i];
+    const auto &rhs = expected[i];
+    const std::string item_context =
+        context + ": partition " + std::to_string(i);
+    require(lhs.partition_id == rhs.partition_id,
+            item_context + " id differs");
+    require(lhs.lower_bound == rhs.lower_bound,
+            item_context + " lower bound differs");
+    require(lhs.regularization_budget == rhs.regularization_budget,
+            item_context + " regularization budget differs");
+    require(lhs.regularization_contribution ==
+                rhs.regularization_contribution,
+            item_context + " regularization contribution differs");
+    require(lhs.regularization_anchor_sink_count ==
+                rhs.regularization_anchor_sink_count,
+            item_context + " regularization anchor count differs");
+    require(lhs.regularization_active_sink_count ==
+                rhs.regularization_active_sink_count,
+            item_context + " regularization active count differs");
+    require(lhs.local_labels == rhs.local_labels,
+            item_context + " local labels differ");
+  }
+}
+
 void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
 
@@ -760,9 +824,10 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
   long best_worker_lower_bound = std::numeric_limits<long>::min();
   mcpd3::PartitionWorkerRoundStats worker_stats;
   for (long round = 1; round <= 2; ++round) {
-    worker_stats = coordinator.runRound(
+    const auto trace = coordinator.runRoundWithTrace(
         /*round_id=*/round, /*scale=*/100, /*step_size=*/100,
         /*regularization_strength=*/0);
+    worker_stats = trace.stats;
     best_worker_lower_bound =
         std::max(best_worker_lower_bound, worker_stats.lower_bound);
     reference.runOptimizationScale(
@@ -770,6 +835,9 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
         /*use_momentum=*/false);
     requireConstraintSnapshotsEqual(
         coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+        "round " + std::to_string(round));
+    requirePartitionSnapshotsEqual(
+        partitionSnapshotsFromTrace(trace), reference.getPartitionSnapshots(),
         "round " + std::to_string(round));
   }
 
@@ -2719,6 +2787,79 @@ void fullSolveStopsOnPatienceNoProgress() {
           "progress should report iterations since improvement");
 }
 
+void fullSolveCanExhaustScaleIterationsPastPatience() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 1;
+  options.enable_group_stopping = false;
+  options.exhaust_scale_iterations = true;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}, {10, 0}, {10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}, {20, 1}, {20, 1}, {20, 1}},
+      options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  ITERATION_COUNT_EXCEEDED,
+          "exhausted flat lower bound should hit the iteration limit");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED,
+          "exhausted patience test should report iteration limit");
+  require(result.total_iterations == 5,
+          "exhausted patience test should run the full scale budget");
+}
+
+void fullSolveRegularizedExhaustionKeepsHighScalePatience() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 1;
+  options.enable_group_stopping = false;
+  options.exhaust_regularized_scale_iterations = true;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}}, options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS,
+          "regularized-only exhaustion should keep high-scale patience");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::NO_LOWER_BOUND_IMPROVEMENT,
+          "regularized-only high-scale stop reason mismatch");
+  require(result.total_iterations == 2,
+          "regularized-only high-scale case should stop on patience");
+}
+
+void fullSolveRegularizedExhaustionRunsLowScaleBudget() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 10;
+  options.max_iteration_count = 5;
+  options.num_optimization_scales = 1;
+  options.patience = 1;
+  options.enable_group_stopping = false;
+  options.exhaust_regularized_scale_iterations = true;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}, {10, 0}, {10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}, {20, 1}, {20, 1}, {20, 1}},
+      options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  ITERATION_COUNT_EXCEEDED,
+          "regularized scale should exhaust to the iteration limit");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED,
+          "regularized exhausted scale should report iteration limit");
+  require(result.total_iterations == 5,
+          "regularized exhausted scale should run the full scale budget");
+}
+
 void fullSolveStopsOnLegacyPatienceAfterDelayedImprovement() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 100;
@@ -2772,6 +2913,40 @@ void fullSolveStopsOnGroupStopping() {
           "group stopping reason mismatch");
   require(result.total_iterations == 20,
           "group stopping should evaluate two full groups");
+}
+
+void fullSolveCanExhaustScaleIterationsPastGroupStopping() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 25;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = true;
+  options.exhaust_scale_iterations = true;
+
+  std::deque<ScriptedRound> source_script;
+  std::deque<ScriptedRound> target_script;
+  for (int i = 0; i < 10; ++i) {
+    source_script.push_back(ScriptedRound{100 + i, 0});
+    target_script.push_back(ScriptedRound{0, 1});
+  }
+  for (int i = 0; i < 15; ++i) {
+    source_script.push_back(ScriptedRound{90 + i, 0});
+    target_script.push_back(ScriptedRound{0, 1});
+  }
+  auto coordinator = makeScriptedCoordinator(std::move(source_script),
+                                             std::move(target_script), options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  ITERATION_COUNT_EXCEEDED,
+          "exhausted group-stopping case should hit the iteration limit");
+  require(result.stop_reason ==
+              mcpd3::PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED,
+          "exhausted group-stopping test should report iteration limit");
+  require(result.total_iterations == 25,
+          "exhausted group-stopping test should run the full scale budget");
 }
 
 void fullSolveRequestsRegularizationOnlyAtLowScales() {
@@ -2933,8 +3108,12 @@ int main() {
     randomInitialAlphaResolvesScaleTenCycle();
     fullSolveStopsAtIterationLimit();
     fullSolveStopsOnPatienceNoProgress();
+    fullSolveCanExhaustScaleIterationsPastPatience();
+    fullSolveRegularizedExhaustionKeepsHighScalePatience();
+    fullSolveRegularizedExhaustionRunsLowScaleBudget();
     fullSolveStopsOnLegacyPatienceAfterDelayedImprovement();
     fullSolveStopsOnGroupStopping();
+    fullSolveCanExhaustScaleIterationsPastGroupStopping();
     fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();

@@ -91,6 +91,8 @@ struct DualDecompositionOptions {
   long initial_step_size = 10000;
   int patience = 10;
   bool legacy_patience = false;
+  bool exhaust_scale_iterations = false;
+  bool exhaust_regularized_scale_iterations = false;
   bool use_momentum = true;
   bool enable_group_stopping = true;
   bool track_primal_upper_bound = true;
@@ -242,6 +244,37 @@ public:
             /*last_alpha=*/constraint.last_alpha,
             /*alpha_momentum=*/constraint.alpha_momentum});
       }
+    }
+    return snapshots;
+  }
+
+  std::vector<DualDecompositionPartitionSnapshot>
+  getPartitionSnapshots() const {
+    requireConstructedSolvers("getPartitionSnapshots");
+    std::vector<DualDecompositionPartitionSnapshot> snapshots;
+    snapshots.reserve(solvers_.size());
+    for (size_t partition_id = 0; partition_id < solvers_.size();
+         ++partition_id) {
+      const auto &solver = solvers_[partition_id];
+      const int local_node_count =
+          min_cut_sub_graphs_[partition_id].graph.nnode;
+      DualDecompositionPartitionSnapshot snapshot;
+      snapshot.partition_id = static_cast<int>(partition_id);
+      snapshot.lower_bound = solver->getMinCutValue();
+      snapshot.regularization_budget =
+          solver->getLastRegularizationBudget();
+      snapshot.regularization_contribution =
+          solver->getLastRegularizationContribution();
+      snapshot.regularization_anchor_sink_count =
+          solver->getLastRegularizationAnchorSinkCount();
+      snapshot.regularization_active_sink_count =
+          solver->getLastRegularizationActiveSinkCount();
+      snapshot.local_labels.reserve(static_cast<size_t>(local_node_count));
+      for (int local_index = 0; local_index < local_node_count; ++local_index) {
+        snapshot.local_labels.push_back(
+            solver->getMinCutSolution(local_index));
+      }
+      snapshots.push_back(std::move(snapshot));
     }
     return snapshots;
   }
@@ -582,7 +615,8 @@ public:
 
       if ( lower_bound > max_lower_bound ) {
         max_lower_bound = lower_bound;
-        if (options_.legacy_patience &&
+        if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+            options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
           if (report_progress) {
             std::fprintf(stderr,
@@ -599,7 +633,8 @@ public:
           break;
         }
         last_improvement_iter = i;
-      } else if (!options_.legacy_patience &&
+      } else if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+                 !options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
         if (report_progress) {
           std::fprintf(stderr,
@@ -655,7 +690,8 @@ public:
       }
 
       lower_bound_group_stats.addValue(lower_bound);
-      if (options_.enable_group_stopping &&
+      if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+          options_.enable_group_stopping &&
           lower_bound_group_stats.areGroupsPopulated()) {
         auto [first_group_max, second_group_max] =
             lower_bound_group_stats.getMaximums();
@@ -947,6 +983,12 @@ private:
   bool isRegularizationBudgetExceeded(long budget,
                                       int regularization_strength) const {
     return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+  }
+
+  bool shouldSuppressEarlyScaleExit(int regularization_strength) const {
+    return options_.exhaust_scale_iterations ||
+           (options_.exhaust_regularized_scale_iterations &&
+            regularization_strength > 0);
   }
 
   bool tryPromoteObjectiveScale(long factor, long *step_size) {

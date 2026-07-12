@@ -58,6 +58,8 @@ struct PartitionWorkerCoordinatorOptions {
   long initial_step_size = 10000;
   int patience = 10;
   bool legacy_patience = false;
+  bool exhaust_scale_iterations = false;
+  bool exhaust_regularized_scale_iterations = false;
   long min_step_size = 1;
   long max_step_size = 10000;
   long objective_scale = 1;
@@ -91,6 +93,11 @@ struct PartitionWorkerRoundStats {
   double disagreement_norm_sq = 0;
   long effective_step_size = 0;
   std::vector<int> disagreeing_global_indices;
+};
+
+struct PartitionWorkerRoundTrace {
+  PartitionWorkerRoundStats stats;
+  std::vector<PartitionSolveResult> partition_results;
 };
 
 struct PartitionWorkerProgressRecord {
@@ -207,22 +214,16 @@ public:
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
                                      int regularization_strength) {
-    const auto results =
-        solvePartitions(round_id, scale, regularization_strength,
-                        /*return_full_labels=*/false);
+    return runRoundInternal(round_id, scale, step_size, regularization_strength,
+                            /*return_full_labels=*/false)
+        .stats;
+  }
 
-    PartitionWorkerRoundStats stats;
-    stats.round_id = round_id;
-    stats.effective_step_size =
-        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
-    gatherRoundTerms(results, &stats);
-    warnIfRegularizationBudgetExceeded(stats.regularization_budget,
-                                       regularization_strength);
-    updateConstraintsFromLabels(
-        results, &stats,
-        !isRegularizationBudgetExceeded(stats.regularization_budget,
-                                        regularization_strength));
-    return stats;
+  PartitionWorkerRoundTrace runRoundWithTrace(long round_id, long scale,
+                                              long step_size,
+                                              int regularization_strength) {
+    return runRoundInternal(round_id, scale, step_size, regularization_strength,
+                            /*return_full_labels=*/true);
   }
 
   std::vector<DualDecompositionConstraintSnapshot>
@@ -262,6 +263,28 @@ public:
   }
 
 private:
+  PartitionWorkerRoundTrace runRoundInternal(long round_id, long scale,
+                                             long step_size,
+                                             int regularization_strength,
+                                             bool return_full_labels) {
+    PartitionWorkerRoundTrace trace;
+    trace.partition_results =
+        solvePartitions(round_id, scale, regularization_strength,
+                        return_full_labels);
+
+    trace.stats.round_id = round_id;
+    trace.stats.effective_step_size =
+        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
+    gatherRoundTerms(trace.partition_results, &trace.stats);
+    warnIfRegularizationBudgetExceeded(trace.stats.regularization_budget,
+                                       regularization_strength);
+    updateConstraintsFromLabels(
+        trace.partition_results, &trace.stats,
+        !isRegularizationBudgetExceeded(trace.stats.regularization_budget,
+                                        regularization_strength));
+    return trace;
+  }
+
   std::vector<PartitionSolveResult> solvePartitions(
       long round_id, long scale, int regularization_strength,
       bool return_full_labels) {
@@ -607,7 +630,8 @@ private:
 
       if (round_stats.lower_bound > scale_best_lower_bound) {
         scale_best_lower_bound = round_stats.lower_bound;
-        if (options_.legacy_patience &&
+        if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+            options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
           scale_result.status =
               PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS;
@@ -616,7 +640,8 @@ private:
           return scale_result;
         }
         last_improvement_iter = i;
-      } else if (!options_.legacy_patience &&
+      } else if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+                 !options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
         scale_result.status =
             PartitionWorkerOptimizationStatus::NO_FURTHER_PROGRESS;
@@ -626,7 +651,8 @@ private:
       }
 
       lower_bound_group_stats.addValue(round_stats.lower_bound);
-      if (options_.enable_group_stopping &&
+      if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+          options_.enable_group_stopping &&
           lower_bound_group_stats.areGroupsPopulated()) {
         auto [first_group_max, second_group_max] =
             lower_bound_group_stats.getMaximums();
@@ -1013,6 +1039,12 @@ private:
   bool isRegularizationBudgetExceeded(long budget,
                                       int regularization_strength) const {
     return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+  }
+
+  bool shouldSuppressEarlyScaleExit(int regularization_strength) const {
+    return options_.exhaust_scale_iterations ||
+           (options_.exhaust_regularized_scale_iterations &&
+            regularization_strength > 0);
   }
 
   static long checkedScaleLong(long value, long scale) {

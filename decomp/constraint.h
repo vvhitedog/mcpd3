@@ -17,6 +17,7 @@
 #pragma once
 
 #include <list>
+#include <vector>
 
 namespace mcpd3 {
 
@@ -52,6 +53,16 @@ struct DualDecompositionConstraintSnapshot {
   long alpha = 0;
   long last_alpha = 0;
   float alpha_momentum = 0;
+};
+
+struct DualDecompositionPartitionSnapshot {
+  int partition_id = -1;
+  long lower_bound = 0;
+  long regularization_budget = 0;
+  long regularization_contribution = 0;
+  long regularization_anchor_sink_count = 0;
+  long regularization_active_sink_count = 0;
+  std::vector<int> local_labels;
 };
 
 using DualDecompositionConstraintArcReference =
