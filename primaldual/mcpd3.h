@@ -40,6 +40,11 @@ enum class CanonicalCutSelection {
   MAXIMUM_LABELS
 };
 
+enum class ReferenceCutSelection {
+  CLOSEST_EXACT,
+  EXACT_REFERENCE_IF_OPTIMAL
+};
+
 inline bool primaldual_timing_enabled() {
   const char *value = std::getenv("MCPD3_SOLVER_TIMING");
   return value != nullptr && value[0] != '\0' && value[0] != '0';
@@ -88,6 +93,7 @@ public:
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
         has_solution_(false),
         canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
+        reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
         force_full_mincut_recompute_(false),
         maxflow_changed_list_(128),
         regularization_str_(0),
@@ -264,6 +270,49 @@ public:
 
   CanonicalCutSelection getCanonicalCutSelection() const {
     return canonical_cut_selection_;
+  }
+
+  void setReferenceCutLabels(std::vector<int> labels) {
+    if (labels.size() != static_cast<size_t>(nnode_)) {
+      throw std::runtime_error(
+          "reference cut label count must match the local node count");
+    }
+    for (const int label : labels) {
+      if (label != 0 && label != 1) {
+        throw std::runtime_error("reference cut labels must be binary");
+      }
+    }
+    reference_cut_labels_ = std::move(labels);
+  }
+
+  void clearReferenceCutLabels() { reference_cut_labels_.clear(); }
+
+  bool hasReferenceCutLabels() const {
+    return !reference_cut_labels_.empty();
+  }
+
+  void setReferenceCutSelection(ReferenceCutSelection selection) {
+    reference_cut_selection_ = selection;
+  }
+
+  void setReferenceCutCheckInterval(long interval) {
+    if (interval <= 0) {
+      throw std::runtime_error(
+          "reference cut check interval must be positive");
+    }
+    reference_cut_check_interval_ = interval;
+  }
+
+  long getReferenceDecodeCount() const { return reference_decode_count_; }
+  long getReferenceCurrentCutHitCount() const {
+    return reference_current_cut_hit_count_;
+  }
+  long getReferenceExactHitCount() const {
+    return reference_exact_hit_count_;
+  }
+  long getReferenceClosureCount() const { return reference_closure_count_; }
+  long getReferenceDecodeTimeMicroseconds() const {
+    return reference_decode_time_us_;
   }
 
   void setForceFullMinCutRecompute(bool enabled) {
@@ -854,7 +903,28 @@ private:
   }
 
   void updateMinCut() {
-    if (canonical_cut_selection_ != CanonicalCutSelection::SOLVER_DEFAULT) {
+    const bool check_reference =
+        !reference_cut_labels_.empty() &&
+        reference_cut_schedule_count_++ % reference_cut_check_interval_ == 0;
+    if (check_reference) {
+      const auto decode_time = time_lambda([&] {
+        ++reference_decode_count_;
+        updateMinCutInitial();
+        if (x_ == reference_cut_labels_) {
+          ++reference_current_cut_hit_count_;
+        } else if (isReferenceCutOptimal()) {
+          ++reference_exact_hit_count_;
+          x_ = reference_cut_labels_;
+        } else if (reference_cut_selection_ ==
+                   ReferenceCutSelection::CLOSEST_EXACT) {
+          ++reference_closure_count_;
+          updateReferenceGuidedMinCut();
+        }
+        computeMinCutValueInitial();
+      });
+      reference_decode_time_us_ += decode_time.count();
+    } else if (canonical_cut_selection_ !=
+               CanonicalCutSelection::SOLVER_DEFAULT) {
       updateCanonicalMinCut();
       computeMinCutValueInitial();
     } else if (is_first_iteration_ || force_full_mincut_recompute_) {
@@ -916,6 +986,195 @@ private:
         // Its dual: nodes that can reach the sink must remain sink-side.
         x_[node] = reached[static_cast<size_t>(node)] ? 1 : 0;
       }
+    }
+  }
+
+  bool isReferenceCutOptimal() {
+    for (int node = 0; node < nnode_; ++node) {
+      const int terminal = maxflow_graph_.get_trcap(node);
+      const int label = reference_cut_labels_[static_cast<size_t>(node)];
+      if ((terminal > 0 && label != 0) || (terminal < 0 && label != 1)) {
+        return false;
+      }
+    }
+
+    auto arc = maxflow_graph_.get_first_arc();
+    for (int index = 0; index < maxflow_graph_.get_arc_num(); ++index) {
+      MaxflowGraph::node_id source = -1;
+      MaxflowGraph::node_id target = -1;
+      maxflow_graph_.get_arc_ends(arc, source, target);
+      if (maxflow_graph_.get_rcap(arc) > 0 &&
+          reference_cut_labels_[static_cast<size_t>(source)] == 0 &&
+          reference_cut_labels_[static_cast<size_t>(target)] == 1) {
+        return false;
+      }
+      arc = maxflow_graph_.get_next_arc(arc);
+    }
+    return true;
+  }
+
+  void updateReferenceGuidedMinCut() {
+    using ArcId = MaxflowGraph::arc_id;
+    struct DfsFrame {
+      int node = -1;
+      ArcId next = nullptr;
+    };
+
+    auto nodes = maxflow_graph_.get_nodes();
+    std::vector<unsigned char> visited(static_cast<size_t>(nnode_), 0);
+    std::vector<int> finish_order;
+    finish_order.reserve(static_cast<size_t>(nnode_));
+    std::vector<DfsFrame> dfs;
+    for (int root = 0; root < nnode_; ++root) {
+      if (visited[static_cast<size_t>(root)]) {
+        continue;
+      }
+      visited[static_cast<size_t>(root)] = 1;
+      dfs.push_back(DfsFrame{root, nodes[root].first});
+      while (!dfs.empty()) {
+        auto &frame = dfs.back();
+        ArcId arc = frame.next;
+        while (arc != nullptr) {
+          const int target =
+              static_cast<int>(std::distance(nodes, arc->head));
+          if (maxflow_graph_.get_rcap(arc) > 0 &&
+              !visited[static_cast<size_t>(target)]) {
+            break;
+          }
+          arc = arc->next;
+        }
+        if (arc == nullptr) {
+          finish_order.push_back(frame.node);
+          dfs.pop_back();
+          continue;
+        }
+        frame.next = arc->next;
+        const int target =
+            static_cast<int>(std::distance(nodes, arc->head));
+        visited[static_cast<size_t>(target)] = 1;
+        dfs.push_back(DfsFrame{target, nodes[target].first});
+      }
+    }
+
+    std::vector<int> component(static_cast<size_t>(nnode_), -1);
+    std::vector<int> pending;
+    int component_count = 0;
+    for (auto iter = finish_order.rbegin(); iter != finish_order.rend();
+         ++iter) {
+      const int root = *iter;
+      if (component[static_cast<size_t>(root)] != -1) {
+        continue;
+      }
+      component[static_cast<size_t>(root)] = component_count;
+      pending.push_back(root);
+      while (!pending.empty()) {
+        const int node = pending.back();
+        pending.pop_back();
+        for (ArcId arc = nodes[node].first; arc != nullptr; arc = arc->next) {
+          if (maxflow_graph_.get_rcap(arc->sister) <= 0) {
+            continue;
+          }
+          const int predecessor =
+              static_cast<int>(std::distance(nodes, arc->head));
+          if (component[static_cast<size_t>(predecessor)] == -1) {
+            component[static_cast<size_t>(predecessor)] = component_count;
+            pending.push_back(predecessor);
+          }
+        }
+      }
+      ++component_count;
+    }
+
+    if (nnode_ == std::numeric_limits<int>::max()) {
+      throw std::overflow_error(
+          "reference-guided cut is too large for closure capacities");
+    }
+    const int implication_capacity = nnode_ + 1;
+    std::vector<long> component_terminal(
+        static_cast<size_t>(component_count), 0);
+    std::vector<unsigned char> forced_source(
+        static_cast<size_t>(component_count), 0);
+    std::vector<unsigned char> forced_sink(
+        static_cast<size_t>(component_count), 0);
+    for (int node = 0; node < nnode_; ++node) {
+      const int id = component[static_cast<size_t>(node)];
+      component_terminal[static_cast<size_t>(id)] +=
+          reference_cut_labels_[static_cast<size_t>(node)] == 0 ? 1 : -1;
+      const int terminal = maxflow_graph_.get_trcap(node);
+      if (terminal > 0) {
+        forced_source[static_cast<size_t>(id)] = 1;
+      } else if (terminal < 0) {
+        forced_sink[static_cast<size_t>(id)] = 1;
+      }
+    }
+    for (int id = 0; id < component_count; ++id) {
+      if (forced_source[static_cast<size_t>(id)] &&
+          forced_sink[static_cast<size_t>(id)]) {
+        throw std::runtime_error(
+            "residual component is forced to both terminals");
+      }
+      if (forced_source[static_cast<size_t>(id)]) {
+        component_terminal[static_cast<size_t>(id)] += implication_capacity;
+      }
+      if (forced_sink[static_cast<size_t>(id)]) {
+        component_terminal[static_cast<size_t>(id)] -= implication_capacity;
+      }
+      if (component_terminal[static_cast<size_t>(id)] >
+              std::numeric_limits<int>::max() ||
+          component_terminal[static_cast<size_t>(id)] <
+              std::numeric_limits<int>::min()) {
+        throw std::overflow_error(
+            "reference-guided closure terminal capacity overflow");
+      }
+    }
+
+    std::vector<std::pair<int, int>> implications;
+    implications.reserve(static_cast<size_t>(narc_) * 2);
+    ArcId arc = maxflow_graph_.get_first_arc();
+    for (int edge = 0; edge < narc_; ++edge) {
+      const int source = arcs_[2 * edge];
+      const int target = arcs_[2 * edge + 1];
+      const int source_component = component[static_cast<size_t>(source)];
+      const int target_component = component[static_cast<size_t>(target)];
+      if (source_component != target_component &&
+          maxflow_graph_.get_rcap(arc) > 0) {
+        implications.emplace_back(source_component, target_component);
+      }
+      arc = maxflow_graph_.get_next_arc(arc);
+      if (source_component != target_component &&
+          maxflow_graph_.get_rcap(arc) > 0) {
+        implications.emplace_back(target_component, source_component);
+      }
+      arc = maxflow_graph_.get_next_arc(arc);
+    }
+
+    if (implications.size() >
+        static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error(
+          "reference-guided closure has too many implications");
+    }
+    MaxflowGraph closure_graph(component_count,
+                               static_cast<int>(implications.size()));
+    closure_graph.add_node(component_count);
+    for (const auto &[source, target] : implications) {
+      closure_graph.add_edge(source, target, implication_capacity, 0);
+    }
+    for (int id = 0; id < component_count; ++id) {
+      const int terminal =
+          static_cast<int>(component_terminal[static_cast<size_t>(id)]);
+      if (terminal > 0) {
+        closure_graph.add_tweights(id, terminal, 0);
+      } else if (terminal < 0) {
+        closure_graph.add_tweights(id, 0, -terminal);
+      }
+    }
+    (void)closure_graph.maxflow();
+    for (int node = 0; node < nnode_; ++node) {
+      x_[node] =
+          closure_graph.what_segment(component[static_cast<size_t>(node)]) ==
+                  MaxflowGraph::SINK
+              ? 1
+              : 0;
     }
   }
 
@@ -1144,6 +1403,15 @@ private:
   bool is_first_iteration_of_new_scale_;
   bool has_solution_;
   CanonicalCutSelection canonical_cut_selection_;
+  ReferenceCutSelection reference_cut_selection_;
+  std::vector<int> reference_cut_labels_;
+  long reference_cut_check_interval_ = 1;
+  long reference_cut_schedule_count_ = 0;
+  long reference_decode_count_ = 0;
+  long reference_current_cut_hit_count_ = 0;
+  long reference_exact_hit_count_ = 0;
+  long reference_closure_count_ = 0;
+  long reference_decode_time_us_ = 0;
   bool force_full_mincut_recompute_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;

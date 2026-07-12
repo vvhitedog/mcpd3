@@ -1,5 +1,22 @@
 # mcpd3
 
+## Reference-Guided Local Mincuts
+
+`DualDecompositionOptions::reference_cut_labels` optionally supplies one
+binary global reference label per node. Each partition maps those labels to its
+local copies and uses them only to select an exact local mincut.
+
+`ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL` accepts the reference when
+it satisfies the solved residual graph and otherwise keeps BK's exact cut.
+`ReferenceCutSelection::CLOSEST_EXACT` instead solves a residual minimum-closure
+problem to find the exact local mincut with minimum Hamming distance to the
+reference. `reference_cut_check_interval` controls how often the selection is
+applied and must be positive.
+
+Because both modes preserve every local Lagrangian minimum value, the summed DD
+lower bound remains valid. Primal agreement therefore retains the normal exact
+binary-mincut certificate.
+
 mcpd3 is a C++ min-cut/max-flow solver library and benchmark executable set.
 The name is pronounced "mcpd cubed": minimum cut, primal-dual, dual
 decomposition.

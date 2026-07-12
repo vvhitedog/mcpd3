@@ -3377,6 +3377,269 @@ void canonicalCutSelectionMatchesExhaustiveLatticeExtremes() {
   }
 }
 
+void referenceGuidedCutSelectionMatchesClosestExhaustiveOptimum() {
+  std::mt19937 rng(20260713);
+  std::uniform_int_distribution<int> node_count_dist(1, 6);
+  std::uniform_int_distribution<int> capacity_dist(0, 5);
+  std::uniform_int_distribution<int> terminal_dist(-4, 4);
+
+  for (int trial = 0; trial < 500; ++trial) {
+    const int node_count = node_count_dist(rng);
+    std::vector<int> arcs;
+    std::vector<int> arc_capacities;
+    for (int source = 0; source < node_count; ++source) {
+      for (int target = source + 1; target < node_count; ++target) {
+        if ((rng() & 1U) == 0) {
+          continue;
+        }
+        arcs.push_back(source);
+        arcs.push_back(target);
+        arc_capacities.push_back(capacity_dist(rng));
+        arc_capacities.push_back(capacity_dist(rng));
+      }
+    }
+    std::vector<int> terminal_capacities(static_cast<size_t>(node_count));
+    std::vector<int> reference(static_cast<size_t>(node_count));
+    for (int node = 0; node < node_count; ++node) {
+      terminal_capacities[static_cast<size_t>(node)] = terminal_dist(rng);
+      reference[static_cast<size_t>(node)] = static_cast<int>(rng() & 1U);
+    }
+
+    long optimum = std::numeric_limits<long>::max();
+    int closest_distance = std::numeric_limits<int>::max();
+    for (int mask = 0; mask < (1 << node_count); ++mask) {
+      std::vector<int> labels(static_cast<size_t>(node_count));
+      int distance = 0;
+      for (int node = 0; node < node_count; ++node) {
+        labels[static_cast<size_t>(node)] = (mask >> node) & 1;
+        distance += labels[static_cast<size_t>(node)] !=
+                    reference[static_cast<size_t>(node)];
+      }
+      const long value = binaryCutValue(labels, arcs, arc_capacities,
+                                        terminal_capacities);
+      if (value < optimum) {
+        optimum = value;
+        closest_distance = distance;
+      } else if (value == optimum) {
+        closest_distance = std::min(closest_distance, distance);
+      }
+    }
+
+    mcpd3::PrimalDualMinCutSolver solver(
+        node_count, static_cast<int>(arcs.size() / 2),
+        std::vector<int>(arcs), arc_capacities, terminal_capacities);
+    solver.setReferenceCutLabels(reference);
+    solver.solve();
+    int actual_distance = 0;
+    for (int node = 0; node < node_count; ++node) {
+      actual_distance += solver.getMinCutSolution(node) !=
+                         reference[static_cast<size_t>(node)];
+    }
+    require(solver.getMinCutValue() == optimum,
+            "reference decoding changed the primary min-cut value");
+    require(actual_distance == closest_distance,
+            "reference decoding did not select a closest optimal cut");
+  }
+}
+
+void referenceGuidedCutSelectionValidatesLabels() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{1, 1}, std::vector<int>{0, 0});
+  requireThrows([&] { solver.setReferenceCutLabels({0}); },
+                "reference decoder should reject the wrong label count");
+  requireThrows([&] { solver.setReferenceCutLabels({0, 2}); },
+                "reference decoder should reject non-binary labels");
+  solver.setReferenceCutLabels({1, 0});
+  solver.clearReferenceCutLabels();
+  solver.solve();
+  require(solver.getMinCutValue() == 0,
+          "clearing reference labels should preserve normal solving");
+}
+
+void exactReferenceSelectionAvoidsClosureAndPreservesOptimality() {
+  {
+    mcpd3::PrimalDualMinCutSolver solver(
+        /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+        std::vector<int>{0, 0}, std::vector<int>{0, 0});
+    solver.setReferenceCutLabels({1, 0});
+    solver.setReferenceCutSelection(
+        mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL);
+    solver.solve();
+    require(solver.getMinCutSolution(0) == 1 &&
+                solver.getMinCutSolution(1) == 0,
+            "exact-only selection should use an exact reference cut");
+    require(solver.getReferenceClosureCount() == 0,
+            "exact-only selection must not run a closure decode");
+  }
+  {
+    mcpd3::PrimalDualMinCutSolver solver(
+        /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+        std::vector<int>{1});
+    solver.setReferenceCutLabels({1});
+    solver.setReferenceCutSelection(
+        mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL);
+    solver.solve();
+    require(solver.getMinCutSolution(0) == 0,
+            "exact-only selection must reject a non-optimal reference");
+    require(solver.getMinCutValue() == 0,
+            "exact-only selection changed the primary min-cut value");
+    require(solver.getReferenceExactHitCount() == 0 &&
+                solver.getReferenceClosureCount() == 0,
+            "non-optimal exact-only reference should keep the BK cut");
+  }
+}
+
+void exactReferenceSelectionMatchesExhaustiveOptimality() {
+  std::mt19937 rng(20260714);
+  std::uniform_int_distribution<int> node_count_dist(1, 6);
+  std::uniform_int_distribution<int> capacity_dist(0, 5);
+  std::uniform_int_distribution<int> terminal_dist(-4, 4);
+
+  for (int trial = 0; trial < 500; ++trial) {
+    const int node_count = node_count_dist(rng);
+    std::vector<int> arcs;
+    std::vector<int> arc_capacities;
+    for (int source = 0; source < node_count; ++source) {
+      for (int target = source + 1; target < node_count; ++target) {
+        if ((rng() & 1U) == 0) {
+          continue;
+        }
+        arcs.push_back(source);
+        arcs.push_back(target);
+        arc_capacities.push_back(capacity_dist(rng));
+        arc_capacities.push_back(capacity_dist(rng));
+      }
+    }
+    std::vector<int> terminal_capacities(static_cast<size_t>(node_count));
+    std::vector<int> reference(static_cast<size_t>(node_count));
+    for (int node = 0; node < node_count; ++node) {
+      terminal_capacities[static_cast<size_t>(node)] = terminal_dist(rng);
+      reference[static_cast<size_t>(node)] = static_cast<int>(rng() & 1U);
+    }
+
+    long optimum = std::numeric_limits<long>::max();
+    long reference_value = 0;
+    for (int mask = 0; mask < (1 << node_count); ++mask) {
+      std::vector<int> labels(static_cast<size_t>(node_count));
+      for (int node = 0; node < node_count; ++node) {
+        labels[static_cast<size_t>(node)] = (mask >> node) & 1;
+      }
+      const long value = binaryCutValue(labels, arcs, arc_capacities,
+                                        terminal_capacities);
+      optimum = std::min(optimum, value);
+      if (labels == reference) {
+        reference_value = value;
+      }
+    }
+
+    mcpd3::PrimalDualMinCutSolver solver(
+        node_count, static_cast<int>(arcs.size() / 2),
+        std::vector<int>(arcs), arc_capacities, terminal_capacities);
+    solver.setReferenceCutLabels(reference);
+    solver.setReferenceCutSelection(
+        mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL);
+    solver.solve();
+    std::vector<int> actual(static_cast<size_t>(node_count));
+    for (int node = 0; node < node_count; ++node) {
+      actual[static_cast<size_t>(node)] = solver.getMinCutSolution(node);
+    }
+    require(solver.getMinCutValue() == optimum,
+            "exact-only reference decoding changed the min-cut value");
+    if (reference_value == optimum) {
+      require(actual == reference,
+              "exact-only decoding did not select an optimal reference");
+    }
+    require(solver.getReferenceClosureCount() == 0,
+            "exact-only decoding unexpectedly ran a closure solve");
+  }
+}
+
+void referenceCutCheckIntervalIsValidatedAndApplied() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{0});
+  solver.setReferenceCutLabels({1});
+  solver.setReferenceCutSelection(
+      mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL);
+  requireThrows([&] { solver.setReferenceCutCheckInterval(0); },
+                "reference interval should reject zero");
+  requireThrows([&] { solver.setReferenceCutCheckInterval(-1); },
+                "reference interval should reject negative values");
+  solver.setReferenceCutCheckInterval(2);
+  solver.solve();
+  solver.solve();
+  solver.solve();
+  require(solver.getReferenceDecodeCount() == 2,
+          "reference interval should check the first and every second solve");
+}
+
+void exactReferenceSelectionRespectsActiveScaledEpsilon() {
+  std::list<mcpd3::DualDecompositionConstraintArc> constraints;
+  constraints.emplace_back(/*alpha=*/-100, /*last_alpha=*/-90,
+                           /*alpha_momentum=*/0,
+                           /*partition_index_source=*/0,
+                           /*partition_index_target=*/1,
+                           /*local_index_source=*/0,
+                           /*local_index_target=*/-1);
+  auto constraint = --constraints.end();
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{-100});
+  solver.addSourceDualDecompositionConstraint(constraint);
+  solver.setMinCutSolution(std::vector<int>{1});
+  solver.setRegularizationStrength(10);
+  solver.setReferenceCutLabels({1});
+  solver.setReferenceCutSelection(
+      mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL);
+  solver.solve();
+
+  require(solver.getMinCutSolution(0) == 0,
+          "reference selection must preserve the active epsilon tie-break");
+  require(solver.getReferenceExactHitCount() == 0,
+          "a reference rejected by epsilon must not count as an exact hit");
+  require(solver.getLastRegularizationBudget() == 10,
+          "reference selection should preserve epsilon diagnostics");
+  require(solver.getMinCutValue() == 100,
+          "reference selection changed the unregularized local lower bound");
+}
+
+void dualDecompositionPropagatesReferenceCutLabels() {
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+  mcpd3::DualDecompositionOptions options;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 20;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.objective_scale = 1;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.enable_group_stopping = false;
+  options.track_primal_upper_bound = false;
+  options.materialize_all_partition_nodes = true;
+  options.reference_cut_labels = {1, 0};
+
+  mcpd3::DualDecomposition decomposition(
+      /*npartition=*/2, /*nnode=*/2, /*narc=*/1,
+      std::vector<int>{0, 1}, std::vector<int>{0, 0},
+      std::vector<int>{0, 0}, options);
+  decomposition.solve();
+
+  require(decomposition.getLastDisagreementCount() == 0,
+          "reference-guided tied partitions should agree");
+  const auto &packages = decomposition.getPartitionPackages();
+  const auto snapshots = decomposition.getPartitionSnapshots();
+  for (const auto &snapshot : snapshots) {
+    const auto &package = packages[static_cast<size_t>(snapshot.partition_id)];
+    for (size_t local = 0; local < snapshot.local_labels.size(); ++local) {
+      const int global = package.local_to_global[local];
+      require(snapshot.local_labels[local] ==
+                  options.reference_cut_labels[static_cast<size_t>(global)],
+              "local reference label does not match its global preconditioner");
+    }
+  }
+}
+
 void dualDecompositionPropagatesCanonicalCutSelection() {
   ::setenv("MCPD3_PARTITIONER", "basic", 1);
   mcpd3::DualDecompositionOptions options;
@@ -3706,7 +3969,14 @@ int main() {
     primalDualFlowWarmStartRejectsUnsafeReuse();
     primalDualCapacityRefreshCanResetFlowState();
     canonicalCutSelectionMatchesExhaustiveLatticeExtremes();
+    referenceGuidedCutSelectionMatchesClosestExhaustiveOptimum();
+    referenceGuidedCutSelectionValidatesLabels();
+    exactReferenceSelectionAvoidsClosureAndPreservesOptimality();
+    exactReferenceSelectionMatchesExhaustiveOptimality();
+    referenceCutCheckIntervalIsValidatedAndApplied();
+    exactReferenceSelectionRespectsActiveScaledEpsilon();
     dualDecompositionPropagatesCanonicalCutSelection();
+    dualDecompositionPropagatesReferenceCutLabels();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
     dualDecompositionCapacityRefreshPreservesPersistentState();
   } catch (const std::exception &e) {

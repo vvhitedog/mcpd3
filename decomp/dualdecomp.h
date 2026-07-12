@@ -116,6 +116,10 @@ struct DualDecompositionOptions {
   CanonicalCutSelection canonical_cut_selection =
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
+  std::vector<int> reference_cut_labels;
+  ReferenceCutSelection reference_cut_selection =
+      ReferenceCutSelection::CLOSEST_EXACT;
+  long reference_cut_check_interval = 1;
 };
 
 class DualDecomposition {
@@ -221,6 +225,41 @@ public:
   }
   long getTotalOptimizationIterations() const {
     return total_optimization_iterations_;
+  }
+  long getReferenceDecodeCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getReferenceDecodeCount();
+    }
+    return count;
+  }
+  long getReferenceCurrentCutHitCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getReferenceCurrentCutHitCount();
+    }
+    return count;
+  }
+  long getReferenceExactHitCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getReferenceExactHitCount();
+    }
+    return count;
+  }
+  long getReferenceClosureCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getReferenceClosureCount();
+    }
+    return count;
+  }
+  long getReferenceDecodeTimeMicroseconds() const {
+    long elapsed_us = 0;
+    for (const auto &solver : solvers_) {
+      elapsed_us += solver->getReferenceDecodeTimeMicroseconds();
+    }
+    return elapsed_us;
   }
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
@@ -1126,6 +1165,27 @@ private:
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
     }
+    if (!options_.reference_cut_labels.empty()) {
+      if (options_.reference_cut_check_interval <= 0) {
+        throw std::runtime_error(
+            "reference cut check interval must be positive");
+      }
+      if (options_.reference_cut_labels.size() !=
+          static_cast<size_t>(nnode_)) {
+        throw std::runtime_error(
+            "reference cut label count must match the global node count");
+      }
+      if (options_.canonical_cut_selection !=
+          CanonicalCutSelection::SOLVER_DEFAULT) {
+        throw std::runtime_error(
+            "reference and canonical cut selection are mutually exclusive");
+      }
+      for (const int label : options_.reference_cut_labels) {
+        if (label != 0 && label != 1) {
+          throw std::runtime_error("reference cut labels must be binary");
+        }
+      }
+    }
     if (!options_.construct_solvers) {
       if (!options_.emit_partition_packages) {
         throw std::runtime_error(
@@ -1494,6 +1554,18 @@ private:
         auto solver = std::make_unique<PrimalDualMinCutSolver>(
             std::move(min_cut_sub_graph.graph));
         solver->setCanonicalCutSelection(options_.canonical_cut_selection);
+        if (!options_.reference_cut_labels.empty()) {
+          std::vector<int> local_reference;
+          local_reference.reserve(min_cut_sub_graph.local_to_global.size());
+          for (const int global_node : min_cut_sub_graph.local_to_global) {
+            local_reference.push_back(options_.reference_cut_labels[
+                static_cast<size_t>(global_node)]);
+          }
+          solver->setReferenceCutLabels(std::move(local_reference));
+          solver->setReferenceCutSelection(options_.reference_cut_selection);
+          solver->setReferenceCutCheckInterval(
+              options_.reference_cut_check_interval);
+        }
         solver->setForceFullMinCutRecompute(
             options_.force_full_mincut_recompute);
         solvers_.emplace_back(std::move(solver));
