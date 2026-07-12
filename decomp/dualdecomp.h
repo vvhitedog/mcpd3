@@ -281,6 +281,61 @@ public:
     return snapshots;
   }
 
+  struct FlowWarmStart {
+    std::vector<PrimalDualMinCutSolver::FlowWarmStart> partitions;
+    std::vector<DualDecompositionConstraintSnapshot> constraints;
+  };
+
+  FlowWarmStart captureFlowWarmStart() const {
+    requireConstructedSolvers("captureFlowWarmStart");
+    FlowWarmStart state;
+    state.partitions.reserve(solvers_.size());
+    for (const auto &solver : solvers_) {
+      state.partitions.push_back(solver->captureFlowWarmStart());
+    }
+    state.constraints = getConstraintSnapshots();
+    return state;
+  }
+
+  void restoreFlowWarmStart(const FlowWarmStart &state) {
+    requireConstructedSolvers("restoreFlowWarmStart");
+    if (state.partitions.size() != solvers_.size()) {
+      throw std::runtime_error("DD flow warm start partition count mismatch");
+    }
+
+    size_t constraint_index = 0;
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      for (auto &constraint : constraints) {
+        if (constraint_index >= state.constraints.size()) {
+          throw std::runtime_error(
+              "DD flow warm start constraint count mismatch");
+        }
+        const auto &snapshot = state.constraints[constraint_index];
+        if (snapshot.constraint_id != static_cast<int>(constraint_index) ||
+            snapshot.global_node_id != global_index ||
+            snapshot.partition_index_source !=
+                constraint.partition_index_source ||
+            snapshot.partition_index_target !=
+                constraint.partition_index_target ||
+            snapshot.local_index_source != constraint.local_index_source ||
+            snapshot.local_index_target != constraint.local_index_target) {
+          throw std::runtime_error(
+              "DD flow warm start constraint topology mismatch");
+        }
+        constraint.alpha = snapshot.alpha;
+        constraint.last_alpha = snapshot.last_alpha;
+        constraint.alpha_momentum = snapshot.alpha_momentum;
+        ++constraint_index;
+      }
+    }
+    if (constraint_index != state.constraints.size()) {
+      throw std::runtime_error("DD flow warm start constraint count mismatch");
+    }
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      solvers_[partition]->restoreFlowWarmStart(state.partitions[partition]);
+    }
+  }
+
   int regularizationStrengthForStepSize(long step_size) const {
     if (options_.regularization_scheme !=
         DualDecompositionRegularizationScheme::SCALED_EPSILON) {

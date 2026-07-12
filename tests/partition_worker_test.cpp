@@ -36,6 +36,17 @@ void require(bool condition, const std::string &message) {
   }
 }
 
+template <typename Function>
+void requireThrows(Function function, const std::string &message) {
+  bool threw = false;
+  try {
+    function();
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  require(threw, message);
+}
+
 void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
   require(mcpd3::regularizedObjectiveRaw(/*original_objective_raw=*/100,
                                          /*regularization_contribution_raw=*/7) ==
@@ -513,7 +524,7 @@ void exportedPartitionPackagesMaterializeBoundaryDuplicates() {
       /*narc=*/1,
       /*arcs=*/std::vector<int>{1, 3},
       /*arc_capacities=*/std::vector<int>{6, 6},
-      /*terminal_capacities=*/std::vector<int>{0, 0, 0, 0, 0}, options);
+      /*terminal_capacities=*/std::vector<int>{0, 0, 0, 7, 0}, options);
 
   const auto &packages = dual_decomp.getPartitionPackages();
   require(packages.size() == 2, "expected two exported partition packages");
@@ -521,12 +532,14 @@ void exportedPartitionPackagesMaterializeBoundaryDuplicates() {
           "owning partition should contain both arc endpoints");
   require(packages[0].local_to_global == std::vector<int>({1, 3}),
           "owning partition local_to_global should preserve arc endpoints");
+  require(packages[0].terminal_capacities == std::vector<int>({0, 0}),
+          "arc-owner boundary clone must not receive the terminal");
   require(packages[1].local_node_count == 1,
           "target partition should contain an isolated boundary duplicate");
   require(packages[1].terminal_capacities.size() == 1,
           "target duplicate should have a zero terminal entry");
-  require(packages[1].terminal_capacities[0] == 0,
-          "target duplicate terminal should be zero");
+  require(packages[1].terminal_capacities[0] == 7,
+          "boundary node home partition should receive the terminal once");
   require(packages[1].local_to_global == std::vector<int>({3}),
           "target duplicate should map back to the constrained global node");
   require(packages[0].constraint_endpoints.size() == 1 &&
@@ -3188,6 +3201,157 @@ void coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently() {
           "coordinator should dispatch solveRound concurrently across workers");
 }
 
+void primalDualFlowWarmStartMatchesColdPromotedSolve() {
+  mcpd3::PrimalDualMinCutSolver initial(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{3, 3}, std::vector<int>{4, -2});
+  initial.solve();
+  const auto warm_start = initial.captureFlowWarmStart();
+
+  mcpd3::PrimalDualMinCutSolver warmed(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{9, 9}, std::vector<int>{10, -2});
+  warmed.restoreFlowWarmStart(warm_start);
+  warmed.solve();
+
+  mcpd3::PrimalDualMinCutSolver cold(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{9, 9}, std::vector<int>{10, -2});
+  cold.solve();
+  require(warmed.getMinCutValue() == cold.getMinCutValue(),
+          "promoted warm solve value should match cold solve");
+  require(warmed.getMinCutSolution(0) == cold.getMinCutSolution(0) &&
+              warmed.getMinCutSolution(1) == cold.getMinCutSolution(1),
+          "promoted warm solve labels should match cold solve");
+}
+
+void primalDualFlowWarmStartRejectsUnsafeReuse() {
+  mcpd3::PrimalDualMinCutSolver initial(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{4, 4}, std::vector<int>{3, -2});
+  initial.solve();
+  const auto warm_start = initial.captureFlowWarmStart();
+
+  requireThrows(
+      [&] {
+        mcpd3::PrimalDualMinCutSolver decreased(
+            /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+            std::vector<int>{3, 4}, std::vector<int>{3, -2});
+        decreased.restoreFlowWarmStart(warm_start);
+      },
+      "warm start should reject decreased arc capacities");
+  requireThrows(
+      [&] {
+        mcpd3::PrimalDualMinCutSolver changed_topology(
+            /*nnode=*/2, /*narc=*/1, std::vector<int>{1, 0},
+            std::vector<int>{4, 4}, std::vector<int>{3, -2});
+        changed_topology.restoreFlowWarmStart(warm_start);
+      },
+      "warm start should reject changed arc topology");
+  requireThrows(
+      [&] {
+        mcpd3::PrimalDualMinCutSolver decreased_terminal(
+            /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+            std::vector<int>{4, 4}, std::vector<int>{2, -2});
+        decreased_terminal.restoreFlowWarmStart(warm_start);
+      },
+      "warm start should reject decreased terminal capacities");
+
+  initial.setRegularizationStrength(1);
+  initial.solve();
+  requireThrows([&] { (void)initial.captureFlowWarmStart(); },
+                "warm start should reject internally regularized state");
+}
+
+mcpd3::DualDecompositionOptions warmStartDdOptions() {
+  mcpd3::DualDecompositionOptions options;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 1000;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.min_step_size = 1;
+  options.patience = 1000;
+  options.exhaust_scale_iterations = true;
+  options.enable_group_stopping = false;
+  options.use_momentum = true;
+  options.objective_scale = 1;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.emit_partition_packages = true;
+  options.construct_solvers = true;
+  options.thread_count = 1;
+  return options;
+}
+
+std::unique_ptr<mcpd3::DualDecomposition> makeWarmStartDecomposition(
+    int capacity) {
+  return std::make_unique<mcpd3::DualDecomposition>(
+      /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
+      std::vector<int>{0, 1, 1, 2, 2, 3},
+      std::vector<int>{capacity, capacity, capacity, capacity, capacity,
+                       capacity},
+      std::vector<int>{capacity, 0, 0, -capacity}, warmStartDdOptions());
+}
+
+void dualDecompositionWarmStartMatchesColdPromotedSolve() {
+  const char *old_partitioner = std::getenv("MCPD3_PARTITIONER");
+  const std::string old_value = old_partitioner ? old_partitioner : "";
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+
+  auto initial = makeWarmStartDecomposition(3);
+  initial->solve();
+  const auto warm_start = initial->captureFlowWarmStart();
+  require(!warm_start.partitions.empty(),
+          "DD warm start should contain partition flows");
+  require(!warm_start.constraints.empty(),
+          "DD warm start should contain alpha state");
+
+  auto warmed = makeWarmStartDecomposition(12);
+  warmed->restoreFlowWarmStart(warm_start);
+  warmed->solve();
+  auto cold = makeWarmStartDecomposition(12);
+  cold->solve();
+
+  require(warmed->getLastDisagreementCount() == 0,
+          "warmed promoted DD solve should agree");
+  require(warmed->getLastOriginalObjectiveRaw() ==
+              cold->getLastOriginalObjectiveRaw(),
+          "warmed promoted DD objective should match cold solve");
+  const auto warmed_partitions = warmed->getPartitionSnapshots();
+  const auto cold_partitions = cold->getPartitionSnapshots();
+  require(warmed_partitions.size() == cold_partitions.size(),
+          "warmed partition count should match cold solve");
+  for (size_t i = 0; i < warmed_partitions.size(); ++i) {
+    require(warmed_partitions[i].local_labels ==
+                cold_partitions[i].local_labels,
+            "warmed promoted DD labels should match cold solve");
+  }
+
+  auto missing_partition = warm_start;
+  missing_partition.partitions.pop_back();
+  requireThrows(
+      [&] {
+        auto invalid = makeWarmStartDecomposition(12);
+        invalid->restoreFlowWarmStart(missing_partition);
+      },
+      "DD warm start should reject missing partition state");
+
+  auto wrong_constraint = warm_start;
+  wrong_constraint.constraints.front().global_node_id += 1;
+  requireThrows(
+      [&] {
+        auto invalid = makeWarmStartDecomposition(12);
+        invalid->restoreFlowWarmStart(wrong_constraint);
+      },
+      "DD warm start should reject mismatched alpha topology");
+
+  if (old_partitioner) {
+    ::setenv("MCPD3_PARTITIONER", old_value.c_str(), 1);
+  } else {
+    ::unsetenv("MCPD3_PARTITIONER");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -3250,6 +3414,9 @@ int main() {
     fullSolveRequestsRegularizationOnlyAtLowScales();
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
+    primalDualFlowWarmStartMatchesColdPromotedSolve();
+    primalDualFlowWarmStartRejectsUnsafeReuse();
+    dualDecompositionWarmStartMatchesColdPromotedSolve();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;

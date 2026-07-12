@@ -62,6 +62,15 @@ public:
     MaxflowGraph::ReusableState maxflow_graph_state;
   };
 
+  struct FlowWarmStart {
+    std::vector<int> arcs;
+    std::vector<int> arc_capacities;
+    std::vector<int> terminal_capacities;
+    std::vector<int> v_flow;
+    std::vector<int> d_flow;
+    std::vector<int> x;
+  };
+
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<int> arc_capacities,
                          std::vector<int> terminal_capacities)
@@ -399,6 +408,63 @@ public:
   void setMinCutSolution(const std::vector<int> &new_solution) {
     std::copy(new_solution.begin(), new_solution.end(), x_.begin());
     computeMinCutValueInitial();
+    has_solution_ = true;
+  }
+
+  FlowWarmStart captureFlowWarmStart() const {
+    if (!has_solution_) {
+      throw std::runtime_error("cannot capture flow warm start before solve");
+    }
+    if (regularization_str_ != 0) {
+      throw std::runtime_error(
+          "cannot capture flow warm start from a regularized solve");
+    }
+    return FlowWarmStart{arcs_, arc_capacities_, terminal_capacities_,
+                         v_flow_, d_flow_, x_};
+  }
+
+  void restoreFlowWarmStart(const FlowWarmStart &state) {
+    if (!is_first_iteration_ || has_solution_) {
+      throw std::runtime_error(
+          "flow warm start must be restored before the first solve");
+    }
+    if (regularization_str_ != 0) {
+      throw std::runtime_error(
+          "flow warm start requires regularization to be disabled");
+    }
+    if (state.arcs != arcs_) {
+      throw std::runtime_error("flow warm start graph topology mismatch");
+    }
+    if (state.arc_capacities.size() != arc_capacities_.size() ||
+        state.terminal_capacities.size() != terminal_capacities_.size() ||
+        state.v_flow.size() != v_flow_.size() ||
+        state.d_flow.size() != d_flow_.size() || state.x.size() != x_.size()) {
+      throw std::runtime_error("flow warm start shape mismatch");
+    }
+    for (size_t i = 0; i < arc_capacities_.size(); ++i) {
+      if (arc_capacities_[i] < state.arc_capacities[i]) {
+        throw std::runtime_error(
+            "flow warm start arc capacity decreased");
+      }
+    }
+    for (size_t i = 0; i < terminal_capacities_.size(); ++i) {
+      const int old_capacity = state.terminal_capacities[i];
+      const int new_capacity = terminal_capacities_[i];
+      if (old_capacity == 0) {
+        continue;
+      }
+      const bool same_sign = (old_capacity > 0) == (new_capacity > 0);
+      const long old_magnitude = std::abs(static_cast<long>(old_capacity));
+      const long new_magnitude = std::abs(static_cast<long>(new_capacity));
+      if (!same_sign || new_magnitude < old_magnitude) {
+        throw std::runtime_error(
+            "flow warm start terminal capacity is not monotone");
+      }
+    }
+
+    v_flow_ = state.v_flow;
+    d_flow_ = state.d_flow;
+    x_ = state.x;
     has_solution_ = true;
   }
 
