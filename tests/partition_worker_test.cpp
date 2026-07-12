@@ -851,6 +851,138 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
           "coordinator disagreement norm differs from DualDecomposition");
 }
 
+mcpd3::MinCutGraph makeParityFixtureGraph() {
+  mcpd3::MinCutGraph graph;
+  graph.nnode = 8;
+  graph.narc = 12;
+  graph.arcs = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6,
+                6, 7, 0, 4, 1, 5, 2, 6, 3, 7, 0, 7};
+  graph.arc_capacities = {7,  3,  5,  11, 13, 2,  17, 19,
+                          23, 5,  29, 7,  31, 37, 41, 3,
+                          2,  43, 47, 11, 53, 13, 59, 17};
+  graph.terminal_capacities = {19, -7, 11, -13, 17, -5, 23, -29};
+  return graph;
+}
+
+mcpd3::DualDecompositionOptions makeParityDualOptions(bool use_momentum) {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 1000000;
+  options.use_momentum = use_momentum;
+  options.enable_group_stopping = false;
+  options.exhaust_regularized_scale_iterations = true;
+  return options;
+}
+
+mcpd3::PartitionWorkerCoordinatorOptions
+makeParityCoordinatorOptions(const mcpd3::DualDecompositionOptions &dual) {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.objective_scale = dual.objective_scale;
+  options.use_momentum = dual.use_momentum;
+  options.enable_group_stopping = dual.enable_group_stopping;
+  options.exhaust_regularized_scale_iterations =
+      dual.exhaust_regularized_scale_iterations;
+  options.regularization_budget_limit = dual.regularization_budget_limit;
+  options.min_step_size = dual.min_step_size;
+  options.max_step_size = dual.max_step_size;
+  options.regularization_scheme =
+      dual.regularization_scheme ==
+              mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON
+          ? mcpd3::PartitionWorkerRegularizationScheme::SCALED_EPSILON
+          : mcpd3::PartitionWorkerRegularizationScheme::NONE;
+  return options;
+}
+
+void requireRoundTraceMatchesReference(
+    const mcpd3::PartitionWorkerRoundTrace &trace,
+    const mcpd3::DualDecomposition &reference, const std::string &context) {
+  require(trace.stats.original_objective ==
+              reference.getLastOriginalObjectiveRaw(),
+          context + ": original objective differs");
+  require(trace.stats.certified_lower_bound ==
+              reference.getLastCertifiedLowerBoundRaw(),
+          context + ": certified lower bound differs");
+  require(trace.stats.lower_bound == reference.getLastCertifiedLowerBoundRaw(),
+          context + ": lower bound differs");
+  require(trace.stats.regularized_objective ==
+              reference.getLastRegularizedObjectiveRaw(),
+          context + ": regularized objective differs");
+  require(trace.stats.regularization_budget ==
+              reference.getLastRegularizationBudget(),
+          context + ": regularization budget differs");
+  require(trace.stats.regularization_contribution ==
+              reference.getLastRegularizationContribution(),
+          context + ": regularization contribution differs");
+  require(trace.stats.regularization_anchor_sink_count ==
+              reference.getLastRegularizationAnchorSinkCount(),
+          context + ": regularization anchor count differs");
+  require(trace.stats.regularization_active_sink_count ==
+              reference.getLastRegularizationActiveSinkCount(),
+          context + ": regularization active count differs");
+  require(trace.stats.disagreement_count ==
+              reference.getLastDisagreementCount(),
+          context + ": disagreement count differs");
+  require(trace.stats.disagreement_norm_sq ==
+              reference.getLastDisagreementNormSq(),
+          context + ": disagreement norm differs");
+}
+
+void partitionWorkerCoordinatorMatchesDualDecompositionParityFixture(
+    bool use_momentum) {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  const auto options = makeParityDualOptions(use_momentum);
+  auto package_source = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      package_source.getPartitionPackages(), std::move(workers),
+      makeParityCoordinatorOptions(options));
+  auto reference = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+
+  requireConstraintSnapshotsEqual(
+      coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+      "parity fixture initial");
+
+  const std::vector<long> step_sizes = {1000, 100, 10, 10, 1, 1, 100};
+  for (size_t round_index = 0; round_index < step_sizes.size();
+       ++round_index) {
+    const long step_size = step_sizes[round_index];
+    const int regularization_strength =
+        reference.regularizationStrengthForStepSize(step_size);
+    const auto trace = coordinator.runRoundWithTrace(
+        static_cast<long>(round_index + 1), options.objective_scale, step_size,
+        regularization_strength);
+    reference.runOptimizationScale(
+        /*nstep=*/1, step_size, /*max_cycle_count=*/2, use_momentum);
+
+    const std::string context =
+        std::string(use_momentum ? "momentum" : "no momentum") +
+        " parity fixture round " + std::to_string(round_index + 1) +
+        " step " + std::to_string(step_size);
+    requireRoundTraceMatchesReference(trace, reference, context);
+    requireConstraintSnapshotsEqual(
+        coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+        context);
+    requirePartitionSnapshotsEqual(partitionSnapshotsFromTrace(trace),
+                                   reference.getPartitionSnapshots(), context);
+  }
+}
+
+void partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds() {
+  partitionWorkerCoordinatorMatchesDualDecompositionParityFixture(
+      /*use_momentum=*/false);
+  partitionWorkerCoordinatorMatchesDualDecompositionParityFixture(
+      /*use_momentum=*/true);
+}
+
 void directedStreamingDimacsMatchesGeneralReaderValue() {
   const std::string path = "/tmp/mcpd3-directed-streaming-dimacs-test.max";
   {
@@ -3071,6 +3203,7 @@ int main() {
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
+    partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     dualDecompositionRandomizesExportedInitialAlphas();
