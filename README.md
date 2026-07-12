@@ -126,7 +126,7 @@ Useful dual-decomposition options:
 --quiet
 ```
 
-## Native Monolith Benchmark
+## Native Dual-Decomposition Benchmark
 
 `mcpd3_native_monolith_benchmark` is the clean native-local comparator for
 dual decomposition. It constructs `mcpd3::DualDecomposition` directly and, by
@@ -150,13 +150,17 @@ MCPD3_PARTITIONER=basic ./build/mcpd3_native_monolith_benchmark \
   --objective-scale 1000 \
   --schedule-start 10000 \
   --schedule-levels 5 \
-  --max-iterations 10000
+  --max-iterations 10000 \
+  --exhaust-regularized-scale-iterations
 ```
 
 The benchmark prints unbuffered key/value fields for graph size, memory
 snapshots, objective values, agreement status, objective-scale promotions, and
 separate read/scale/construct/solve timings. Use `--emit-partition-packages`
 only for diagnostics that intentionally compare against the worker export path.
+When comparing to mcpd4 defaults, pass
+`--exhaust-regularized-scale-iterations` so the low-scale schedule matches the
+worker-coordinator path.
 `--saturate-capacity-overflow` and `--truncate-capacity-overflow` are opt-in
 compatibility modes that clamp scaled capacities to the 32-bit range, including
 during later objective-scale promotions.

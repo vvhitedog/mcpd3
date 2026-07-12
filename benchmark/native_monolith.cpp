@@ -54,6 +54,8 @@ struct Config {
   bool use_momentum = true;
   bool enable_group_stopping = true;
   bool legacy_patience = false;
+  bool exhaust_scale_iterations = false;
+  bool exhaust_regularized_scale_iterations = false;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
   long regularization_budget_limit = 0;
@@ -142,6 +144,9 @@ void printUsage(const char *program) {
       << "       [--regularization scaled-epsilon|none]\n"
       << "       [--regularization-budget-limit N]\n"
       << "       [--disable-scale-promotion] [--max-scale-promotions N]\n"
+      << "       [--exhaust-scale-iterations]\n"
+      << "       [--exhaust-regularized-scale-iterations]\n"
+      << "       [--no-exhaust-regularized-scale-iterations]\n"
       << "       [--random-initial-alpha-radius N]\n"
       << "       [--random-initial-alpha-seed N]\n"
       << "       [--track-primal-upper-bound] [--emit-partition-packages]\n"
@@ -204,6 +209,12 @@ Config parseArgs(int argc, char **argv) {
       config.enable_group_stopping = false;
     } else if (arg == "--legacy-patience") {
       config.legacy_patience = true;
+    } else if (arg == "--exhaust-scale-iterations") {
+      config.exhaust_scale_iterations = true;
+    } else if (arg == "--exhaust-regularized-scale-iterations") {
+      config.exhaust_regularized_scale_iterations = true;
+    } else if (arg == "--no-exhaust-regularized-scale-iterations") {
+      config.exhaust_regularized_scale_iterations = false;
     } else if (arg == "--regularization") {
       if (!parseRegularizationScheme(requireValue(arg),
                                      &config.regularization_scheme)) {
@@ -310,6 +321,9 @@ mcpd3::DualDecompositionOptions makeOptions(const Config &config) {
   options.initial_step_size = config.schedule_start;
   options.patience = config.patience;
   options.legacy_patience = config.legacy_patience;
+  options.exhaust_scale_iterations = config.exhaust_scale_iterations;
+  options.exhaust_regularized_scale_iterations =
+      config.exhaust_regularized_scale_iterations;
   options.use_momentum = config.use_momentum;
   options.enable_group_stopping = config.enable_group_stopping;
   options.track_primal_upper_bound = config.track_primal_upper_bound;
@@ -350,6 +364,10 @@ void printConfig(const Config &config) {
             << config.track_primal_upper_bound << "\n";
   std::cout << "emit_partition_packages " << config.emit_partition_packages
             << "\n";
+  std::cout << "exhaust_scale_iterations "
+            << config.exhaust_scale_iterations << "\n";
+  std::cout << "exhaust_regularized_scale_iterations "
+            << config.exhaust_regularized_scale_iterations << "\n";
   std::cout << "regularization "
             << regularizationSchemeName(config.regularization_scheme) << "\n";
   std::cout << "regularization_budget_limit "
