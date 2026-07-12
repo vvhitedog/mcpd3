@@ -138,6 +138,7 @@ public:
         thread_pool_(
             resolveThreadCount(npartition_, options_.thread_count)),
         solve_loop_time_(0),
+        lagrange_update_time_(0),
         max_lower_bound_(std::numeric_limits<double>::lowest()),
         max_lower_bound_raw_(std::numeric_limits<long>::min()),
         max_regularized_objective_raw_(std::numeric_limits<long>::min()),
@@ -168,6 +169,7 @@ public:
                           options) {}
 
   long getTotalSolveLoopTime() const { return solve_loop_time_; }
+  long getTotalLagrangeUpdateTime() const { return lagrange_update_time_; }
   long getScale() const { return scale_; }
   double getBestLowerBound() const { return max_lower_bound_; }
   long getBestLowerBoundRaw() const { return max_lower_bound_raw_; }
@@ -531,6 +533,7 @@ public:
         disagreeing_global_indices_ =
             std::move(update_stats.disagreeing_global_indices);
           });
+      lagrange_update_time_ += lagrange_update_time.count();
       last_disagreement_count_ = update_stats.disagreement_count;
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
 
@@ -1522,6 +1525,7 @@ private:
   DualDecompositionOptions options_;
   ThreadPool<void> thread_pool_;
   long solve_loop_time_;
+  long lagrange_update_time_;
   double max_lower_bound_;
   long max_lower_bound_raw_;
   long max_regularized_objective_raw_;

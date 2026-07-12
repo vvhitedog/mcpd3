@@ -9,8 +9,10 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <limits>
@@ -53,6 +55,17 @@ enum class PartitionWorkerRegularizationScheme {
 };
 
 struct PartitionWorkerProgressRecord;
+
+struct PartitionWorkerCoordinatorTimingStats {
+  std::uint64_t round_count = 0;
+  std::uint64_t solve_partitions_wall_us = 0;
+  std::uint64_t prepare_alpha_updates_us = 0;
+  std::uint64_t build_requests_us = 0;
+  std::uint64_t dispatch_workers_wall_us = 0;
+  std::uint64_t worker_batch_wall_us = 0;
+  std::uint64_t gather_round_terms_us = 0;
+  std::uint64_t update_constraints_from_labels_us = 0;
+};
 
 struct PartitionWorkerCoordinatorOptions {
   int num_optimization_scales = 5;
@@ -171,6 +184,7 @@ struct PartitionWorkerCoordinatorSolveResult {
   std::vector<NodeLabel> final_labels;
   std::vector<PartitionWorkerProgressRecord> progress_records;
   std::vector<PartitionWorkerScaleResult> scale_results;
+  PartitionWorkerCoordinatorTimingStats timing;
 };
 
 class PartitionWorkerCoordinator {
@@ -287,32 +301,53 @@ public:
     return labels;
   }
 
+  const PartitionWorkerCoordinatorTimingStats &timingStats() const {
+    return timing_stats_;
+  }
+
 private:
+  static std::uint64_t elapsedUs(std::chrono::steady_clock::time_point start) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count());
+  }
+
   PartitionWorkerRoundTrace runRoundInternal(long round_id, long scale,
                                              long step_size,
                                              int regularization_strength,
                                              bool return_full_labels) {
     PartitionWorkerRoundTrace trace;
+    const auto solve_partitions_start = std::chrono::steady_clock::now();
     trace.partition_results =
         solvePartitions(round_id, scale, regularization_strength,
                         return_full_labels);
+    timing_stats_.solve_partitions_wall_us +=
+        elapsedUs(solve_partitions_start);
 
     trace.stats.round_id = round_id;
     trace.stats.effective_step_size =
         std::clamp(step_size, options_.min_step_size, options_.max_step_size);
+    const auto gather_start = std::chrono::steady_clock::now();
     gatherRoundTerms(trace.partition_results, &trace.stats);
+    timing_stats_.gather_round_terms_us += elapsedUs(gather_start);
     warnIfRegularizationBudgetExceeded(trace.stats.regularization_budget,
                                        regularization_strength);
+    const auto update_start = std::chrono::steady_clock::now();
     updateConstraintsFromLabels(
         trace.partition_results, &trace.stats,
         !isRegularizationBudgetExceeded(trace.stats.regularization_budget,
                                         regularization_strength));
+    timing_stats_.update_constraints_from_labels_us +=
+        elapsedUs(update_start);
+    ++timing_stats_.round_count;
     return trace;
   }
 
   std::vector<PartitionSolveResult> solvePartitions(
       long round_id, long scale, int regularization_strength,
       bool return_full_labels) {
+    const auto alpha_prepare_start = std::chrono::steady_clock::now();
     std::vector<std::vector<AlphaUpdate>> alpha_updates(packages_.size());
     std::vector<size_t> synced_constraint_indices;
     for (size_t constraint_index = 0; constraint_index < constraints_.size();
@@ -329,14 +364,17 @@ private:
           constraint.target.partition_id)].push_back(update);
       synced_constraint_indices.push_back(constraint_index);
     }
+    timing_stats_.prepare_alpha_updates_us += elapsedUs(alpha_prepare_start);
 
     std::vector<PartitionSolveResult> results(packages_.size());
 
     std::mutex exception_mutex;
     std::exception_ptr first_exception;
+    const auto dispatch_start = std::chrono::steady_clock::now();
     for (const auto worker_index : active_worker_indices_) {
       thread_pool_.push([&, worker_index] {
         try {
+          const auto build_start = std::chrono::steady_clock::now();
           std::vector<PartitionSolveRequest> requests;
           requests.reserve(packages_by_worker_[worker_index].size());
           for (const auto package_index : packages_by_worker_[worker_index]) {
@@ -350,8 +388,16 @@ private:
             request.alpha_updates = std::move(alpha_updates[package_index]);
             requests.push_back(std::move(request));
           }
+          const auto build_elapsed = elapsedUs(build_start);
+          const auto worker_start = std::chrono::steady_clock::now();
           const auto worker_results =
               workers_[worker_index]->solveRoundBatch(requests);
+          const auto worker_elapsed = elapsedUs(worker_start);
+          {
+            std::lock_guard<std::mutex> lock(timing_mutex_);
+            timing_stats_.build_requests_us += build_elapsed;
+            timing_stats_.worker_batch_wall_us += worker_elapsed;
+          }
           if (worker_results.size() != requests.size()) {
             throw std::runtime_error(
                 "worker batch result count does not match request count");
@@ -375,6 +421,7 @@ private:
       });
     }
     thread_pool_.wait();
+    timing_stats_.dispatch_workers_wall_us += elapsedUs(dispatch_start);
     if (first_exception) {
       std::rethrow_exception(first_exception);
     }
@@ -386,6 +433,7 @@ private:
 
 public:
   PartitionWorkerCoordinatorSolveResult solve() {
+    timing_stats_ = {};
     PartitionWorkerCoordinatorSolveResult result;
     result.scale = options_.objective_scale;
 
@@ -442,6 +490,7 @@ public:
           static_cast<double>(result.best_regularized_objective_raw) /
           result.scale;
     }
+    result.timing = timing_stats_;
     return result;
   }
 
@@ -1229,6 +1278,8 @@ private:
   PartitionWorkerCoordinatorOptions options_;
   ThreadPool<void> thread_pool_;
   bool warned_regularization_budget_exceeded_;
+  PartitionWorkerCoordinatorTimingStats timing_stats_;
+  std::mutex timing_mutex_;
   std::vector<size_t> active_worker_indices_;
   std::vector<std::vector<size_t>> packages_by_worker_;
   std::unordered_map<int, size_t> partition_to_worker_index_;

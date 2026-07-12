@@ -447,6 +447,19 @@ void printFinal(const Timing &timing, const Config &config,
   std::cout << "timing_solve_wall_us " << timing.solve_wall_us << "\n";
   std::cout << "timing_solver_inner_solve_wall_us "
             << dual_decomp.getTotalSolveLoopTime() << "\n";
+  std::cout << "timing_solver_lagrange_update_wall_us "
+            << dual_decomp.getTotalLagrangeUpdateTime() << "\n";
+  const std::uint64_t accounted_solver_us =
+      static_cast<std::uint64_t>(std::max<long>(
+          0, dual_decomp.getTotalSolveLoopTime() +
+                 dual_decomp.getTotalLagrangeUpdateTime()));
+  std::cout << "timing_solver_accounted_wall_us " << accounted_solver_us
+            << "\n";
+  std::cout << "timing_solver_unaccounted_wall_us "
+            << (timing.solve_wall_us > accounted_solver_us
+                    ? timing.solve_wall_us - accounted_solver_us
+                    : 0)
+            << "\n";
   std::cout << "memory_peak_observed_rss_kb " << peak_rss_kb << "\n";
   std::cout << "saturate_capacity_overflow "
             << config.saturate_capacity_overflow << "\n";
