@@ -42,6 +42,18 @@ struct DualDecompositionConstraintArc {
         local_index_target(local_index_target) {}
 };
 
+struct DualDecompositionConstraintSnapshot {
+  int constraint_id = -1;
+  int global_node_id = -1;
+  int partition_index_source = -1;
+  int partition_index_target = -1;
+  int local_index_source = -1;
+  int local_index_target = -1;
+  long alpha = 0;
+  long last_alpha = 0;
+  float alpha_momentum = 0;
+};
+
 using DualDecompositionConstraintArcReference =
     std::list<DualDecompositionConstraintArc>::iterator;
 

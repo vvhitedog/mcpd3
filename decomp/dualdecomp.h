@@ -225,6 +225,27 @@ public:
     return partition_packages_;
   }
 
+  std::vector<DualDecompositionConstraintSnapshot>
+  getConstraintSnapshots() const {
+    std::vector<DualDecompositionConstraintSnapshot> snapshots;
+    int constraint_id = 0;
+    for (const auto &[global_index, constraints] : constraint_arc_map_) {
+      for (const auto &constraint : constraints) {
+        snapshots.push_back(DualDecompositionConstraintSnapshot{
+            /*constraint_id=*/constraint_id++,
+            /*global_node_id=*/global_index,
+            /*partition_index_source=*/constraint.partition_index_source,
+            /*partition_index_target=*/constraint.partition_index_target,
+            /*local_index_source=*/constraint.local_index_source,
+            /*local_index_target=*/constraint.local_index_target,
+            /*alpha=*/constraint.alpha,
+            /*last_alpha=*/constraint.last_alpha,
+            /*alpha_momentum=*/constraint.alpha_momentum});
+      }
+    }
+    return snapshots;
+  }
+
   int regularizationStrengthForStepSize(long step_size) const {
     if (options_.regularization_scheme !=
         DualDecompositionRegularizationScheme::SCALED_EPSILON) {

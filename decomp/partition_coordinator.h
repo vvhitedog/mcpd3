@@ -225,6 +225,29 @@ public:
     return stats;
   }
 
+  std::vector<DualDecompositionConstraintSnapshot>
+  getConstraintSnapshots() const {
+    std::vector<DualDecompositionConstraintSnapshot> snapshots;
+    snapshots.reserve(constraints_.size());
+    for (const auto &constraint : constraints_) {
+      snapshots.push_back(DualDecompositionConstraintSnapshot{
+          /*constraint_id=*/constraint.constraint_id,
+          /*global_node_id=*/constraint.source.global_node_id,
+          /*partition_index_source=*/constraint.source.partition_id,
+          /*partition_index_target=*/constraint.target.partition_id,
+          /*local_index_source=*/constraint.source.local_index,
+          /*local_index_target=*/constraint.target.local_index,
+          /*alpha=*/constraint.alpha,
+          /*last_alpha=*/constraint.last_alpha,
+          /*alpha_momentum=*/constraint.alpha_momentum});
+    }
+    std::sort(snapshots.begin(), snapshots.end(),
+              [](const auto &lhs, const auto &rhs) {
+                return lhs.constraint_id < rhs.constraint_id;
+              });
+    return snapshots;
+  }
+
   std::vector<NodeLabel> collectFullLabels(long round_id, long scale,
                                            int regularization_strength) {
     const auto results =

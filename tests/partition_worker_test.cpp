@@ -705,6 +705,37 @@ mcpd3::DualDecomposition makeTinyDualDecomposition() {
       /*terminal_capacities=*/std::vector<int>{2, -4}, options);
 }
 
+void requireConstraintSnapshotsEqual(
+    const std::vector<mcpd3::DualDecompositionConstraintSnapshot> &actual,
+    const std::vector<mcpd3::DualDecompositionConstraintSnapshot> &expected,
+    const std::string &context) {
+  require(actual.size() == expected.size(),
+          context + ": alpha snapshot count differs");
+  for (size_t i = 0; i < actual.size(); ++i) {
+    const auto &lhs = actual[i];
+    const auto &rhs = expected[i];
+    const std::string item_context =
+        context + ": constraint " + std::to_string(i);
+    require(lhs.constraint_id == rhs.constraint_id,
+            item_context + " id differs");
+    require(lhs.global_node_id == rhs.global_node_id,
+            item_context + " global node differs");
+    require(lhs.partition_index_source == rhs.partition_index_source,
+            item_context + " source partition differs");
+    require(lhs.partition_index_target == rhs.partition_index_target,
+            item_context + " target partition differs");
+    require(lhs.local_index_source == rhs.local_index_source,
+            item_context + " source local index differs");
+    require(lhs.local_index_target == rhs.local_index_target,
+            item_context + " target local index differs");
+    require(lhs.alpha == rhs.alpha, item_context + " alpha differs");
+    require(lhs.last_alpha == rhs.last_alpha,
+            item_context + " last alpha differs");
+    require(lhs.alpha_momentum == rhs.alpha_momentum,
+            item_context + " alpha momentum differs");
+  }
+}
+
 void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
 
@@ -721,6 +752,10 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
   mcpd3::PartitionWorkerCoordinator coordinator(
       package_source.getPartitionPackages(), std::move(workers),
       coordinator_options);
+  auto reference = makeTinyDualDecomposition();
+  requireConstraintSnapshotsEqual(
+      coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+      "initial");
 
   long best_worker_lower_bound = std::numeric_limits<long>::min();
   mcpd3::PartitionWorkerRoundStats worker_stats;
@@ -730,12 +765,13 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
         /*regularization_strength=*/0);
     best_worker_lower_bound =
         std::max(best_worker_lower_bound, worker_stats.lower_bound);
+    reference.runOptimizationScale(
+        /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+        /*use_momentum=*/false);
+    requireConstraintSnapshotsEqual(
+        coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+        "round " + std::to_string(round));
   }
-
-  auto reference = makeTinyDualDecomposition();
-  reference.runOptimizationScale(
-      /*nstep=*/2, /*step_size=*/100, /*max_cycle_count=*/2,
-      /*use_momentum=*/false);
 
   require(best_worker_lower_bound == reference.getBestLowerBoundRaw(),
           "coordinator best lower bound differs from DualDecomposition");
