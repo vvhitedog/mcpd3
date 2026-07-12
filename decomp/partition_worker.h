@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -29,6 +30,11 @@
 #include <primaldual/mcpd3.h>
 
 namespace mcpd3 {
+
+inline bool inprocess_worker_sequential_batch_enabled() {
+  const char *value = std::getenv("MCPD3_INPROCESS_WORKER_SEQUENTIAL_BATCH");
+  return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
 
 struct ConstraintEndpointBinding {
   int constraint_id = -1;
@@ -247,6 +253,16 @@ public:
             "batch solve requests must target distinct partitions");
       }
       loaded_partitions.push_back(&loaded);
+    }
+
+    if (inprocess_worker_sequential_batch_enabled()) {
+      std::vector<PartitionSolveResult> results;
+      results.reserve(requests.size());
+      for (size_t i = 0; i < requests.size(); ++i) {
+        results.push_back(
+            solveLoadedPartition(loaded_partitions[i], requests[i]));
+      }
+      return results;
     }
 
     std::vector<PartitionSolveResult> results(requests.size());
