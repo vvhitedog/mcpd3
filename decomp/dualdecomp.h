@@ -221,6 +221,31 @@ public:
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
   }
+  int getConfiguredNumOptimizationScales() const {
+    return options_.num_optimization_scales;
+  }
+  long getConfiguredInitialStepSize() const {
+    return options_.initial_step_size;
+  }
+  bool getConfiguredExhaustRegularizedScaleIterations() const {
+    return options_.exhaust_regularized_scale_iterations;
+  }
+  void configureOptimizationSchedule(
+      int num_optimization_scales, long initial_step_size,
+      bool exhaust_regularized_scale_iterations) {
+    if (num_optimization_scales <= 0) {
+      throw std::runtime_error(
+          "optimization scale count must be positive");
+    }
+    if (initial_step_size <= 0) {
+      throw std::runtime_error("initial step size must be positive");
+    }
+    options_.num_optimization_scales = num_optimization_scales;
+    options_.initial_step_size = initial_step_size;
+    options_.max_step_size = initial_step_size;
+    options_.exhaust_regularized_scale_iterations =
+        exhaust_regularized_scale_iterations;
+  }
   const std::vector<PartitionPackage> &getPartitionPackages() const {
     if (!options_.emit_partition_packages) {
       throw std::runtime_error(

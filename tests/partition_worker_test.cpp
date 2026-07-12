@@ -3376,6 +3376,15 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
   const std::vector<int> refreshed_arcs{2, 2, 9, 9, 3, 3};
   const std::vector<int> refreshed_terminals{-3, 4, 0, 11};
   persistent.replaceProblemCapacities(refreshed_arcs, refreshed_terminals);
+  persistent.configureOptimizationSchedule(
+      /*num_optimization_scales=*/3, /*initial_step_size=*/100,
+      /*exhaust_regularized_scale_iterations=*/true);
+  require(persistent.getConfiguredNumOptimizationScales() == 3,
+          "schedule refresh should update the optimization scale count");
+  require(persistent.getConfiguredInitialStepSize() == 100,
+          "schedule refresh should update the initial step size");
+  require(persistent.getConfiguredExhaustRegularizedScaleIterations(),
+          "schedule refresh should update regularized exhaustion");
 
   const auto packages_after = persistent.getPartitionPackages();
   const auto constraints_after = persistent.getConstraintSnapshots();
@@ -3449,6 +3458,12 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
                                           std::vector<int>{0, 0, 1});
       },
       "capacity refresh should reject activating an absent isolated node");
+  requireThrows(
+      [&] { persistent.configureOptimizationSchedule(0, 1, false); },
+      "schedule refresh should reject zero scales");
+  requireThrows(
+      [&] { persistent.configureOptimizationSchedule(1, 0, false); },
+      "schedule refresh should reject zero initial step size");
 
   if (old_partitioner) {
     ::setenv("MCPD3_PARTITIONER", old_value.c_str(), 1);
