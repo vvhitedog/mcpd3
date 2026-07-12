@@ -3458,6 +3458,18 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
                                           std::vector<int>{0, 0, 1});
       },
       "capacity refresh should reject activating an absent isolated node");
+
+  auto materialized_options = options;
+  materialized_options.materialize_all_partition_nodes = true;
+  mcpd3::DualDecomposition materialized(
+      /*npartition=*/2, /*nnode=*/3, /*narc=*/1,
+      std::vector<int>{0, 1}, std::vector<int>{1, 1},
+      std::vector<int>{0, 0, 0}, materialized_options);
+  materialized.replaceProblemCapacities(std::vector<int>{1, 1},
+                                        std::vector<int>{0, 0, 1});
+  materialized.solve();
+  require(materialized.getLastDisagreementCount() == 0,
+          "materialized isolated terminal refresh should solve");
   requireThrows(
       [&] { persistent.configureOptimizationSchedule(0, 1, false); },
       "schedule refresh should reject zero scales");

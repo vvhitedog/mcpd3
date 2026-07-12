@@ -98,6 +98,7 @@ struct DualDecompositionOptions {
   bool track_primal_upper_bound = true;
   bool emit_partition_packages = true;
   bool construct_solvers = true;
+  bool materialize_all_partition_nodes = false;
   bool saturate_capacity_overflow = false;
   bool verbose = true;
   long min_step_size = 1;
@@ -1390,6 +1391,11 @@ private:
      */
     auto terminal_start = std::chrono::steady_clock::now();
     terminal_locations_.resize(static_cast<size_t>(nnode_));
+    if (options_.materialize_all_partition_nodes) {
+      for (int node = 0; node < nnode_; ++node) {
+        min_cut_sub_graphs_[partitions_[node]].getOrInsertNode(node);
+      }
+    }
     for (int i = 0; i < nnode_; ++i) {
       if (terminal_capacities_[i] == 0) {
         if (report_progress && (i + 1) % progress_interval == 0) {
