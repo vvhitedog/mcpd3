@@ -336,6 +336,93 @@ public:
     }
   }
 
+  void replaceProblemCapacities(
+      const std::vector<int> &arc_capacities,
+      const std::vector<int> &terminal_capacities) {
+    requireConstructedSolvers("replaceProblemCapacities");
+    if (arc_capacities.size() != static_cast<size_t>(2 * narc_)) {
+      throw std::runtime_error("replacement arc capacity count mismatch");
+    }
+    if (terminal_capacities.size() != static_cast<size_t>(nnode_)) {
+      throw std::runtime_error(
+          "replacement terminal capacity count mismatch");
+    }
+    for (const int capacity : arc_capacities) {
+      if (capacity < 0) {
+        throw std::runtime_error(
+            "replacement arc capacities must be non-negative");
+      }
+    }
+
+    std::vector<std::vector<int>> local_arc_capacities(solvers_.size());
+    std::vector<std::vector<int>> local_terminal_capacities(solvers_.size());
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      local_arc_capacities[partition].assign(
+          static_cast<size_t>(2 * local_arc_counts_[partition]), 0);
+      local_terminal_capacities[partition].assign(
+          static_cast<size_t>(local_node_counts_[partition]), 0);
+    }
+    for (int arc = 0; arc < narc_; ++arc) {
+      const ArcLocation &location = arc_locations_[arc];
+      const int input_forward = arc_capacities[2 * arc];
+      const int input_backward = arc_capacities[2 * arc + 1];
+      auto &local = local_arc_capacities[location.partition];
+      local[2 * location.local_arc] =
+          location.swapped ? input_backward : input_forward;
+      local[2 * location.local_arc + 1] =
+          location.swapped ? input_forward : input_backward;
+    }
+    for (int node = 0; node < nnode_; ++node) {
+      const TerminalLocation &location = terminal_locations_[node];
+      if (location.partition < 0 || location.local_node < 0) {
+        if (terminal_capacities[node] != 0) {
+          throw std::runtime_error(
+              "replacement terminal activates an absent isolated node");
+        }
+        continue;
+      }
+      local_terminal_capacities[location.partition][location.local_node] =
+          terminal_capacities[node];
+    }
+
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      solvers_[partition]->replaceProblemCapacities(
+          local_arc_capacities[partition],
+          local_terminal_capacities[partition]);
+      if (options_.emit_partition_packages) {
+        partition_packages_[partition].arc_capacities =
+            local_arc_capacities[partition];
+        partition_packages_[partition].terminal_capacities =
+            local_terminal_capacities[partition];
+      }
+    }
+
+    if (options_.track_primal_upper_bound) {
+      original_arc_capacities_ = arc_capacities;
+      original_terminal_capacities_ = terminal_capacities;
+    }
+    solve_loop_time_ = 0;
+    lagrange_update_time_ = 0;
+    max_lower_bound_ = std::numeric_limits<double>::lowest();
+    max_lower_bound_raw_ = std::numeric_limits<long>::min();
+    max_regularized_objective_raw_ = std::numeric_limits<long>::min();
+    best_upper_bound_ = std::numeric_limits<long>::max();
+    current_upper_bound_ = std::numeric_limits<long>::max();
+    last_original_objective_raw_ = 0;
+    last_certified_lower_bound_raw_ = 0;
+    last_regularized_objective_raw_ = 0;
+    last_disagreement_count_ = 0;
+    last_disagreement_norm_sq_ = 0;
+    last_regularization_budget_ = 0;
+    last_regularization_contribution_ = 0;
+    last_regularization_anchor_sink_count_ = 0;
+    last_regularization_active_sink_count_ = 0;
+    total_optimization_iterations_ = 0;
+    objective_scale_promotion_count_ = 0;
+    warned_regularization_budget_exceeded_ = false;
+    disagreeing_global_indices_.clear();
+  }
+
   int regularizationStrengthForStepSize(long step_size) const {
     if (options_.regularization_scheme !=
         DualDecompositionRegularizationScheme::SCALED_EPSILON) {
@@ -1240,19 +1327,24 @@ private:
      * step 1: distribute all arcs into one and only one sub graph
      */
     auto arc_start = std::chrono::steady_clock::now();
+    arc_locations_.resize(static_cast<size_t>(narc_));
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
       int forward_capacity = arc_capacities_[2 * i + 0];
       int backward_capacity = arc_capacities_[2 * i + 1];
+      bool swapped = false;
       if (s > t) {
         std::swap(s, t);
         std::swap(forward_capacity, backward_capacity);
+        swapped = true;
       }
       // the sub graph each arc belongs to is defined to be the partition of the
       // source node
       int arc_partition = partitions_[s];
       auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+      arc_locations_[static_cast<size_t>(i)] = ArcLocation{
+          arc_partition, min_cut_sub_graph.graph.narc, swapped};
       min_cut_sub_graph.insertArc(s, t, forward_capacity, backward_capacity);
       if (partitions_[t] != arc_partition) { // t is an auxillary node that
                                              // needs to be constrained
@@ -1272,6 +1364,7 @@ private:
      * step 2: add source and sink capacities of nodes
      */
     auto terminal_start = std::chrono::steady_clock::now();
+    terminal_locations_.resize(static_cast<size_t>(nnode_));
     for (int i = 0; i < nnode_; ++i) {
       if (terminal_capacities_[i] == 0) {
         if (report_progress && (i + 1) % progress_interval == 0) {
@@ -1295,6 +1388,16 @@ private:
         min_cut_sub_graphs_[partition].getOrInsertNode(global_index);
       }
     }
+    for (int node = 0; node < nnode_; ++node) {
+      const int partition = partitions_[node];
+      const auto &global_to_local =
+          min_cut_sub_graphs_[partition].global_to_local_map;
+      if (node < static_cast<int>(global_to_local.size()) &&
+          global_to_local[node] >= 0) {
+        terminal_locations_[static_cast<size_t>(node)] =
+            TerminalLocation{partition, global_to_local[node]};
+      }
+    }
     auto finalize_start = std::chrono::steady_clock::now();
     int finalize_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
@@ -1302,6 +1405,12 @@ private:
       ++finalize_done;
       dualdecomp_progress_report("dd_finalize_terminals", finalize_done,
                                  npartition_, finalize_start);
+    }
+    local_arc_counts_.reserve(min_cut_sub_graphs_.size());
+    local_node_counts_.reserve(min_cut_sub_graphs_.size());
+    for (const auto &min_cut_sub_graph : min_cut_sub_graphs_) {
+      local_arc_counts_.push_back(min_cut_sub_graph.graph.narc);
+      local_node_counts_.push_back(min_cut_sub_graph.graph.nnode);
     }
     terminal_capacities_.clear();
     terminal_capacities_.shrink_to_fit();
@@ -1492,6 +1601,20 @@ private:
   std::vector<int> original_arcs_;
   std::vector<int> original_arc_capacities_;
   std::vector<int> original_terminal_capacities_;
+
+  struct ArcLocation {
+    int partition = -1;
+    int local_arc = -1;
+    bool swapped = false;
+  };
+  struct TerminalLocation {
+    int partition = -1;
+    int local_node = -1;
+  };
+  std::vector<ArcLocation> arc_locations_;
+  std::vector<TerminalLocation> terminal_locations_;
+  std::vector<int> local_arc_counts_;
+  std::vector<int> local_node_counts_;
 
   /**
    * data structures needed for solving dual decomposition

@@ -3352,6 +3352,111 @@ void dualDecompositionWarmStartMatchesColdPromotedSolve() {
   }
 }
 
+void dualDecompositionCapacityRefreshPreservesPersistentState() {
+  const char *old_partitioner = std::getenv("MCPD3_PARTITIONER");
+  const std::string old_value = old_partitioner ? old_partitioner : "";
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+
+  auto options = warmStartDdOptions();
+  options.randomize_initial_alphas = true;
+  options.initial_alpha_random_radius = 9;
+  options.initial_alpha_random_seed = 9;
+  mcpd3::DualDecomposition persistent(
+      /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
+      std::vector<int>{0, 1, 1, 2, 2, 3},
+      std::vector<int>{4, 4, 5, 5, 6, 6},
+      std::vector<int>{8, 0, 0, -7}, options);
+  persistent.solve();
+
+  const auto packages_before = persistent.getPartitionPackages();
+  const auto constraints_before = persistent.getConstraintSnapshots();
+  require(!constraints_before.empty(),
+          "capacity refresh fixture should contain a DD constraint");
+
+  const std::vector<int> refreshed_arcs{2, 2, 9, 9, 3, 3};
+  const std::vector<int> refreshed_terminals{-3, 4, 0, 11};
+  persistent.replaceProblemCapacities(refreshed_arcs, refreshed_terminals);
+
+  const auto packages_after = persistent.getPartitionPackages();
+  const auto constraints_after = persistent.getConstraintSnapshots();
+  require(packages_after.size() == packages_before.size(),
+          "capacity refresh should preserve partition count");
+  for (size_t i = 0; i < packages_before.size(); ++i) {
+    require(packages_after[i].partition_id == packages_before[i].partition_id,
+            "capacity refresh should preserve partition ids");
+    require(packages_after[i].arcs == packages_before[i].arcs,
+            "capacity refresh should preserve local arc topology");
+    require(packages_after[i].local_to_global ==
+                packages_before[i].local_to_global,
+            "capacity refresh should preserve local node mapping");
+  }
+  require(constraints_after.size() == constraints_before.size(),
+          "capacity refresh should preserve constraint count");
+  for (size_t i = 0; i < constraints_before.size(); ++i) {
+    require(constraints_after[i].constraint_id ==
+                constraints_before[i].constraint_id &&
+                constraints_after[i].global_node_id ==
+                    constraints_before[i].global_node_id &&
+                constraints_after[i].partition_index_source ==
+                    constraints_before[i].partition_index_source &&
+                constraints_after[i].partition_index_target ==
+                    constraints_before[i].partition_index_target &&
+                constraints_after[i].local_index_source ==
+                    constraints_before[i].local_index_source &&
+                constraints_after[i].local_index_target ==
+                    constraints_before[i].local_index_target,
+            "capacity refresh should preserve constraint topology");
+    require(constraints_after[i].alpha == constraints_before[i].alpha &&
+                constraints_after[i].last_alpha ==
+                    constraints_before[i].last_alpha &&
+                constraints_after[i].alpha_momentum ==
+                    constraints_before[i].alpha_momentum,
+            "capacity refresh should preserve alpha and momentum state");
+  }
+
+  persistent.solve();
+  mcpd3::DualDecomposition cold(
+      /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
+      std::vector<int>{0, 1, 1, 2, 2, 3}, refreshed_arcs,
+      refreshed_terminals, options);
+  cold.solve();
+  require(persistent.getLastDisagreementCount() == 0,
+          "refreshed persistent solve should reach agreement");
+  require(persistent.getLastOriginalObjectiveRaw() ==
+              cold.getLastOriginalObjectiveRaw(),
+          "refreshed persistent objective should match cold solve");
+
+  requireThrows(
+      [&] { persistent.replaceProblemCapacities({1, 1}, refreshed_terminals); },
+      "capacity refresh should reject the wrong arc capacity count");
+  requireThrows(
+      [&] { persistent.replaceProblemCapacities(refreshed_arcs, {1, 2}); },
+      "capacity refresh should reject the wrong terminal capacity count");
+  requireThrows(
+      [&] {
+        persistent.replaceProblemCapacities({2, 2, -1, 9, 3, 3},
+                                            refreshed_terminals);
+      },
+      "capacity refresh should reject negative arc capacities");
+
+  mcpd3::DualDecomposition isolated(
+      /*npartition=*/2, /*nnode=*/3, /*narc=*/1,
+      std::vector<int>{0, 1}, std::vector<int>{1, 1},
+      std::vector<int>{0, 0, 0}, options);
+  requireThrows(
+      [&] {
+        isolated.replaceProblemCapacities(std::vector<int>{1, 1},
+                                          std::vector<int>{0, 0, 1});
+      },
+      "capacity refresh should reject activating an absent isolated node");
+
+  if (old_partitioner) {
+    ::setenv("MCPD3_PARTITIONER", old_value.c_str(), 1);
+  } else {
+    ::unsetenv("MCPD3_PARTITIONER");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -3417,6 +3522,7 @@ int main() {
     primalDualFlowWarmStartMatchesColdPromotedSolve();
     primalDualFlowWarmStartRejectsUnsafeReuse();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
+    dualDecompositionCapacityRefreshPreservesPersistentState();
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;

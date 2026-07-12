@@ -468,6 +468,46 @@ public:
     has_solution_ = true;
   }
 
+  void replaceProblemCapacities(const std::vector<int> &arc_capacities,
+                                const std::vector<int> &terminal_capacities) {
+    if (arc_capacities.size() != arc_capacities_.size()) {
+      throw std::runtime_error("replacement arc capacity count mismatch");
+    }
+    if (terminal_capacities.size() != terminal_capacities_.size()) {
+      throw std::runtime_error(
+          "replacement terminal capacity count mismatch");
+    }
+    for (const int capacity : arc_capacities) {
+      if (capacity < 0) {
+        throw std::runtime_error(
+            "replacement arc capacities must be non-negative");
+      }
+    }
+
+    arc_capacities_ = arc_capacities;
+    terminal_capacities_ = terminal_capacities;
+    std::fill(d_flow_.begin(), d_flow_.end(), 0);
+    for (int i = 0; i < narc_; ++i) {
+      const int lower = -arc_capacities_[2 * i + 1];
+      const int upper = arc_capacities_[2 * i];
+      v_flow_[i] = std::max(lower, std::min(upper, v_flow_[i]));
+      const int source = arcs_[2 * i];
+      const int target = arcs_[2 * i + 1];
+      d_flow_[source] += v_flow_[i];
+      d_flow_[target] -= v_flow_[i];
+    }
+
+    maxflow_graph_.reset();
+    initializeMaxflowGraph();
+    maxflow_changed_list_.Reset();
+    incremental_mincut_nodes_.clear();
+    incremental_arcs_.clear();
+    is_first_iteration_ = true;
+    is_first_iteration_of_new_scale_ = true;
+    mincut_value_ = 0;
+    resetRegularizationDiagnostics();
+  }
+
   WarmState captureWarmState() const {
     WarmState state;
     state.v_flow = v_flow_;
