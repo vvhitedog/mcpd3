@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,7 @@
 
 #include <decomp/lower_bound_certificate.h>
 #include <decomp/partition_worker.h>
+#include <multithread/threadpool.h>
 
 namespace mcpd3 {
 
@@ -178,11 +180,13 @@ public:
       std::vector<std::unique_ptr<PartitionWorker>> workers,
       PartitionWorkerCoordinatorOptions options = {})
       : workers_(std::move(workers)), options_(options),
+        thread_pool_(std::max<size_t>(1, workers_.size())),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
     if (workers_.empty()) {
       throw std::runtime_error("at least one partition worker is required");
     }
+    packages_by_worker_.assign(workers_.size(), {});
     packages_.reserve(packages.size());
     const auto package_to_worker_index = assignPackagesToWorkers(packages);
     std::vector<bool> worker_has_partition(workers_.size(), false);
@@ -196,7 +200,27 @@ public:
       }
       const size_t worker_index = package_to_worker_index[i];
       partition_to_worker_index_.emplace(partition_id, worker_index);
+      if (partition_id >= 0 &&
+          static_cast<size_t>(partition_id) >=
+              partition_to_worker_index_by_id_.size()) {
+        partition_to_worker_index_by_id_.resize(
+            static_cast<size_t>(partition_id) + 1, kInvalidIndex);
+      }
+      if (partition_id >= 0) {
+        partition_to_worker_index_by_id_[static_cast<size_t>(partition_id)] =
+            worker_index;
+      }
       partition_to_package_index_.emplace(partition_id, packages_.size());
+      if (partition_id >= 0 &&
+          static_cast<size_t>(partition_id) >=
+              partition_to_package_index_by_id_.size()) {
+        partition_to_package_index_by_id_.resize(
+            static_cast<size_t>(partition_id) + 1, kInvalidIndex);
+      }
+      if (partition_id >= 0) {
+        partition_to_package_index_by_id_[static_cast<size_t>(partition_id)] =
+            packages_.size();
+      }
       if (!worker_has_partition[worker_index]) {
         worker_has_partition[worker_index] = true;
         active_worker_indices_.push_back(worker_index);
@@ -204,6 +228,7 @@ public:
       PartitionPackage coordinator_package;
       coordinator_package.partition_id = partition_id;
       coordinator_package.constraint_endpoints = package.constraint_endpoints;
+      packages_by_worker_[worker_index].push_back(packages_.size());
       packages_.push_back(std::move(coordinator_package));
       workers_[worker_index]->loadPartition(std::move(packages[i]));
     }
@@ -306,53 +331,52 @@ private:
     }
 
     std::vector<PartitionSolveResult> results(packages_.size());
-    std::vector<std::vector<size_t>> packages_by_worker(workers_.size());
-    for (size_t package_index = 0; package_index < packages_.size();
-         ++package_index) {
-      const int partition_id = packages_[package_index].partition_id;
-      const size_t worker_index = workerIndexForPartition(partition_id);
-      packages_by_worker[worker_index].push_back(package_index);
-    }
 
-    std::vector<std::future<void>> futures;
-    futures.reserve(active_worker_indices_.size());
+    std::mutex exception_mutex;
+    std::exception_ptr first_exception;
     for (const auto worker_index : active_worker_indices_) {
-      futures.push_back(std::async(
-          std::launch::async,
-          [&, worker_index] {
-            std::vector<PartitionSolveRequest> requests;
-            requests.reserve(packages_by_worker[worker_index].size());
-            for (const auto package_index : packages_by_worker[worker_index]) {
-              const int partition_id = packages_[package_index].partition_id;
-              PartitionSolveRequest request;
-              request.round_id = round_id;
-              request.partition_id = partition_id;
-              request.scale = scale;
-              request.regularization_strength = regularization_strength;
-              request.return_full_labels = return_full_labels;
-              request.alpha_updates = std::move(alpha_updates[package_index]);
-              requests.push_back(std::move(request));
-            }
-            const auto worker_results =
-                workers_[worker_index]->solveRoundBatch(requests);
-            if (worker_results.size() != requests.size()) {
+      thread_pool_.push([&, worker_index] {
+        try {
+          std::vector<PartitionSolveRequest> requests;
+          requests.reserve(packages_by_worker_[worker_index].size());
+          for (const auto package_index : packages_by_worker_[worker_index]) {
+            const int partition_id = packages_[package_index].partition_id;
+            PartitionSolveRequest request;
+            request.round_id = round_id;
+            request.partition_id = partition_id;
+            request.scale = scale;
+            request.regularization_strength = regularization_strength;
+            request.return_full_labels = return_full_labels;
+            request.alpha_updates = std::move(alpha_updates[package_index]);
+            requests.push_back(std::move(request));
+          }
+          const auto worker_results =
+              workers_[worker_index]->solveRoundBatch(requests);
+          if (worker_results.size() != requests.size()) {
+            throw std::runtime_error(
+                "worker batch result count does not match request count");
+          }
+          for (const auto &worker_result : worker_results) {
+            const size_t package_index =
+                packageIndexForPartition(worker_result.partition_id);
+            if (workerIndexForPartition(worker_result.partition_id) !=
+                worker_index) {
               throw std::runtime_error(
-                  "worker batch result count does not match request count");
+                  "worker returned a result for an unowned partition");
             }
-            for (const auto &worker_result : worker_results) {
-              const size_t package_index =
-                  packageIndexForPartition(worker_result.partition_id);
-              if (workerIndexForPartition(worker_result.partition_id) !=
-                  worker_index) {
-                throw std::runtime_error(
-                    "worker returned a result for an unowned partition");
-              }
-              results[package_index] = worker_result;
-            }
-          }));
+            results[package_index] = worker_result;
+          }
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(exception_mutex);
+          if (!first_exception) {
+            first_exception = std::current_exception();
+          }
+        }
+      });
     }
-    for (auto &future : futures) {
-      future.get();
+    thread_pool_.wait();
+    if (first_exception) {
+      std::rethrow_exception(first_exception);
     }
     for (const auto constraint_index : synced_constraint_indices) {
       constraints_[constraint_index].needs_sync = false;
@@ -721,6 +745,7 @@ private:
 
     constraints_.clear();
     constraint_index_by_id_.clear();
+    constraint_index_by_id_vector_.clear();
     for (const auto &entry : accumulators) {
       const auto &accumulator = entry.second;
       if (!accumulator.has_source || !accumulator.has_target) {
@@ -736,6 +761,17 @@ private:
       constraint.last_alpha = accumulator.last_alpha;
       constraint.alpha_momentum = accumulator.alpha_momentum;
       constraint_index_by_id_[constraint.constraint_id] = constraints_.size();
+      if (constraint.constraint_id >= 0 &&
+          static_cast<size_t>(constraint.constraint_id) >=
+              constraint_index_by_id_vector_.size()) {
+        constraint_index_by_id_vector_.resize(
+            static_cast<size_t>(constraint.constraint_id) + 1, kInvalidIndex);
+      }
+      if (constraint.constraint_id >= 0) {
+        constraint_index_by_id_vector_[
+            static_cast<size_t>(constraint.constraint_id)] =
+            constraints_.size();
+      }
       constraints_.push_back(constraint);
     }
   }
@@ -795,6 +831,15 @@ private:
   }
 
   size_t workerIndexForPartition(int partition_id) const {
+    if (partition_id >= 0 &&
+        static_cast<size_t>(partition_id) <
+            partition_to_worker_index_by_id_.size()) {
+      const size_t worker_index =
+          partition_to_worker_index_by_id_[static_cast<size_t>(partition_id)];
+      if (worker_index != kInvalidIndex) {
+        return worker_index;
+      }
+    }
     auto find_iter = partition_to_worker_index_.find(partition_id);
     if (find_iter == partition_to_worker_index_.end()) {
       throw std::runtime_error("unknown worker partition id " +
@@ -895,6 +940,15 @@ private:
   }
 
   size_t packageIndexForPartition(int partition_id) const {
+    if (partition_id >= 0 &&
+        static_cast<size_t>(partition_id) <
+            partition_to_package_index_by_id_.size()) {
+      const size_t package_index =
+          partition_to_package_index_by_id_[static_cast<size_t>(partition_id)];
+      if (package_index != kInvalidIndex) {
+        return package_index;
+      }
+    }
     auto find_iter = partition_to_package_index_.find(partition_id);
     if (find_iter == partition_to_package_index_.end()) {
       throw std::runtime_error("unknown package partition id " +
@@ -944,12 +998,8 @@ private:
     std::vector<ConstraintLabels> labels(constraints_.size());
     for (const auto &result : results) {
       for (const auto &label : result.constrained_labels) {
-        auto constraint_iter = constraint_index_by_id_.find(label.constraint_id);
-        if (constraint_iter == constraint_index_by_id_.end()) {
-          throw std::runtime_error("unknown result constraint id " +
-                                   std::to_string(label.constraint_id));
-        }
-        const size_t constraint_index = constraint_iter->second;
+        const size_t constraint_index =
+            constraintIndexForId(label.constraint_id);
         const auto &constraint = constraints_[constraint_index];
         auto &constraint_labels = labels[constraint_index];
         if (result.partition_id == constraint.source.partition_id) {
@@ -1020,6 +1070,24 @@ private:
     return options_.regularization_budget_limit > 0
                ? options_.regularization_budget_limit
                : options_.objective_scale;
+  }
+
+  size_t constraintIndexForId(int constraint_id) const {
+    if (constraint_id >= 0 &&
+        static_cast<size_t>(constraint_id) <
+            constraint_index_by_id_vector_.size()) {
+      const size_t constraint_index =
+          constraint_index_by_id_vector_[static_cast<size_t>(constraint_id)];
+      if (constraint_index != kInvalidIndex) {
+        return constraint_index;
+      }
+    }
+    auto constraint_iter = constraint_index_by_id_.find(constraint_id);
+    if (constraint_iter == constraint_index_by_id_.end()) {
+      throw std::runtime_error("unknown result constraint id " +
+                               std::to_string(constraint_id));
+    }
+    return constraint_iter->second;
   }
 
   void warnIfRegularizationBudgetExceeded(long budget,
@@ -1155,15 +1223,21 @@ private:
     return step_size <= 10 ? static_cast<int>(step_size) : 0;
   }
 
+  static constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();
   std::vector<PartitionPackage> packages_;
   std::vector<std::unique_ptr<PartitionWorker>> workers_;
   PartitionWorkerCoordinatorOptions options_;
+  ThreadPool<void> thread_pool_;
   bool warned_regularization_budget_exceeded_;
   std::vector<size_t> active_worker_indices_;
+  std::vector<std::vector<size_t>> packages_by_worker_;
   std::unordered_map<int, size_t> partition_to_worker_index_;
+  std::vector<size_t> partition_to_worker_index_by_id_;
   std::unordered_map<int, size_t> partition_to_package_index_;
+  std::vector<size_t> partition_to_package_index_by_id_;
   std::vector<CoordinatorConstraint> constraints_;
   std::unordered_map<int, size_t> constraint_index_by_id_;
+  std::vector<size_t> constraint_index_by_id_vector_;
 };
 
 } // namespace mcpd3
