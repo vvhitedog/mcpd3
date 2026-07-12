@@ -3263,6 +3263,20 @@ void primalDualFlowWarmStartRejectsUnsafeReuse() {
                 "warm start should reject internally regularized state");
 }
 
+void primalDualCapacityRefreshCanResetFlowState() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{5, 5}, std::vector<int>{8, -8});
+  solver.solve();
+  solver.replaceProblemCapacities(
+      std::vector<int>{7, 7}, std::vector<int>{9, -9},
+      /*preserve_flow_state=*/false);
+  const auto reset = solver.captureFlowWarmStart();
+  require(std::all_of(reset.v_flow.begin(), reset.v_flow.end(),
+                      [](int flow) { return flow == 0; }),
+          "capacity refresh should reset arc flow when requested");
+}
+
 mcpd3::DualDecompositionOptions warmStartDdOptions() {
   mcpd3::DualDecompositionOptions options;
   options.num_optimization_scales = 1;
@@ -3435,6 +3449,16 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
               cold.getLastOriginalObjectiveRaw(),
           "refreshed persistent objective should match cold solve");
 
+  persistent.replaceProblemCapacities(
+      refreshed_arcs, refreshed_terminals,
+      /*preserve_alpha_state=*/false,
+      /*preserve_flow_state=*/true);
+  for (const auto &constraint : persistent.getConstraintSnapshots()) {
+    require(constraint.alpha == 0 && constraint.last_alpha == 0 &&
+                constraint.alpha_momentum == 0,
+            "capacity refresh should reset all alpha state when requested");
+  }
+
   requireThrows(
       [&] { persistent.replaceProblemCapacities({1, 1}, refreshed_terminals); },
       "capacity refresh should reject the wrong arc capacity count");
@@ -3548,6 +3572,7 @@ int main() {
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
     primalDualFlowWarmStartMatchesColdPromotedSolve();
     primalDualFlowWarmStartRejectsUnsafeReuse();
+    primalDualCapacityRefreshCanResetFlowState();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
     dualDecompositionCapacityRefreshPreservesPersistentState();
   } catch (const std::exception &e) {

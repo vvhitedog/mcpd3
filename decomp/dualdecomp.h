@@ -364,7 +364,9 @@ public:
 
   void replaceProblemCapacities(
       const std::vector<int> &arc_capacities,
-      const std::vector<int> &terminal_capacities) {
+      const std::vector<int> &terminal_capacities,
+      bool preserve_alpha_state = true,
+      bool preserve_flow_state = true) {
     requireConstructedSolvers("replaceProblemCapacities");
     if (arc_capacities.size() != static_cast<size_t>(2 * narc_)) {
       throw std::runtime_error("replacement arc capacity count mismatch");
@@ -414,12 +416,23 @@ public:
     for (size_t partition = 0; partition < solvers_.size(); ++partition) {
       solvers_[partition]->replaceProblemCapacities(
           local_arc_capacities[partition],
-          local_terminal_capacities[partition]);
+          local_terminal_capacities[partition], preserve_flow_state);
       if (options_.emit_partition_packages) {
         partition_packages_[partition].arc_capacities =
             local_arc_capacities[partition];
         partition_packages_[partition].terminal_capacities =
             local_terminal_capacities[partition];
+      }
+    }
+
+    if (!preserve_alpha_state) {
+      for (auto &[global_index, constraints] : constraint_arc_map_) {
+        (void)global_index;
+        for (auto &constraint : constraints) {
+          constraint.alpha = 0;
+          constraint.last_alpha = 0;
+          constraint.alpha_momentum = 0;
+        }
       }
     }
 

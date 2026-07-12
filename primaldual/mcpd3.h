@@ -469,7 +469,8 @@ public:
   }
 
   void replaceProblemCapacities(const std::vector<int> &arc_capacities,
-                                const std::vector<int> &terminal_capacities) {
+                                const std::vector<int> &terminal_capacities,
+                                bool preserve_flow_state = true) {
     if (arc_capacities.size() != arc_capacities_.size()) {
       throw std::runtime_error("replacement arc capacity count mismatch");
     }
@@ -486,6 +487,9 @@ public:
 
     arc_capacities_ = arc_capacities;
     terminal_capacities_ = terminal_capacities;
+    if (!preserve_flow_state) {
+      std::fill(v_flow_.begin(), v_flow_.end(), 0);
+    }
     std::fill(d_flow_.begin(), d_flow_.end(), 0);
     for (int i = 0; i < narc_; ++i) {
       const int lower = -arc_capacities_[2 * i + 1];
