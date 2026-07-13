@@ -13,3 +13,8 @@
 - Built every mcpd3 target in all four modes.
 - Passed both CTest tests in all four modes: 8/8 mode/test combinations.
 
+## 2026-07-13 11:54 PDT - Shared precision build configuration
+
+- Factored capacity-mode dependency and compile-definition setup into
+  `cmake/McpdCapacity.cmake` so mcpd4 and PU can consume exactly the same
+  precision contract as mcpd3 without duplicating it.
