@@ -24,11 +24,14 @@
 #include <unistd.h>
 
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace mcpd3 {
 
-template <typename T> class MmapArray {
-  static_assert(std::is_pod<T>::value, "MmapArray only supports POD types");
+template <typename T, bool = std::is_trivially_copyable_v<T>> class MmapArray;
+
+template <typename T> class MmapArray<T, true> {
 
 public:
   MmapArray(size_t num_elements, const std::string &filename)
@@ -72,5 +75,34 @@ private:
   T *mem_map_;
 
   const mode_t FILE_MODE = 0666;
+};
+
+// GMP and other nontrivial values require normal C++ object lifetime. Keep the
+// same array API, but use constructed heap storage instead of raw mmap bytes.
+template <typename T> class MmapArray<T, false> {
+public:
+  MmapArray(size_t num_elements, const std::string &filename)
+      : values_(num_elements) {
+    (void)filename;
+  }
+
+  T &operator[](size_t index) { return values_[index]; }
+
+  const T &operator[](size_t index) const { return values_[index]; }
+
+  T *data() { return values_.data(); }
+
+  const T *data() const { return values_.data(); }
+
+  T *begin() { return values_.data(); }
+
+  const T *begin() const { return values_.data(); }
+
+  T *end() { return values_.data() + values_.size(); }
+
+  const T *end() const { return values_.data() + values_.size(); }
+
+private:
+  std::vector<T> values_;
 };
 } // namespace mcpd3

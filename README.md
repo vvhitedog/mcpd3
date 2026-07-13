@@ -88,9 +88,10 @@ the GMP C and C++ development packages, commonly installed as `libgmp-dev` on
 Debian/Ubuntu. `BOOST_ROOT` and `GMP_ROOT` can point CMake at non-system
 installations.
 
-GMP capacities are nontrivial C++ objects, so BK node and arc arrays use heap
-storage in GMP mode. File-backed and anonymous BK mmap storage remain available
-for the fixed-width modes.
+GMP capacities are nontrivial C++ objects, so BK node/arc arrays and
+capacity-bearing CSR arrays use constructed heap storage in GMP mode.
+File-backed and anonymous mmap storage remain available for the fixed-width
+modes. The GMP CSR path is exact but is not an out-of-core capacity store.
 
 Run tests:
 

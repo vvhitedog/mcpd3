@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include <capacity.h>
 #include <graph/dimacs.h>
 #include <graph/partition.h>
 #include <io/mmaparray.h>
@@ -58,7 +59,7 @@ struct Edge {
 };
 
 template <typename node_index_type = int, typename arc_index_type = long,
-          typename cap_type = int, typename flow_type = long>
+          typename cap_type = Capacity, typename flow_type = Objective>
 class CsrGraph {
 public:
   CsrGraph(const std::string file_dir_prefix)
@@ -79,17 +80,25 @@ public:
         auto end_node = (*adjacency_nodes_)[iarc];
         auto arc_cap = (*arc_capacities_)[iarc];
         if (!cut_[inode] && cut_[end_node]) {
-          cut_value += arc_cap;
+          cut_value = checked_add(
+              cut_value, static_cast<flow_type>(arc_cap),
+              "CSR cut objective overflow");
         }
       }
 
       // 2. calculate terminal contribution
       auto terminal_cap = (*terminal_capacities_)[inode];
       if (terminal_cap > 0 && cut_[inode]) {
-        cut_value += terminal_cap;
+        cut_value = checked_add(
+            cut_value, static_cast<flow_type>(terminal_cap),
+            "CSR terminal cut objective overflow");
       }
       if (terminal_cap < 0 && !cut_[inode]) {
-        cut_value += -terminal_cap;
+        const flow_type magnitude = checked_subtract(
+            flow_type{0}, static_cast<flow_type>(terminal_cap),
+            "CSR terminal magnitude overflow");
+        cut_value = checked_add(cut_value, magnitude,
+                                "CSR terminal cut objective overflow");
       }
     }
     return cut_value;
@@ -187,18 +196,17 @@ public:
     arc_to_capacity_map.clear();
 
     // 3 c. create terminals nodes
+    const cap_type hard_constraint = hardConstraintCapacity();
     for (const auto &[node, distance] : distance_map) {
       if (distance < max_distance) {
         auto terminal_cap = (*terminal_capacities_)[node];
         maxflow_graph.set_trcap(new_index[node], terminal_cap);
       } else {
         if (!cut_[node]) {
-          maxflow_graph.set_trcap(new_index[node],
-                                  std::numeric_limits<cap_type>::max() / 2);
+          maxflow_graph.set_trcap(new_index[node], hard_constraint);
         }
         if (cut_[node]) {
-          maxflow_graph.set_trcap(new_index[node],
-                                  -std::numeric_limits<cap_type>::max() / 2);
+          maxflow_graph.set_trcap(new_index[node], -hard_constraint);
         }
       }
     }
@@ -272,7 +280,7 @@ public:
                                     nullptr, &_npart, nullptr, nullptr, nullptr,
                                     &objval, partitions.data());
 
-      parition_labels_ = std::make_unique<MmapArray<cap_type>>(
+      parition_labels_ = std::make_unique<MmapArray<node_index_type>>(
           nnode_, file_dir_prefix_ + "/partition_labels.mmap");
       std::copy(partitions.begin(), partitions.end(),
                 parition_labels_->begin());
@@ -286,6 +294,23 @@ public:
 #endif
 
 private:
+  cap_type hardConstraintCapacity() const {
+    if constexpr (integer_is_bounded<cap_type>()) {
+      return std::numeric_limits<cap_type>::max() / 2;
+    } else {
+      cap_type result = 1;
+      for (const cap_type &capacity : *arc_capacities_) {
+        result = checked_add(result, capacity < 0 ? -capacity : capacity,
+                             "CSR hard constraint overflow");
+      }
+      for (const cap_type &capacity : *terminal_capacities_) {
+        result = checked_add(result, capacity < 0 ? -capacity : capacity,
+                             "CSR hard constraint overflow");
+      }
+      return result;
+    }
+  }
+
   node_index_type nnode_;
   arc_index_type narc_;
   std::string file_dir_prefix_;
@@ -303,7 +328,7 @@ private:
 };
 
 template <typename node_index_type = int, typename arc_index_type = long,
-          typename cap_type = int>
+          typename cap_type = Capacity>
 CsrGraph<node_index_type, arc_index_type, cap_type>
 read_dimacs_to_csr(const std::string &filename,
                    const std::string &work_dir = "./csr_graph_dimacs") {
@@ -314,12 +339,14 @@ read_dimacs_to_csr(const std::string &filename,
   arc_index_type edge_count = 0;
   node_index_type num_nodes = 0;
   {
-    auto arc_op = [&](node_index_type s, node_index_type t, cap_type cap) {
+    auto arc_op = [&](node_index_type s, node_index_type t,
+                      const cap_type &cap) {
       num_nodes = std::max<int>(num_nodes, s + 1);
       num_nodes = std::max<int>(num_nodes, t + 1);
       edge_count += 2;
     };
-    auto term_op = [&](bool is_source, node_index_type n, cap_type cap) {
+    auto term_op = [&](bool is_source, node_index_type n,
+                       const cap_type &cap) {
       num_nodes = std::max<int>(num_nodes, n + 1);
     };
     _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
@@ -334,12 +361,19 @@ read_dimacs_to_csr(const std::string &filename,
   std::fill(terminal_capacities->begin(), terminal_capacities->end(), 0);
   edge_count = 0;
   {
-    auto arc_op = [&](node_index_type s, node_index_type t, cap_type cap) {
+    auto arc_op = [&](node_index_type s, node_index_type t,
+                      const cap_type &cap) {
       edges[edge_count++] = Edge{s, t, cap};
       edges[edge_count++] = Edge{t, s, 0};
     };
-    auto term_op = [&](bool is_source, node_index_type n, cap_type cap) {
-      (*terminal_capacities)[n] += is_source ? cap : -cap;
+    auto term_op = [&](bool is_source, node_index_type n,
+                       const cap_type &cap) {
+      (*terminal_capacities)[n] =
+          is_source
+              ? checked_add((*terminal_capacities)[n], cap,
+                            "CSR terminal capacity overflow")
+              : checked_subtract((*terminal_capacities)[n], cap,
+                                 "CSR terminal capacity overflow");
     };
     _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
   }
@@ -353,7 +387,9 @@ read_dimacs_to_csr(const std::string &filename,
     if (current_edge == nullptr || !(edge == *current_edge)) {
       current_edge = &edge;
     } else {
-      current_edge->capacity += edge.capacity;
+      current_edge->capacity = checked_add(
+          current_edge->capacity, edge.capacity,
+          "parallel CSR arc capacity overflow");
       edge.source = std::numeric_limits<node_index_type>::max();
       edge.target = 0;
     }

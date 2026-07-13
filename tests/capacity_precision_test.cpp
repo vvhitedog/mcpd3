@@ -1,5 +1,6 @@
 #include <capacity.h>
 #include <decomp/partition_worker.h>
+#include <graph/csrgraph.h>
 #include <graph/dimacs.h>
 #include <maxflow/graph.h>
 #include <primaldual/mcpd3.h>
@@ -127,6 +128,35 @@ void maximalCapacityParsesFromDimacs() {
           "DIMACS solver path must preserve the configured extreme capacity");
 }
 
+void maximalCapacitySurvivesCsrStorage() {
+  const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
+  const auto base = std::filesystem::temp_directory_path() /
+                    (std::string("mcpd3_csr_capacity_") +
+                     mcpd3::capacity_mode_name());
+  const auto input = base.string() + ".max";
+  const auto work_dir = base.string() + "_work";
+  std::filesystem::remove(input);
+  std::filesystem::remove_all(work_dir);
+  {
+    std::ofstream out(input, std::ios::trunc);
+    require(static_cast<bool>(out), "failed to create CSR precision test");
+    out << "p max 4 3\n"
+        << "n 1 s\n"
+        << "n 4 t\n"
+        << "a 1 2 " << mcpd3::integer_to_string(capacity) << "\n"
+        << "a 2 3 " << mcpd3::integer_to_string(capacity) << "\n"
+        << "a 3 4 " << mcpd3::integer_to_string(capacity) << "\n";
+  }
+  {
+    auto graph = mcpd3::read_dimacs_to_csr<>(input, work_dir);
+    graph.setCut({false, true});
+    require(graph.getCurrentCutValue() == mcpd3::widen_capacity(capacity),
+            "CSR storage must preserve the configured extreme capacity");
+  }
+  std::filesystem::remove(input);
+  std::filesystem::remove_all(work_dir);
+}
+
 } // namespace
 
 int main() {
@@ -136,6 +166,7 @@ int main() {
     configuredCapacitySurvivesGraphReallocation();
     maximalCapacitySurvivesMcpd3SolverAndWorkerStorage();
     maximalCapacityParsesFromDimacs();
+    maximalCapacitySurvivesCsrStorage();
     std::cout << "capacity_precision_test: PASS\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
