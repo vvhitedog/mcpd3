@@ -90,6 +90,27 @@ inline bool parse_int_token(const char *&p, int &value) {
   return true;
 }
 
+inline bool parse_capacity_token(const char *&p, Capacity &value) {
+  p = skip_space(p);
+  const char *begin = p;
+  if (*p == '-' || *p == '+') {
+    ++p;
+  }
+  const char *digits = p;
+  while (std::isdigit(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  if (p == digits) {
+    return false;
+  }
+  try {
+    value = parse_capacity(std::string(begin, p));
+  } catch (const std::exception &) {
+    return false;
+  }
+  return true;
+}
+
 inline bool parse_char_token(const char *&p, char &value) {
   p = skip_space(p);
   if (*p == '\0') {
@@ -116,7 +137,8 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
                          TerminalOperator term_op) {
   const int line_length = 1024;
   char line[line_length];
-  int n, m, s, t, cap, source, sink, _s, _t;
+  int n, m, s, t, source, sink, _s, _t;
+  Capacity cap = 0;
   char c;
   FILE *stream = nullptr;
   source = -1;
@@ -148,7 +170,7 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
       {
       const char *p = line + 1;
       if (!parse_int_token(p, s) || !parse_int_token(p, t) ||
-          !parse_int_token(p, cap)) {
+          !parse_capacity_token(p, cap)) {
         std::string err_msg =
             "'a' line is malformed in DIMACS file:" + filename + "\n";
         throw std::runtime_error(err_msg.c_str());
@@ -204,9 +226,9 @@ void read_dimacs_general(const std::string &filename, ArcOperator arc_op,
 MinCutGraph read_dimacs(const std::string &filename) {
   MinCutGraph g;
   g.nnode = 0;
-  std::unordered_map<int, std::unordered_map<int, int>> arc_adjacency;
+  std::unordered_map<int, std::unordered_map<int, Capacity>> arc_adjacency;
 
-  auto arc_op = [&](int s, int t, int cap) {
+  auto arc_op = [&](int s, int t, const Capacity &cap) {
     g.nnode = std::max(g.nnode, s + 1);
     g.nnode = std::max(g.nnode, t + 1);
     if (arc_adjacency[s].find(t) == arc_adjacency[s].end()) {
@@ -215,33 +237,44 @@ MinCutGraph read_dimacs(const std::string &filename) {
         arc_adjacency[t][s] = 0;
       }
     } else {
-      arc_adjacency[s][t] += cap;
+      arc_adjacency[s][t] = checked_add(
+          arc_adjacency[s][t], cap, "parallel DIMACS arc capacity overflow");
     }
   };
 
-  long imbalance = 0;
-  auto term_op = [&](bool is_source, int n, int cap) {
+  Objective imbalance = 0;
+  auto term_op = [&](bool is_source, int n, const Capacity &cap) {
     g.nnode = std::max(g.nnode, n + 1);
     g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {
       auto old_cap = g.terminal_capacities[n];
       if (old_cap < 0) {
-        imbalance += std::min(-old_cap, cap);
+        const Objective old_magnitude = -widen_capacity(old_cap);
+        const Objective new_capacity = widen_capacity(cap);
+        imbalance = checked_add(
+            imbalance, std::min(old_magnitude, new_capacity),
+            "DIMACS terminal imbalance overflow");
       }
-      g.terminal_capacities[n] += cap;
+      g.terminal_capacities[n] = checked_add(
+          old_cap, cap, "DIMACS terminal capacity overflow");
     } else {
       auto old_cap = g.terminal_capacities[n];
       if (old_cap > 0) {
-        imbalance += std::min(old_cap, cap);
+        imbalance = checked_add(
+            imbalance,
+            std::min(widen_capacity(old_cap), widen_capacity(cap)),
+            "DIMACS terminal imbalance overflow");
       }
-      g.terminal_capacities[n] -= cap;
+      g.terminal_capacities[n] = checked_subtract(
+          old_cap, cap, "DIMACS terminal capacity overflow");
     }
   };
 
   _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
 
   if (imbalance > 0) {
-    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
+    std::fprintf(stderr, "WARNING: imbalance when reading dimacs graph: %s\n",
+                 integer_to_string(imbalance).c_str());
   }
 
   // process arcs after the fact
@@ -269,7 +302,7 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   g.nnode = 0;
   g.narc = 0;
 
-  auto arc_op = [&](int s, int t, int cap) {
+  auto arc_op = [&](int s, int t, const Capacity &cap) {
     g.nnode = std::max(g.nnode, s + 1);
     g.nnode = std::max(g.nnode, t + 1);
     g.arc_capacities.push_back(cap);
@@ -279,29 +312,39 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
     ++g.narc;
   };
 
-  long imbalance = 0;
-  auto term_op = [&](bool is_source, int n, int cap) {
+  Objective imbalance = 0;
+  auto term_op = [&](bool is_source, int n, const Capacity &cap) {
     g.nnode = std::max(g.nnode, n + 1);
     g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {
       auto old_cap = g.terminal_capacities[n];
       if (old_cap < 0) {
-        imbalance += std::min(-old_cap, cap);
+        const Objective old_magnitude = -widen_capacity(old_cap);
+        const Objective new_capacity = widen_capacity(cap);
+        imbalance = checked_add(
+            imbalance, std::min(old_magnitude, new_capacity),
+            "DIMACS terminal imbalance overflow");
       }
-      g.terminal_capacities[n] += cap;
+      g.terminal_capacities[n] = checked_add(
+          old_cap, cap, "DIMACS terminal capacity overflow");
     } else {
       auto old_cap = g.terminal_capacities[n];
       if (old_cap > 0) {
-        imbalance += std::min(old_cap, cap);
+        imbalance = checked_add(
+            imbalance,
+            std::min(widen_capacity(old_cap), widen_capacity(cap)),
+            "DIMACS terminal imbalance overflow");
       }
-      g.terminal_capacities[n] -= cap;
+      g.terminal_capacities[n] = checked_subtract(
+          old_cap, cap, "DIMACS terminal capacity overflow");
     }
   };
 
   _dimacs_implementation::read_dimacs_general(filename, arc_op, term_op);
 
   if (imbalance > 0) {
-    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
+    std::fprintf(stderr, "WARNING: imbalance when reading dimacs graph: %s\n",
+                 integer_to_string(imbalance).c_str());
   }
 
   g.terminal_capacities.resize(g.nnode, 0);
@@ -374,7 +417,7 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
   bool has_pending = false;
   int pending_s = 0;
   int pending_t = 0;
-  int pending_cap = 0;
+  Capacity pending_cap = 0;
   const bool report_progress = _dimacs_implementation::progress_enabled();
   const long progress_interval = 10000000;
 
@@ -396,11 +439,11 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
       }
       int s = 0;
       int t = 0;
-      int cap = 0;
+      Capacity cap = 0;
       const char *p = line + 1;
       if (!_dimacs_implementation::parse_int_token(p, s) ||
           !_dimacs_implementation::parse_int_token(p, t) ||
-          !_dimacs_implementation::parse_int_token(p, cap)) {
+          !_dimacs_implementation::parse_capacity_token(p, cap)) {
         fclose(stream);
         throw std::runtime_error("malformed a line in DIMACS file: " +
                                  filename);
@@ -457,7 +500,7 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
   g.arc_capacities.reserve(static_cast<size_t>(2) * internal_pair_count);
   g.terminal_capacities.resize(g.nnode, 0);
 
-  long imbalance = 0;
+  Objective imbalance = 0;
   has_pending = false;
   auto build_start = std::chrono::steady_clock::now();
   long arcs_seen = 0;
@@ -476,11 +519,11 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
     }
     int s = 0;
     int t = 0;
-    int cap = 0;
+    Capacity cap = 0;
     const char *p = line + 1;
     if (!_dimacs_implementation::parse_int_token(p, s) ||
         !_dimacs_implementation::parse_int_token(p, t) ||
-        !_dimacs_implementation::parse_int_token(p, cap)) {
+        !_dimacs_implementation::parse_capacity_token(p, cap)) {
       fclose(stream);
       throw std::runtime_error("malformed a line in DIMACS file: " + filename);
     }
@@ -492,15 +535,24 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
       if (s == source) {
         auto old_cap = g.terminal_capacities[n];
         if (old_cap < 0) {
-          imbalance += std::min(-old_cap, cap);
+          const Objective old_magnitude = -widen_capacity(old_cap);
+          const Objective new_capacity = widen_capacity(cap);
+          imbalance = checked_add(
+              imbalance, std::min(old_magnitude, new_capacity),
+              "DIMACS terminal imbalance overflow");
         }
-        g.terminal_capacities[n] += cap;
+        g.terminal_capacities[n] = checked_add(
+            old_cap, cap, "DIMACS terminal capacity overflow");
       } else if (t == sink) {
         auto old_cap = g.terminal_capacities[n];
         if (old_cap > 0) {
-          imbalance += std::min(old_cap, cap);
+          imbalance = checked_add(
+              imbalance,
+              std::min(widen_capacity(old_cap), widen_capacity(cap)),
+              "DIMACS terminal imbalance overflow");
         }
-        g.terminal_capacities[n] -= cap;
+        g.terminal_capacities[n] = checked_subtract(
+            old_cap, cap, "DIMACS terminal capacity overflow");
       }
       continue;
     }
@@ -527,7 +579,8 @@ MinCutGraph read_dimacs_symmetric_streaming(const std::string &filename) {
                                           declared_arcs, build_start);
 
   if (imbalance > 0) {
-    printf("WARNING: imbalance when reading dimacs graph: %lu\n", imbalance);
+    std::fprintf(stderr, "WARNING: imbalance when reading dimacs graph: %s\n",
+                 integer_to_string(imbalance).c_str());
   }
   return std::move(g);
 }

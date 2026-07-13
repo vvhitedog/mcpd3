@@ -66,24 +66,29 @@ void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
 
   bool add_threw = false;
   try {
-    (void)mcpd3::regularizedObjectiveRaw(std::numeric_limits<long>::max(), 1);
+    (void)mcpd3::regularizedObjectiveRaw(
+        std::numeric_limits<mcpd3::Objective>::max(), mcpd3::Objective(1));
   } catch (const std::overflow_error &) {
     add_threw = true;
   }
-  require(add_threw, "regularized objective overflow should be detected");
+  require(add_threw == mcpd3::integer_is_bounded<mcpd3::Objective>(),
+          "regularized objective overflow behavior should match precision");
 
   bool subtract_threw = false;
   try {
     (void)mcpd3::certifiedOriginalLowerBoundRaw(
-        std::numeric_limits<long>::min(), 0, 1);
+        std::numeric_limits<mcpd3::Objective>::min(), mcpd3::Objective(0),
+        mcpd3::Objective(1));
   } catch (const std::overflow_error &) {
     subtract_threw = true;
   }
-  require(subtract_threw, "certified lower bound underflow should be detected");
+  require(subtract_threw == mcpd3::integer_is_bounded<mcpd3::Objective>(),
+          "certificate underflow behavior should match precision");
 }
 
 void solverMemoryEstimateReportsBkAndVectorBytes() {
-  using GraphType = Graph<int, int, long>;
+  using GraphType =
+      Graph<mcpd3::Capacity, mcpd3::Capacity, mcpd3::Objective>;
   require(GraphType::estimated_node_array_bytes(1) ==
               GraphType::estimated_node_array_bytes(16),
           "BK node estimate should include constructor minimum capacity");
@@ -99,14 +104,16 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
   require(estimate.bk_total_bytes ==
               estimate.bk_node_bytes + estimate.bk_arc_bytes,
           "BK total estimate should sum node and arc arrays");
-  require(estimate.solver_vector_bytes == ((5 * 1 + 3 * 2) * sizeof(int)),
+  require(estimate.solver_vector_bytes ==
+              4 * sizeof(int) + 7 * sizeof(mcpd3::Capacity),
           "solver vector estimate should account for arc and node vectors");
   require(estimate.total_bytes ==
               estimate.bk_total_bytes + estimate.solver_vector_bytes,
           "solver total estimate should include BK and solver vectors");
 }
 
-mcpd3::PartitionPackage makePackage(long alpha, long last_alpha) {
+mcpd3::PartitionPackage makePackage(const mcpd3::Capacity &alpha,
+                                    const mcpd3::Capacity &last_alpha) {
   mcpd3::PartitionPackage package;
   package.partition_id = 3;
   package.local_node_count = 2;
@@ -313,17 +320,17 @@ void streamingWorkerScalesEvictedDiskPayload() {
 }
 
 struct DirectSolverResult {
-  long lower_bound;
+  mcpd3::Objective lower_bound;
   int constrained_label;
-  long regularization_budget;
-  long regularization_contribution;
+  mcpd3::Objective regularization_budget;
+  mcpd3::Objective regularization_contribution;
   long regularization_anchor_sink_count;
   long regularization_active_sink_count;
 };
 
 DirectSolverResult solveDirect(mcpd3::DualDecompositionConstraintArcReference ref,
                                mcpd3::PrimalDualMinCutSolver *solver,
-                               int regularization_strength) {
+                               const mcpd3::Capacity &regularization_strength) {
   solver->setRegularizationStrength(regularization_strength);
   solver->solve();
   return DirectSolverResult{solver->getMinCutValue(),
@@ -484,7 +491,7 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
   require(packages.size() == 2, "expected two exported partition packages");
 
   std::vector<mcpd3::PartitionSolveResult> worker_results;
-  long worker_lower_bound = 0;
+  mcpd3::Objective worker_lower_bound = 0;
   for (const auto &package : packages) {
     mcpd3::InProcessPartitionWorker worker;
     worker.loadPartition(package);
@@ -533,7 +540,8 @@ void exportedPartitionPackagesMaterializeBoundaryDuplicates() {
           "owning partition should contain both arc endpoints");
   require(packages[0].local_to_global == std::vector<int>({1, 3}),
           "owning partition local_to_global should preserve arc endpoints");
-  require(packages[0].terminal_capacities == std::vector<int>({0, 0}),
+  require(packages[0].terminal_capacities ==
+              std::vector<mcpd3::Capacity>({0, 0}),
           "arc-owner boundary clone must not receive the terminal");
   require(packages[1].local_node_count == 1,
           "target partition should contain an isolated boundary duplicate");
@@ -835,15 +843,19 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
       coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
       "initial");
 
-  long best_worker_lower_bound = std::numeric_limits<long>::min();
+  mcpd3::Objective best_worker_lower_bound = 0;
+  bool has_best_worker_lower_bound = false;
   mcpd3::PartitionWorkerRoundStats worker_stats;
   for (long round = 1; round <= 2; ++round) {
     const auto trace = coordinator.runRoundWithTrace(
         /*round_id=*/round, /*scale=*/100, /*step_size=*/100,
         /*regularization_strength=*/0);
     worker_stats = trace.stats;
-    best_worker_lower_bound =
-        std::max(best_worker_lower_bound, worker_stats.lower_bound);
+    if (!has_best_worker_lower_bound ||
+        worker_stats.lower_bound > best_worker_lower_bound) {
+      best_worker_lower_bound = worker_stats.lower_bound;
+      has_best_worker_lower_bound = true;
+    }
     reference.runOptimizationScale(
         /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
         /*use_momentum=*/false);
@@ -1080,7 +1092,7 @@ void dualDecompositionRandomizesExportedInitialAlphas() {
       /*arc_capacities=*/std::vector<int>{3, 5},
       /*terminal_capacities=*/std::vector<int>{2, -4}, options);
 
-  long randomized_alpha = 0;
+  mcpd3::Capacity randomized_alpha = 0;
   int endpoint_count = 0;
   for (const auto &package : dual_decomp.getPartitionPackages()) {
     for (const auto &endpoint : package.constraint_endpoints) {
@@ -1202,7 +1214,8 @@ void dualDecompositionPromotesObjectiveScaleOnOverBudget() {
           "promotion should increase objective scale by one decade");
   require(dual_decomp.getBestLowerBoundRaw() == 0,
           "over-budget regularized lower bound should not be accepted: got " +
-              std::to_string(dual_decomp.getBestLowerBoundRaw()));
+              mcpd3::integer_to_string(
+                  dual_decomp.getBestLowerBoundRaw()));
   require(dual_decomp.getLastRegularizationBudget() <
               dual_decomp.getScale(),
           "promoted solve should finish under the active budget limit");
@@ -1660,10 +1673,10 @@ std::vector<std::unique_ptr<mcpd3::PartitionWorker>> makeInProcessWorkers(
 }
 
 struct OneNodeSourceSolveResult {
-  long lower_bound = 0;
+  mcpd3::Objective lower_bound = 0;
   int label = 0;
-  long regularization_budget = 0;
-  long regularization_contribution = 0;
+  mcpd3::Objective regularization_budget = 0;
+  mcpd3::Objective regularization_contribution = 0;
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
 };
@@ -2660,7 +2673,8 @@ void inProcessWorkerSaturatesObjectiveScaleOverflow() {
   mcpd3::PartitionPackage package;
   package.partition_id = 0;
   package.local_node_count = 1;
-  package.terminal_capacities = {std::numeric_limits<int>::max() / 2 + 1};
+  package.terminal_capacities = {
+      mcpd3::capacity_test_extreme_value() / 2 + 1};
   package.local_to_global = {0};
 
   mcpd3::InProcessPartitionWorker strict_worker;
@@ -2671,8 +2685,8 @@ void inProcessWorkerSaturatesObjectiveScaleOverflow() {
   } catch (const std::overflow_error &) {
     strict_threw = true;
   }
-  require(strict_threw,
-          "strict in-process worker objective scaling should reject overflow");
+  require(strict_threw == mcpd3::capacity_is_bounded(),
+          "strict objective scaling overflow should match capacity mode");
 
   mcpd3::InProcessPartitionWorker saturated_worker;
   saturated_worker.loadPartition(package);
@@ -2710,7 +2724,7 @@ void fullSolveStopsOverBudgetWhenPromotionDisabled() {
           "disabled promotion should expose over-budget stop reason");
   require(result.objective_scale_promotion_count == 0,
           "disabled promotion should not rescale objective");
-  require(result.best_lower_bound_raw == std::numeric_limits<long>::min(),
+  require(!result.has_best_lower_bound,
           "over-budget lower bound should not be accepted without promotion");
   require(result.progress_records.empty(),
           "over-budget iteration should not be recorded as accepted progress");
@@ -2742,7 +2756,7 @@ void inProcessCoordinatorPromotesObjectiveScaleOnOverBudget() {
           "in-process coordinator should finish at promoted scale");
   require(result.best_lower_bound_raw == 100,
           "promoted in-process solve should preserve the exact bound: got " +
-              std::to_string(result.best_lower_bound_raw));
+              mcpd3::integer_to_string(result.best_lower_bound_raw));
   require(result.final_regularization_budget < result.scale,
           "promoted in-process solve should finish under budget");
   require(result.final_disagreement_count == 0,
@@ -3304,7 +3318,7 @@ void primalDualCapacityRefreshCanResetFlowState() {
       /*preserve_flow_state=*/false);
   const auto reset = solver.captureFlowWarmStart();
   require(std::all_of(reset.v_flow.begin(), reset.v_flow.end(),
-                      [](int flow) { return flow == 0; }),
+                      [](const mcpd3::Capacity &flow) { return flow == 0; }),
           "capacity refresh should reset arc flow when requested");
 }
 

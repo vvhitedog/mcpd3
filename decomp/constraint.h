@@ -16,14 +16,16 @@
 
 #pragma once
 
+#include <capacity.h>
+
 #include <list>
 #include <vector>
 
 namespace mcpd3 {
 
 struct DualDecompositionConstraintArc {
-  long alpha; /* lagrange multiplier */
-  long
+  Capacity alpha; /* lagrange multiplier */
+  Capacity
       last_alpha; /* last lagrange multiplier recorded for incremental update */
   float alpha_momentum;       /* lagrange multiplier momentum */
   int partition_index_source; /* partition index for source node */
@@ -31,7 +33,7 @@ struct DualDecompositionConstraintArc {
   int local_index_source;     /* index within sub-problem of source */
   int local_index_target;     /* index within sub-problem of target */
 
-  DualDecompositionConstraintArc(long alpha, long last_alpha,
+  DualDecompositionConstraintArc(Capacity alpha, Capacity last_alpha,
                                  float alpha_momentum,
                                  int partition_index_source,
                                  int partition_index_target,
@@ -50,16 +52,16 @@ struct DualDecompositionConstraintSnapshot {
   int partition_index_target = -1;
   int local_index_source = -1;
   int local_index_target = -1;
-  long alpha = 0;
-  long last_alpha = 0;
+  Capacity alpha = 0;
+  Capacity last_alpha = 0;
   float alpha_momentum = 0;
 };
 
 struct DualDecompositionPartitionSnapshot {
   int partition_id = -1;
-  long lower_bound = 0;
-  long regularization_budget = 0;
-  long regularization_contribution = 0;
+  Objective lower_bound = 0;
+  Objective regularization_budget = 0;
+  Objective regularization_contribution = 0;
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
   std::vector<int> local_labels;

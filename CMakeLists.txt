@@ -45,6 +45,54 @@ find_package (Threads REQUIRED)
 option(GPERF_PROFILER_BUILD "Build with gperftools CPU profiling enabled." OFF )
 option(TRAP_SIGNED_INTEGER_OVERFLOW "Trap signed and unsigned integer overflow using the `ftrapv` flag." OFF )
 option(METIS_ENABLED "Use the metis library for graph partitioning (highly recommended.)" OFF )
+set(MCPD_CAPACITY_MODE "32" CACHE STRING
+  "Capacity precision: 32, 64, 128, or gmp")
+set_property(CACHE MCPD_CAPACITY_MODE PROPERTY STRINGS 32 64 128 gmp)
+
+add_library(mcpd3_capacity_config INTERFACE)
+target_include_directories(mcpd3_capacity_config INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR})
+find_path(MCPD_BOOST_INCLUDE_DIR NAMES boost/multiprecision/cpp_int.hpp
+  HINTS ENV BOOST_ROOT PATH_SUFFIXES include)
+if (NOT MCPD_BOOST_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "mcpd3 capacity support requires Boost.Multiprecision headers")
+endif ()
+target_include_directories(mcpd3_capacity_config INTERFACE
+  ${MCPD_BOOST_INCLUDE_DIR})
+if (MCPD_CAPACITY_MODE STREQUAL "32")
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD_CAPACITY_MODE_32=1)
+elseif (MCPD_CAPACITY_MODE STREQUAL "64")
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD_CAPACITY_MODE_64=1)
+elseif (MCPD_CAPACITY_MODE STREQUAL "128")
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD_CAPACITY_MODE_128=1)
+elseif (MCPD_CAPACITY_MODE STREQUAL "gmp")
+  find_path(MCPD_GMPXX_INCLUDE_DIR NAMES gmpxx.h
+    HINTS ENV GMP_ROOT PATH_SUFFIXES include)
+  find_path(MCPD_GMP_INCLUDE_DIR NAMES gmp.h
+    HINTS ENV GMP_ROOT PATH_SUFFIXES include include/x86_64-linux-gnu)
+  find_library(MCPD_GMPXX_LIBRARY NAMES gmpxx
+    HINTS ENV GMP_ROOT PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+  find_library(MCPD_GMP_LIBRARY NAMES gmp
+    HINTS ENV GMP_ROOT PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+  if (NOT MCPD_GMPXX_INCLUDE_DIR OR NOT MCPD_GMP_INCLUDE_DIR OR
+      NOT MCPD_GMPXX_LIBRARY OR NOT MCPD_GMP_LIBRARY)
+    message(FATAL_ERROR
+      "MCPD_CAPACITY_MODE=gmp requires the GMP C and C++ development files")
+  endif ()
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD_CAPACITY_MODE_GMP=1)
+  target_include_directories(mcpd3_capacity_config INTERFACE
+    ${MCPD_GMPXX_INCLUDE_DIR} ${MCPD_GMP_INCLUDE_DIR})
+  target_link_libraries(mcpd3_capacity_config INTERFACE
+    ${MCPD_GMPXX_LIBRARY} ${MCPD_GMP_LIBRARY})
+else ()
+  message(FATAL_ERROR
+    "MCPD_CAPACITY_MODE must be one of: 32, 64, 128, gmp")
+endif ()
 
 # Set flags based on options
 if (GPERF_PROFILER_BUILD) 
@@ -69,15 +117,15 @@ set(MAXFLOW_SRC maxflow/graph.cpp  maxflow/maxflow.cpp)
 
 ## Simple example
 add_executable(simple_example example/simple.cpp ${MAXFLOW_SRC})
-target_link_libraries(simple_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
+target_link_libraries(simple_example PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
 
 ## DIMACS maxflow format example
 add_executable(dimacs_example example/dimacs.cpp ${MAXFLOW_SRC})
-target_link_libraries(dimacs_example PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
+target_link_libraries(dimacs_example PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT} )
 
 ## DIMACS maxflow format example for dual decomposition
 add_executable(dimacs_dual_decomp_example example/dimacs_dual_decomp.cpp ${MAXFLOW_SRC})
-target_link_libraries(dimacs_dual_decomp_example PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
+target_link_libraries(dimacs_dual_decomp_example PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
 if (METIS_ENABLED AND GKLIB_LIBRARY)
   target_link_libraries(dimacs_dual_decomp_example PUBLIC ${GKLIB_LIBRARY} m)
 endif ()
@@ -85,13 +133,17 @@ endif ()
 ## Native monolith benchmark. This intentionally uses DualDecomposition
 ## directly and does not go through the worker/distributed package path.
 add_executable(mcpd3_native_monolith_benchmark benchmark/native_monolith.cpp ${MAXFLOW_SRC})
-target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
+target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${METIS_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} )
 if (METIS_ENABLED AND GKLIB_LIBRARY)
   target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC ${GKLIB_LIBRARY} m)
 endif ()
 
 if (BUILD_TESTING)
+  add_executable(capacity_precision_test tests/capacity_precision_test.cpp ${MAXFLOW_SRC})
+  target_link_libraries(capacity_precision_test PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
+  add_test(NAME capacity_precision_test COMMAND capacity_precision_test)
+
   add_executable(partition_worker_test tests/partition_worker_test.cpp ${MAXFLOW_SRC})
-  target_link_libraries(partition_worker_test PUBLIC ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
+  target_link_libraries(partition_worker_test PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
   add_test(NAME partition_worker_test COMMAND partition_worker_test)
 endif ()

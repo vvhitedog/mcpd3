@@ -62,6 +62,7 @@ Vision (ICCV), 2005
 #include <cstddef>
 #include <stdexcept>
 #include <string.h>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -527,12 +528,21 @@ inline void Graph<captype, tcaptype, flowtype>::restoreReusableState(
 template <typename captype, typename tcaptype, typename flowtype>
 inline typename Graph<captype, tcaptype, flowtype>::node_id
 Graph<captype, tcaptype, flowtype>::add_node(int num) {
-  assert(num > 0);
+  assert(num >= 0);
+  if (num == 0) {
+    return node_num;
+  }
 
   if (node_last + num > node_max)
     reallocate_nodes(num);
 
-  memset(node_last, 0, num * sizeof(node));
+  if constexpr (std::is_trivially_copyable_v<node>) {
+    memset(node_last, 0, num * sizeof(node));
+  } else {
+    for (int offset = 0; offset < num; ++offset) {
+      node_last[offset] = node{};
+    }
+  }
 
   node_id i = node_num;
   node_num += num;

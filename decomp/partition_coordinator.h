@@ -84,7 +84,7 @@ struct PartitionWorkerCoordinatorOptions {
   bool saturate_capacity_overflow = false;
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::SCALED_EPSILON;
-  long regularization_budget_limit = 0;
+  Objective regularization_budget_limit = 0;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
   bool randomize_initial_alphas = false;
@@ -97,12 +97,12 @@ struct PartitionWorkerCoordinatorOptions {
 
 struct PartitionWorkerRoundStats {
   long round_id = 0;
-  long original_objective = 0;
-  long lower_bound = 0;
-  long certified_lower_bound = 0;
-  long regularized_objective = 0;
-  long regularization_budget = 0;
-  long regularization_contribution = 0;
+  Objective original_objective = 0;
+  Objective lower_bound = 0;
+  Objective certified_lower_bound = 0;
+  Objective regularized_objective = 0;
+  Objective regularization_budget = 0;
+  Objective regularization_contribution = 0;
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
   long disagreement_count = 0;
@@ -121,19 +121,19 @@ struct PartitionWorkerProgressRecord {
   int iteration = 0;
   long total_iteration = 0;
   int max_iteration = 0;
-  long lower_bound = 0;
-  long best_lower_bound = 0;
-  long certified_lower_bound = 0;
-  long best_certified_lower_bound = 0;
-  long regularized_objective = 0;
-  long best_regularized_objective = 0;
+  Objective lower_bound = 0;
+  Objective best_lower_bound = 0;
+  Objective certified_lower_bound = 0;
+  Objective best_certified_lower_bound = 0;
+  Objective regularized_objective = 0;
+  Objective best_regularized_objective = 0;
   long disagreement_count = 0;
   double disagreement_norm_sq = 0;
   long step_size = 0;
   long effective_step_size = 0;
-  int regularization_strength = 0;
-  long regularization_budget = 0;
-  long regularization_contribution = 0;
+  Capacity regularization_strength = 0;
+  Objective regularization_budget = 0;
+  Objective regularization_contribution = 0;
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
   int iterations_since_improvement = 0;
@@ -147,9 +147,12 @@ struct PartitionWorkerScaleResult {
   long scale = 1;
   long step_size = 0;
   int iterations = 0;
-  long best_lower_bound_raw = std::numeric_limits<long>::min();
-  long best_certified_lower_bound_raw = std::numeric_limits<long>::min();
-  long best_regularized_objective_raw = std::numeric_limits<long>::min();
+  Objective best_lower_bound_raw = 0;
+  Objective best_certified_lower_bound_raw = 0;
+  Objective best_regularized_objective_raw = 0;
+  bool has_best_lower_bound = false;
+  bool has_best_certified_lower_bound = false;
+  bool has_best_regularized_objective = false;
   long final_disagreement_count = 0;
   double final_disagreement_norm_sq = 0;
 };
@@ -160,28 +163,31 @@ struct PartitionWorkerCoordinatorSolveResult {
   PartitionWorkerStopReason stop_reason =
       PartitionWorkerStopReason::ITERATION_COUNT_EXCEEDED;
   long scale = 1;
-  long final_objective_raw = 0;
+  Objective final_objective_raw = 0;
   double final_objective = 0;
-  long final_certified_lower_bound_raw = 0;
+  Objective final_certified_lower_bound_raw = 0;
   double final_certified_lower_bound = 0;
-  long final_regularized_objective_raw = 0;
+  Objective final_regularized_objective_raw = 0;
   double final_regularized_objective = 0;
-  long best_lower_bound_raw = std::numeric_limits<long>::min();
+  Objective best_lower_bound_raw = 0;
   double best_lower_bound = -std::numeric_limits<double>::infinity();
-  long best_certified_lower_bound_raw = std::numeric_limits<long>::min();
+  Objective best_certified_lower_bound_raw = 0;
   double best_certified_lower_bound =
       -std::numeric_limits<double>::infinity();
-  long best_regularized_objective_raw = std::numeric_limits<long>::min();
+  Objective best_regularized_objective_raw = 0;
   double best_regularized_objective =
       -std::numeric_limits<double>::infinity();
   long total_iterations = 0;
   long final_disagreement_count = 0;
   double final_disagreement_norm_sq = 0;
-  long final_regularization_budget = 0;
-  long final_regularization_contribution = 0;
+  Objective final_regularization_budget = 0;
+  Objective final_regularization_contribution = 0;
   long final_regularization_anchor_sink_count = 0;
   long final_regularization_active_sink_count = 0;
   long objective_scale_promotion_count = 0;
+  bool has_best_lower_bound = false;
+  bool has_best_certified_lower_bound = false;
+  bool has_best_regularized_objective = false;
   std::vector<NodeLabel> final_labels;
   std::vector<PartitionWorkerProgressRecord> progress_records;
   std::vector<PartitionWorkerScaleResult> scale_results;
@@ -253,7 +259,7 @@ public:
   }
 
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
-                                     int regularization_strength) {
+                                     const Capacity &regularization_strength) {
     return runRoundInternal(round_id, scale, step_size, regularization_strength,
                             /*return_full_labels=*/false)
         .stats;
@@ -261,7 +267,7 @@ public:
 
   PartitionWorkerRoundTrace runRoundWithTrace(long round_id, long scale,
                                               long step_size,
-                                              int regularization_strength) {
+                                              const Capacity &regularization_strength) {
     return runRoundInternal(round_id, scale, step_size, regularization_strength,
                             /*return_full_labels=*/true);
   }
@@ -290,7 +296,7 @@ public:
   }
 
   std::vector<NodeLabel> collectFullLabels(long round_id, long scale,
-                                           int regularization_strength) {
+                                           const Capacity &regularization_strength) {
     const auto results =
         solvePartitions(round_id, scale, regularization_strength,
                         /*return_full_labels=*/true);
@@ -316,7 +322,7 @@ private:
 
   PartitionWorkerRoundTrace runRoundInternal(long round_id, long scale,
                                              long step_size,
-                                             int regularization_strength,
+                                             const Capacity &regularization_strength,
                                              bool return_full_labels) {
     PartitionWorkerRoundTrace trace;
     const auto solve_partitions_start = std::chrono::steady_clock::now();
@@ -346,7 +352,7 @@ private:
   }
 
   std::vector<PartitionSolveResult> solvePartitions(
-      long round_id, long scale, int regularization_strength,
+      long round_id, long scale, const Capacity &regularization_strength,
       bool return_full_labels) {
     const auto alpha_prepare_start = std::chrono::steady_clock::now();
     std::vector<std::vector<AlphaUpdate>> alpha_updates(packages_.size());
@@ -468,27 +474,25 @@ public:
     }
 
     result.final_objective =
-        static_cast<double>(result.final_objective_raw) / result.scale;
+        integer_to_double(result.final_objective_raw) / result.scale;
     result.final_certified_lower_bound =
-        static_cast<double>(result.final_certified_lower_bound_raw) /
+        integer_to_double(result.final_certified_lower_bound_raw) /
         result.scale;
     result.final_regularized_objective =
-        static_cast<double>(result.final_regularized_objective_raw) /
+        integer_to_double(result.final_regularized_objective_raw) /
         result.scale;
-    if (result.best_certified_lower_bound_raw !=
-        std::numeric_limits<long>::min()) {
+    if (result.has_best_certified_lower_bound) {
       result.best_certified_lower_bound =
-          static_cast<double>(result.best_certified_lower_bound_raw) /
+          integer_to_double(result.best_certified_lower_bound_raw) /
           result.scale;
     }
-    if (result.best_lower_bound_raw != std::numeric_limits<long>::min()) {
+    if (result.has_best_lower_bound) {
       result.best_lower_bound =
-          static_cast<double>(result.best_lower_bound_raw) / result.scale;
+          integer_to_double(result.best_lower_bound_raw) / result.scale;
     }
-    if (result.best_regularized_objective_raw !=
-        std::numeric_limits<long>::min()) {
+    if (result.has_best_regularized_objective) {
       result.best_regularized_objective =
-          static_cast<double>(result.best_regularized_objective_raw) /
+          integer_to_double(result.best_regularized_objective_raw) /
           result.scale;
     }
     result.timing = timing_stats_;
@@ -528,8 +532,8 @@ private:
     int constraint_id = -1;
     ConstraintEndpoint source;
     ConstraintEndpoint target;
-    long alpha = 0;
-    long last_alpha = 0;
+    Capacity alpha = 0;
+    Capacity last_alpha = 0;
     float alpha_momentum = 0;
     bool needs_sync = false;
   };
@@ -540,8 +544,8 @@ private:
     bool has_target = false;
     ConstraintEndpoint source;
     ConstraintEndpoint target;
-    long alpha = 0;
-    long last_alpha = 0;
+    Capacity alpha = 0;
+    Capacity last_alpha = 0;
     float alpha_momentum = 0;
   };
 
@@ -555,11 +559,10 @@ private:
   class TwoGroupMaxTracker {
   public:
     explicit TwoGroupMaxTracker(size_t group_size)
-        : group_size_(group_size), ready_(false),
-          first_group_max_(std::numeric_limits<long>::min()),
-          second_group_max_(std::numeric_limits<long>::min()) {}
+        : group_size_(group_size), ready_(false), first_group_max_(0),
+          second_group_max_(0) {}
 
-    void addValue(long value) {
+    void addValue(const Objective &value) {
       values_.push_back(value);
       if (values_.size() < 2 * group_size_) {
         ready_ = false;
@@ -576,16 +579,16 @@ private:
 
     bool areGroupsPopulated() const { return ready_; }
 
-    std::pair<long, long> getMaximums() const {
+    std::pair<Objective, Objective> getMaximums() const {
       return {first_group_max_, second_group_max_};
     }
 
   private:
     size_t group_size_;
     bool ready_;
-    long first_group_max_;
-    long second_group_max_;
-    std::vector<long> values_;
+    Objective first_group_max_;
+    Objective second_group_max_;
+    std::vector<Objective> values_;
   };
 
   PartitionWorkerScaleResult runOptimizationScale(
@@ -596,10 +599,11 @@ private:
 
     const int num_stats_in_group = 10;
     TwoGroupMaxTracker lower_bound_group_stats(num_stats_in_group);
-    long scale_best_lower_bound = std::numeric_limits<long>::min();
+    Objective scale_best_lower_bound = 0;
+    bool has_scale_best_lower_bound = false;
     int last_improvement_iter = 0;
     auto record_round =
-        [&](int iteration, int regularization_strength,
+        [&](int iteration, const Capacity &regularization_strength,
             const PartitionWorkerRoundStats &round_stats) {
           result->final_disagreement_count = round_stats.disagreement_count;
           result->final_disagreement_norm_sq =
@@ -622,14 +626,23 @@ private:
           scale_result.final_disagreement_norm_sq =
               round_stats.disagreement_norm_sq;
 
-          const long best_lower_bound =
-              std::max(scale_best_lower_bound, round_stats.lower_bound);
-          const long best_certified_lower_bound =
-              std::max(scale_result.best_certified_lower_bound_raw,
-                       round_stats.certified_lower_bound);
-          const long best_regularized_objective =
-              std::max(scale_result.best_regularized_objective_raw,
-                       round_stats.regularized_objective);
+          const Objective best_lower_bound =
+              !has_scale_best_lower_bound ||
+                      round_stats.lower_bound > scale_best_lower_bound
+                  ? round_stats.lower_bound
+                  : scale_best_lower_bound;
+          const Objective best_certified_lower_bound =
+              !scale_result.has_best_certified_lower_bound ||
+                      round_stats.certified_lower_bound >
+                          scale_result.best_certified_lower_bound_raw
+                  ? round_stats.certified_lower_bound
+                  : scale_result.best_certified_lower_bound_raw;
+          const Objective best_regularized_objective =
+              !scale_result.has_best_regularized_objective ||
+                      round_stats.regularized_objective >
+                          scale_result.best_regularized_objective_raw
+                  ? round_stats.regularized_objective
+                  : scale_result.best_regularized_objective_raw;
           PartitionWorkerProgressRecord record{
               /*scale=*/scale,
               /*iteration=*/iteration,
@@ -658,30 +671,51 @@ private:
           result->progress_records.push_back(record);
           reportProgress(record);
 
-          result->best_lower_bound_raw =
-              std::max(result->best_lower_bound_raw, round_stats.lower_bound);
-          scale_result.best_lower_bound_raw =
-              std::max(scale_result.best_lower_bound_raw,
-                       round_stats.lower_bound);
-          result->best_certified_lower_bound_raw =
-              std::max(result->best_certified_lower_bound_raw,
-                       round_stats.certified_lower_bound);
-          scale_result.best_certified_lower_bound_raw =
-              std::max(scale_result.best_certified_lower_bound_raw,
-                       round_stats.certified_lower_bound);
-          result->best_regularized_objective_raw =
-              std::max(result->best_regularized_objective_raw,
-                       round_stats.regularized_objective);
-          scale_result.best_regularized_objective_raw =
-              std::max(scale_result.best_regularized_objective_raw,
-                       round_stats.regularized_objective);
+          if (!result->has_best_lower_bound ||
+              round_stats.lower_bound > result->best_lower_bound_raw) {
+            result->best_lower_bound_raw = round_stats.lower_bound;
+            result->has_best_lower_bound = true;
+          }
+          if (!scale_result.has_best_lower_bound ||
+              round_stats.lower_bound > scale_result.best_lower_bound_raw) {
+            scale_result.best_lower_bound_raw = round_stats.lower_bound;
+            scale_result.has_best_lower_bound = true;
+          }
+          if (!result->has_best_certified_lower_bound ||
+              round_stats.certified_lower_bound >
+                  result->best_certified_lower_bound_raw) {
+            result->best_certified_lower_bound_raw =
+                round_stats.certified_lower_bound;
+            result->has_best_certified_lower_bound = true;
+          }
+          if (!scale_result.has_best_certified_lower_bound ||
+              round_stats.certified_lower_bound >
+                  scale_result.best_certified_lower_bound_raw) {
+            scale_result.best_certified_lower_bound_raw =
+                round_stats.certified_lower_bound;
+            scale_result.has_best_certified_lower_bound = true;
+          }
+          if (!result->has_best_regularized_objective ||
+              round_stats.regularized_objective >
+                  result->best_regularized_objective_raw) {
+            result->best_regularized_objective_raw =
+                round_stats.regularized_objective;
+            result->has_best_regularized_objective = true;
+          }
+          if (!scale_result.has_best_regularized_objective ||
+              round_stats.regularized_objective >
+                  scale_result.best_regularized_objective_raw) {
+            scale_result.best_regularized_objective_raw =
+                round_stats.regularized_objective;
+            scale_result.has_best_regularized_objective = true;
+          }
         };
 
     for (int i = 0; i < options_.max_iteration_count; ++i) {
       ++result->total_iterations;
       ++scale_result.iterations;
 
-      const int regularization_strength =
+      const Capacity regularization_strength =
           localRegularizationStrength(step_size);
       const auto round_stats =
           runRound(result->total_iterations, scale, step_size,
@@ -702,8 +736,10 @@ private:
 
       record_round(i, regularization_strength, round_stats);
 
-      if (round_stats.lower_bound > scale_best_lower_bound) {
+      if (!has_scale_best_lower_bound ||
+          round_stats.lower_bound > scale_best_lower_bound) {
         scale_best_lower_bound = round_stats.lower_bound;
+        has_scale_best_lower_bound = true;
         if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
             options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
@@ -1009,7 +1045,7 @@ private:
 
   void gatherRoundTerms(const std::vector<PartitionSolveResult> &results,
                         PartitionWorkerRoundStats *stats) const {
-    long original_objective = 0;
+    Objective original_objective = 0;
     for (const auto &result : results) {
       original_objective =
           checkedAddObjectiveRaw(original_objective, result.lower_bound,
@@ -1023,13 +1059,13 @@ private:
                                  result.regularization_contribution,
                                  "round regularization contribution overflow");
       stats->regularization_anchor_sink_count =
-          checkedAddObjectiveRaw(stats->regularization_anchor_sink_count,
-                                 result.regularization_anchor_sink_count,
-                                 "round regularization anchor count overflow");
+          checked_add(stats->regularization_anchor_sink_count,
+                      result.regularization_anchor_sink_count,
+                      "round regularization anchor count overflow");
       stats->regularization_active_sink_count =
-          checkedAddObjectiveRaw(stats->regularization_active_sink_count,
-                                 result.regularization_active_sink_count,
-                                 "round regularization active count overflow");
+          checked_add(stats->regularization_active_sink_count,
+                      result.regularization_active_sink_count,
+                      "round regularization active count overflow");
     }
     stats->regularized_objective =
         regularizedObjectiveRaw(original_objective,
@@ -1084,8 +1120,8 @@ private:
       if (!update_alpha) {
         continue;
       }
-      const long old_alpha = constraint.alpha;
-      const long old_last_alpha = constraint.last_alpha;
+      const Capacity old_alpha = constraint.alpha;
+      const Capacity old_last_alpha = constraint.last_alpha;
       const float old_alpha_momentum = constraint.alpha_momentum;
       constraint.last_alpha = constraint.alpha;
       if (diff == 0) {
@@ -1104,9 +1140,14 @@ private:
         const long alpha_update =
             stats->effective_step_size *
             static_cast<int>(momentum_scale * constraint.alpha_momentum);
-        constraint.alpha += alpha_update;
+        constraint.alpha = checked_add(
+            constraint.alpha, capacity_from_integer(alpha_update),
+            "lagrange multiplier overflow");
       } else {
-        constraint.alpha += stats->effective_step_size * diff;
+        constraint.alpha = checked_add(
+            constraint.alpha,
+            capacity_from_integer(stats->effective_step_size * diff),
+            "lagrange multiplier overflow");
       }
       if (constraint.alpha != old_alpha ||
           constraint.last_alpha != old_last_alpha ||
@@ -1116,10 +1157,10 @@ private:
     }
   }
 
-  long regularizationBudgetLimit() const {
+  Objective regularizationBudgetLimit() const {
     return options_.regularization_budget_limit > 0
                ? options_.regularization_budget_limit
-               : options_.objective_scale;
+               : Objective(options_.objective_scale);
   }
 
   size_t constraintIndexForId(int constraint_id) const {
@@ -1140,26 +1181,29 @@ private:
     return constraint_iter->second;
   }
 
-  void warnIfRegularizationBudgetExceeded(long budget,
-                                          int regularization_strength) {
+  void warnIfRegularizationBudgetExceeded(
+      const Objective &budget, const Capacity &regularization_strength) {
     if (!isRegularizationBudgetExceeded(budget, regularization_strength) ||
         warned_regularization_budget_exceeded_) {
       return;
     }
-    std::fprintf(stderr,
-                 "warning: regularization budget %ld is not below limit %ld; "
-                 "a regularized agreement may not certify optimality\n",
-                 budget, regularizationBudgetLimit());
+    std::fprintf(
+        stderr,
+        "warning: regularization budget %s is not below limit %s; "
+        "a regularized agreement may not certify optimality\n",
+        integer_to_string(budget).c_str(),
+        integer_to_string(regularizationBudgetLimit()).c_str());
     std::fflush(stderr);
     warned_regularization_budget_exceeded_ = true;
   }
 
-  bool isRegularizationBudgetExceeded(long budget,
-                                      int regularization_strength) const {
+  bool isRegularizationBudgetExceeded(
+      const Objective &budget, const Capacity &regularization_strength) const {
     return regularization_strength > 0 && budget >= regularizationBudgetLimit();
   }
 
-  bool shouldSuppressEarlyScaleExit(int regularization_strength) const {
+  bool shouldSuppressEarlyScaleExit(
+      const Capacity &regularization_strength) const {
     return options_.exhaust_scale_iterations ||
            (options_.exhaust_regularized_scale_iterations &&
             regularization_strength > 0);
@@ -1178,32 +1222,20 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale,
-                             bool saturate_capacity_overflow = false) {
-    const long result = checkedScaleLong(value, scale);
-    if (result > std::numeric_limits<int>::max() ||
-        result < std::numeric_limits<int>::min()) {
-      if (saturate_capacity_overflow) {
-        return result < 0 ? std::numeric_limits<int>::min()
-                          : std::numeric_limits<int>::max();
-      }
-      throw std::overflow_error("objective scale promotion exceeds int");
-    }
-    return static_cast<int>(result);
-  }
-
   void scalePackage(PartitionPackage *package, long factor) {
     for (auto &capacity : package->arc_capacities) {
-      capacity =
-          checkedScaleInt(capacity, factor, options_.saturate_capacity_overflow);
+      capacity = checked_scale_capacity(
+          capacity, factor, options_.saturate_capacity_overflow);
     }
     for (auto &capacity : package->terminal_capacities) {
-      capacity =
-          checkedScaleInt(capacity, factor, options_.saturate_capacity_overflow);
+      capacity = checked_scale_capacity(
+          capacity, factor, options_.saturate_capacity_overflow);
     }
     for (auto &binding : package->constraint_endpoints) {
-      binding.alpha = checkedScaleLong(binding.alpha, factor);
-      binding.last_alpha = checkedScaleLong(binding.last_alpha, factor);
+      binding.alpha = checked_scale_capacity(
+          binding.alpha, factor, options_.saturate_capacity_overflow);
+      binding.last_alpha = checked_scale_capacity(
+          binding.last_alpha, factor, options_.saturate_capacity_overflow);
     }
   }
 
@@ -1212,35 +1244,36 @@ private:
     options_.objective_scale = checkedScaleLong(options_.objective_scale, factor);
     result->scale = options_.objective_scale;
     result->final_objective_raw =
-        checkedScaleLong(result->final_objective_raw, factor);
+        checked_scale(result->final_objective_raw, factor);
     result->final_certified_lower_bound_raw =
-        checkedScaleLong(result->final_certified_lower_bound_raw, factor);
+        checked_scale(result->final_certified_lower_bound_raw, factor);
     result->final_regularized_objective_raw =
-        checkedScaleLong(result->final_regularized_objective_raw, factor);
-    if (result->best_lower_bound_raw != std::numeric_limits<long>::min()) {
+        checked_scale(result->final_regularized_objective_raw, factor);
+    if (result->has_best_lower_bound) {
       result->best_lower_bound_raw =
-          checkedScaleLong(result->best_lower_bound_raw, factor);
+          checked_scale(result->best_lower_bound_raw, factor);
     }
-    if (result->best_certified_lower_bound_raw !=
-        std::numeric_limits<long>::min()) {
+    if (result->has_best_certified_lower_bound) {
       result->best_certified_lower_bound_raw =
-          checkedScaleLong(result->best_certified_lower_bound_raw, factor);
+          checked_scale(result->best_certified_lower_bound_raw, factor);
     }
-    if (result->best_regularized_objective_raw !=
-        std::numeric_limits<long>::min()) {
+    if (result->has_best_regularized_objective) {
       result->best_regularized_objective_raw =
-          checkedScaleLong(result->best_regularized_objective_raw, factor);
+          checked_scale(result->best_regularized_objective_raw, factor);
     }
     result->final_regularization_budget =
-        checkedScaleLong(result->final_regularization_budget, factor);
+        checked_scale(result->final_regularization_budget, factor);
     result->final_regularization_contribution =
-        checkedScaleLong(result->final_regularization_contribution, factor);
+        checked_scale(result->final_regularization_contribution, factor);
     for (auto &package : packages_) {
       scalePackage(&package, factor);
     }
     for (auto &constraint : constraints_) {
-      constraint.alpha = checkedScaleLong(constraint.alpha, factor);
-      constraint.last_alpha = checkedScaleLong(constraint.last_alpha, factor);
+      constraint.alpha = checked_scale_capacity(
+          constraint.alpha, factor, options_.saturate_capacity_overflow);
+      constraint.last_alpha = checked_scale_capacity(
+          constraint.last_alpha, factor,
+          options_.saturate_capacity_overflow);
     }
     for (const auto worker_index : active_worker_indices_) {
       workers_[worker_index]->scaleObjective(
@@ -1265,12 +1298,12 @@ private:
     return true;
   }
 
-  int localRegularizationStrength(long step_size) const {
+  Capacity localRegularizationStrength(long step_size) const {
     if (options_.regularization_scheme !=
         PartitionWorkerRegularizationScheme::SCALED_EPSILON) {
       return 0;
     }
-    return step_size <= 10 ? static_cast<int>(step_size) : 0;
+    return step_size <= 10 ? capacity_from_integer(step_size) : Capacity(0);
   }
 
   static constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();

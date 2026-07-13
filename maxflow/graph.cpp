@@ -3,10 +3,12 @@
 #include "graph.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <type_traits>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -176,10 +178,18 @@ Graph<captype, tcaptype, flowtype>::Graph(int node_num_max, int edge_num_max,
 
   nodes_mmap_bytes = node_num_max * sizeof(node);
   arcs_mmap_bytes = 2 * edge_num_max * sizeof(arc);
-  nodes = (node *)allocate_bk_array(nodes_mmap_bytes, "nodes", nodes_mmap_fd,
-                                    nodes_mmap_backed);
-  arcs = (arc *)allocate_bk_array(arcs_mmap_bytes, "arcs", arcs_mmap_fd,
-                                  arcs_mmap_backed);
+  if constexpr (std::is_trivially_copyable_v<node>) {
+    nodes = (node *)allocate_bk_array(nodes_mmap_bytes, "nodes", nodes_mmap_fd,
+                                      nodes_mmap_backed);
+  } else {
+    nodes = new (std::nothrow) node[static_cast<size_t>(node_num_max)];
+  }
+  if constexpr (std::is_trivially_copyable_v<arc>) {
+    arcs = (arc *)allocate_bk_array(arcs_mmap_bytes, "arcs", arcs_mmap_fd,
+                                    arcs_mmap_backed);
+  } else {
+    arcs = new (std::nothrow) arc[static_cast<size_t>(2 * edge_num_max)];
+  }
   if (!nodes || !arcs) {
     if (error_function)
       (*error_function)("Not enough memory!");
@@ -201,8 +211,16 @@ Graph<captype, tcaptype, flowtype>::~Graph() {
     delete nodeptr_block;
     nodeptr_block = NULL;
   }
-  free_bk_array(nodes, nodes_mmap_bytes, nodes_mmap_fd, nodes_mmap_backed);
-  free_bk_array(arcs, arcs_mmap_bytes, arcs_mmap_fd, arcs_mmap_backed);
+  if constexpr (std::is_trivially_copyable_v<node>) {
+    free_bk_array(nodes, nodes_mmap_bytes, nodes_mmap_fd, nodes_mmap_backed);
+  } else {
+    delete[] nodes;
+  }
+  if constexpr (std::is_trivially_copyable_v<arc>) {
+    free_bk_array(arcs, arcs_mmap_bytes, arcs_mmap_fd, arcs_mmap_backed);
+  } else {
+    delete[] arcs;
+  }
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
@@ -233,7 +251,16 @@ void Graph<captype, tcaptype, flowtype>::reallocate_nodes(int num) {
   node_num_max += node_num_max / 2;
   if (node_num_max < node_num + num)
     node_num_max = node_num + num;
-  nodes = (node *)realloc(nodes_old, node_num_max * sizeof(node));
+  if constexpr (std::is_trivially_copyable_v<node>) {
+    nodes = (node *)realloc(nodes_old, node_num_max * sizeof(node));
+  } else {
+    nodes = new (std::nothrow) node[static_cast<size_t>(node_num_max)];
+    if (nodes) {
+      for (int index = 0; index < node_num; ++index) {
+        nodes[index] = nodes_old[index];
+      }
+    }
+  }
   if (!nodes) {
     if (error_function)
       (*error_function)("Not enough memory!");
@@ -256,6 +283,9 @@ void Graph<captype, tcaptype, flowtype>::reallocate_nodes(int num) {
           (node *)((char *)a->head + (((char *)nodes) - ((char *)nodes_old)));
     }
   }
+  if constexpr (!std::is_trivially_copyable_v<node>) {
+    delete[] nodes_old;
+  }
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
@@ -272,7 +302,16 @@ void Graph<captype, tcaptype, flowtype>::reallocate_arcs() {
   arc_num_max += arc_num_max / 2;
   if (arc_num_max & 1)
     arc_num_max++;
-  arcs = (arc *)realloc(arcs_old, arc_num_max * sizeof(arc));
+  if constexpr (std::is_trivially_copyable_v<arc>) {
+    arcs = (arc *)realloc(arcs_old, arc_num_max * sizeof(arc));
+  } else {
+    arcs = new (std::nothrow) arc[static_cast<size_t>(arc_num_max)];
+    if (arcs) {
+      for (int index = 0; index < arc_num; ++index) {
+        arcs[index] = arcs_old[index];
+      }
+    }
+  }
   if (!arcs) {
     if (error_function)
       (*error_function)("Not enough memory!");
@@ -300,6 +339,9 @@ void Graph<captype, tcaptype, flowtype>::reallocate_arcs() {
       a->sister =
           (arc *)((char *)a->sister + (((char *)arcs) - ((char *)arcs_old)));
     }
+  }
+  if constexpr (!std::is_trivially_copyable_v<arc>) {
+    delete[] arcs_old;
   }
 }
 

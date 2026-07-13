@@ -33,15 +33,24 @@ int main(int argc, char *argv[]) {
   mcpd3::PrimalDualMinCutSolver min_cut_solver(std::move(min_cut_graph_data));
   std::cout << " ========= direct maxflow computation =========\n";
   auto maxflow_value = min_cut_solver.maxflow();
-  std::cout << " maxflow value: " << maxflow_value << "\n";
+  std::cout << " maxflow value: " << mcpd3::integer_to_string(maxflow_value)
+            << "\n";
   std::cout << " ========= primal dual maxflow computation ====\n";
   min_cut_solver.solve();
-  std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
-  std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
+  std::cout << " min cut value: "
+            << mcpd3::integer_to_string(min_cut_solver.getMinCutValue())
+            << "\n";
+  std::cout << " maxflow value: "
+            << mcpd3::integer_to_string(min_cut_solver.getMaxFlowValue())
+            << "\n";
   std::cout << " ========= primal dual maxflow re-computation==\n";
   min_cut_solver.solve();
-  std::cout << " min cut value: " << min_cut_solver.getMinCutValue() << "\n";
-  std::cout << " maxflow value: " << min_cut_solver.getMaxFlowValue() << "\n";
+  std::cout << " min cut value: "
+            << mcpd3::integer_to_string(min_cut_solver.getMinCutValue())
+            << "\n";
+  std::cout << " maxflow value: "
+            << mcpd3::integer_to_string(min_cut_solver.getMaxFlowValue())
+            << "\n";
   std::cout << " ==============================================\n";
   std::cout << " ========= all values above should match ======\n";
   std::cout << " ==============================================\n";

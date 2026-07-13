@@ -108,7 +108,7 @@ struct DualDecompositionOptions {
   size_t thread_count = 0;
   DualDecompositionRegularizationScheme regularization_scheme =
       DualDecompositionRegularizationScheme::SCALED_EPSILON;
-  long regularization_budget_limit = 0;
+  Objective regularization_budget_limit = 0;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
   bool randomize_initial_alphas = false;
@@ -126,8 +126,8 @@ struct DualDecompositionOptions {
 class DualDecomposition {
 public:
   DualDecomposition(int npartition, int nnode, int narc, std::vector<int> arcs,
-                    std::vector<int> arc_capacities,
-                    std::vector<int> terminal_capacities,
+                    std::vector<Capacity> arc_capacities,
+                    std::vector<Capacity> terminal_capacities,
                     DualDecompositionOptions options = {})
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
@@ -136,10 +136,10 @@ public:
                                                         : std::vector<int>()),
         original_arc_capacities_(options.track_primal_upper_bound
                                      ? arc_capacities_
-                                     : std::vector<int>()),
+                                     : std::vector<Capacity>()),
         original_terminal_capacities_(options.track_primal_upper_bound
                                           ? terminal_capacities_
-                                          : std::vector<int>()),
+                                          : std::vector<Capacity>()),
         min_cut_sub_graphs_(npartition_),
         partition_packages_(options.emit_partition_packages ? npartition_ : 0),
         primal_solution_(nnode_), scale_(1),
@@ -149,10 +149,11 @@ public:
         solve_loop_time_(0),
         lagrange_update_time_(0),
         max_lower_bound_(std::numeric_limits<double>::lowest()),
-        max_lower_bound_raw_(std::numeric_limits<long>::min()),
-        max_regularized_objective_raw_(std::numeric_limits<long>::min()),
-        best_upper_bound_(std::numeric_limits<long>::max()),
-        current_upper_bound_(std::numeric_limits<long>::max()),
+        max_lower_bound_raw_(0), max_regularized_objective_raw_(0),
+        best_upper_bound_(0), current_upper_bound_(0),
+        has_max_lower_bound_raw_(false),
+        has_max_regularized_objective_raw_(false),
+        has_best_upper_bound_(false), has_current_upper_bound_(false),
         last_original_objective_raw_(0),
         last_certified_lower_bound_raw_(0),
         last_regularized_objective_raw_(0),
@@ -169,6 +170,17 @@ public:
     initializeDecomposition();
   }
 
+  template <typename InputCapacity,
+            std::enable_if_t<!std::is_same_v<InputCapacity, Capacity>, int> = 0>
+  DualDecomposition(int npartition, int nnode, int narc,
+                    std::vector<int> arcs,
+                    const std::vector<InputCapacity> &arc_capacities,
+                    const std::vector<InputCapacity> &terminal_capacities,
+                    DualDecompositionOptions options = {})
+      : DualDecomposition(npartition, nnode, narc, std::move(arcs),
+                          capacity_vector_from(arc_capacities),
+                          capacity_vector_from(terminal_capacities), options) {}
+
   DualDecomposition(int npartition, MinCutGraph min_cut_graph,
                     DualDecompositionOptions options = {})
       : DualDecomposition(npartition, min_cut_graph.nnode, min_cut_graph.narc,
@@ -181,41 +193,45 @@ public:
   long getTotalLagrangeUpdateTime() const { return lagrange_update_time_; }
   long getScale() const { return scale_; }
   double getBestLowerBound() const { return max_lower_bound_; }
-  long getBestLowerBoundRaw() const { return max_lower_bound_raw_; }
+  Objective getBestLowerBoundRaw() const { return max_lower_bound_raw_; }
   double getBestCertifiedLowerBound() const { return max_lower_bound_; }
-  long getBestCertifiedLowerBoundRaw() const { return max_lower_bound_raw_; }
-  double getBestRegularizedObjective() const {
-    return max_regularized_objective_raw_ == std::numeric_limits<long>::min()
-               ? -std::numeric_limits<double>::infinity()
-               : double(max_regularized_objective_raw_) / scale_;
+  Objective getBestCertifiedLowerBoundRaw() const {
+    return max_lower_bound_raw_;
   }
-  long getBestRegularizedObjectiveRaw() const {
+  double getBestRegularizedObjective() const {
+    return !has_max_regularized_objective_raw_
+               ? -std::numeric_limits<double>::infinity()
+               : integer_to_double(max_regularized_objective_raw_) / scale_;
+  }
+  Objective getBestRegularizedObjectiveRaw() const {
     return max_regularized_objective_raw_;
   }
-  long getBestUpperBoundRaw() const { return best_upper_bound_; }
+  Objective getBestUpperBoundRaw() const { return best_upper_bound_; }
+  bool hasBestUpperBound() const { return has_best_upper_bound_; }
   double getBestUpperBound() const {
-    return best_upper_bound_ == std::numeric_limits<long>::max()
+    return !has_best_upper_bound_
                ? std::numeric_limits<double>::infinity()
-               : double(best_upper_bound_) / scale_;
+               : integer_to_double(best_upper_bound_) / scale_;
   }
-  long getCurrentUpperBoundRaw() const { return current_upper_bound_; }
-  long getLastOriginalObjectiveRaw() const {
+  Objective getCurrentUpperBoundRaw() const { return current_upper_bound_; }
+  bool hasCurrentUpperBound() const { return has_current_upper_bound_; }
+  Objective getLastOriginalObjectiveRaw() const {
     return last_original_objective_raw_;
   }
-  long getLastCertifiedLowerBoundRaw() const {
+  Objective getLastCertifiedLowerBoundRaw() const {
     return last_certified_lower_bound_raw_;
   }
-  long getLastRegularizedObjectiveRaw() const {
+  Objective getLastRegularizedObjectiveRaw() const {
     return last_regularized_objective_raw_;
   }
   long getLastDisagreementCount() const { return last_disagreement_count_; }
   double getLastDisagreementNormSq() const {
     return last_disagreement_norm_sq_;
   }
-  long getLastRegularizationBudget() const {
+  Objective getLastRegularizationBudget() const {
     return last_regularization_budget_;
   }
-  long getLastRegularizationContribution() const {
+  Objective getLastRegularizationContribution() const {
     return last_regularization_contribution_;
   }
   long getLastRegularizationAnchorSinkCount() const {
@@ -406,8 +422,8 @@ public:
   }
 
   void replaceProblemCapacities(
-      const std::vector<int> &arc_capacities,
-      const std::vector<int> &terminal_capacities,
+      const std::vector<Capacity> &arc_capacities,
+      const std::vector<Capacity> &terminal_capacities,
       bool preserve_alpha_state = true,
       bool preserve_flow_state = true) {
     requireConstructedSolvers("replaceProblemCapacities");
@@ -418,15 +434,16 @@ public:
       throw std::runtime_error(
           "replacement terminal capacity count mismatch");
     }
-    for (const int capacity : arc_capacities) {
+    for (const Capacity &capacity : arc_capacities) {
       if (capacity < 0) {
         throw std::runtime_error(
             "replacement arc capacities must be non-negative");
       }
     }
 
-    std::vector<std::vector<int>> local_arc_capacities(solvers_.size());
-    std::vector<std::vector<int>> local_terminal_capacities(solvers_.size());
+    std::vector<std::vector<Capacity>> local_arc_capacities(solvers_.size());
+    std::vector<std::vector<Capacity>> local_terminal_capacities(
+        solvers_.size());
     for (size_t partition = 0; partition < solvers_.size(); ++partition) {
       local_arc_capacities[partition].assign(
           static_cast<size_t>(2 * local_arc_counts_[partition]), 0);
@@ -435,8 +452,8 @@ public:
     }
     for (int arc = 0; arc < narc_; ++arc) {
       const ArcLocation &location = arc_locations_[arc];
-      const int input_forward = arc_capacities[2 * arc];
-      const int input_backward = arc_capacities[2 * arc + 1];
+      const Capacity input_forward = arc_capacities[2 * arc];
+      const Capacity input_backward = arc_capacities[2 * arc + 1];
       auto &local = local_arc_capacities[location.partition];
       local[2 * location.local_arc] =
           location.swapped ? input_backward : input_forward;
@@ -486,10 +503,14 @@ public:
     solve_loop_time_ = 0;
     lagrange_update_time_ = 0;
     max_lower_bound_ = std::numeric_limits<double>::lowest();
-    max_lower_bound_raw_ = std::numeric_limits<long>::min();
-    max_regularized_objective_raw_ = std::numeric_limits<long>::min();
-    best_upper_bound_ = std::numeric_limits<long>::max();
-    current_upper_bound_ = std::numeric_limits<long>::max();
+    max_lower_bound_raw_ = 0;
+    max_regularized_objective_raw_ = 0;
+    best_upper_bound_ = 0;
+    current_upper_bound_ = 0;
+    has_max_lower_bound_raw_ = false;
+    has_max_regularized_objective_raw_ = false;
+    has_best_upper_bound_ = false;
+    has_current_upper_bound_ = false;
     last_original_objective_raw_ = 0;
     last_certified_lower_bound_raw_ = 0;
     last_regularized_objective_raw_ = 0;
@@ -503,6 +524,17 @@ public:
     objective_scale_promotion_count_ = 0;
     warned_regularization_budget_exceeded_ = false;
     disagreeing_global_indices_.clear();
+  }
+
+  template <typename InputCapacity,
+            std::enable_if_t<!std::is_same_v<InputCapacity, Capacity>, int> = 0>
+  void replaceProblemCapacities(
+      const std::vector<InputCapacity> &arc_capacities,
+      const std::vector<InputCapacity> &terminal_capacities,
+      bool preserve_alpha_state = true, bool preserve_flow_state = true) {
+    replaceProblemCapacities(capacity_vector_from(arc_capacities),
+                             capacity_vector_from(terminal_capacities),
+                             preserve_alpha_state, preserve_flow_state);
   }
 
   int regularizationStrengthForStepSize(long step_size) const {
@@ -572,7 +604,9 @@ public:
       }
       primal_solver_->setMinCutSolution(primal_solution_);
       primal_solver_->decodeNarrowBand(disagree_nodes, 14);
-      printf("recalc primal: %ld \n", primal_solver_->getMinCutValue());
+      std::cout << "recalc primal: "
+                << integer_to_string(primal_solver_->getMinCutValue())
+                << "\n";
     }
   }
 
@@ -645,10 +679,11 @@ public:
     const bool report_progress = dualdecomp_progress_enabled();
     const auto scale_start = std::chrono::steady_clock::now();
     const int num_stats_in_group = 10;
-    TwoGroupScalarStatisticsTracker<long> lower_bound_group_stats(
+    TwoGroupScalarStatisticsTracker<double> lower_bound_group_stats(
         num_stats_in_group);
     CycleCountingList dual_cycle_list;
-    long max_lower_bound = std::numeric_limits<long>::min();
+    Objective max_lower_bound = 0;
+    bool has_scale_max_lower_bound = false;
     int last_improvement_iter = 0;
     for (auto &solver_uptr : solvers_) {
       int regularization_str = regularizationStrengthForStepSize(step_size);
@@ -657,9 +692,9 @@ public:
     for (int i = 0; i < nstep; ++i) {
       ++total_optimization_iterations_;
 
-      std::vector<long> lower_bound_terms(solvers_.size(), 0);
-      std::vector<long> regularization_budget_terms(solvers_.size(), 0);
-      std::vector<long> regularization_contribution_terms(solvers_.size(), 0);
+      std::vector<Objective> lower_bound_terms(solvers_.size(), 0);
+      std::vector<Objective> regularization_budget_terms(solvers_.size(), 0);
+      std::vector<Objective> regularization_contribution_terms(solvers_.size(), 0);
       std::vector<long> regularization_anchor_count_terms(solvers_.size(), 0);
       std::vector<long> regularization_active_count_terms(solvers_.size(), 0);
       auto solve_loop_time = time_lambda([&] {
@@ -695,17 +730,23 @@ public:
         thread_pool_.wait();
       });
       solve_loop_time_ += solve_loop_time.count();
-      long original_objective =
-          std::accumulate(lower_bound_terms.begin(), lower_bound_terms.end(),
-                          static_cast<long>(0));
-      last_regularization_budget_ =
-          std::accumulate(regularization_budget_terms.begin(),
-                          regularization_budget_terms.end(),
-                          static_cast<long>(0));
-      last_regularization_contribution_ =
-          std::accumulate(regularization_contribution_terms.begin(),
-                          regularization_contribution_terms.end(),
-                          static_cast<long>(0));
+      Objective original_objective = 0;
+      last_regularization_budget_ = 0;
+      last_regularization_contribution_ = 0;
+      for (const auto &term : lower_bound_terms) {
+        original_objective = checked_add(
+            original_objective, term, "local objective sum overflow");
+      }
+      for (const auto &term : regularization_budget_terms) {
+        last_regularization_budget_ = checked_add(
+            last_regularization_budget_, term,
+            "regularization budget sum overflow");
+      }
+      for (const auto &term : regularization_contribution_terms) {
+        last_regularization_contribution_ = checked_add(
+            last_regularization_contribution_, term,
+            "regularization contribution sum overflow");
+      }
       last_regularization_anchor_sink_count_ =
           std::accumulate(regularization_anchor_count_terms.begin(),
                           regularization_anchor_count_terms.end(),
@@ -714,10 +755,10 @@ public:
           std::accumulate(regularization_active_count_terms.begin(),
                           regularization_active_count_terms.end(),
                           static_cast<long>(0));
-      const long regularized_objective =
+      const Objective regularized_objective =
           regularizedObjectiveRaw(original_objective,
                                   last_regularization_contribution_);
-      const long lower_bound = certifiedOriginalLowerBoundRaw(
+      const Objective lower_bound = certifiedOriginalLowerBoundRaw(
           original_objective, last_regularization_contribution_,
           last_regularization_budget_);
       last_original_objective_raw_ = original_objective;
@@ -730,12 +771,14 @@ public:
                                          regularizationStrengthForStepSize(
                                              step_size))) {
         if (report_progress) {
-          std::fprintf(stderr,
-                       "mcpd3_progress stage=dd_solve_stop "
-                       "reason=regularization_budget_exceeded iter=%d "
-                       "budget=%ld limit=%ld step_size=%ld scale=%ld\n",
-                       i, last_regularization_budget_,
-                       regularizationBudgetLimit(), step_size, scale_);
+          std::fprintf(
+              stderr,
+              "mcpd3_progress stage=dd_solve_stop "
+              "reason=regularization_budget_exceeded iter=%d "
+              "budget=%s limit=%s step_size=%ld scale=%ld\n",
+              i, integer_to_string(last_regularization_budget_).c_str(),
+              integer_to_string(regularizationBudgetLimit()).c_str(),
+              step_size, scale_);
           std::fflush(stderr);
         }
         opt_status = REGULARIZATION_BUDGET_EXCEEDED;
@@ -743,6 +786,7 @@ public:
       }
       if (options_.track_primal_upper_bound) {
         current_upper_bound_ = updatePrimalUpperBound();
+        has_current_upper_bound_ = true;
       }
 
       LagrangeUpdateStats update_stats;
@@ -759,9 +803,16 @@ public:
 
       const int regularization_strength =
           regularizationStrengthForStepSize(step_size);
+      const Objective best_lower_bound =
+          !has_scale_max_lower_bound || lower_bound > max_lower_bound
+              ? lower_bound
+              : max_lower_bound;
       if (report_progress) {
-        const long best_lower_bound =
-            std::max(max_lower_bound, lower_bound);
+        const Objective best_regularized_objective =
+            !has_max_regularized_objective_raw_ ||
+                    regularized_objective > max_regularized_objective_raw_
+                ? regularized_objective
+                : max_regularized_objective_raw_;
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scale_start)
@@ -786,23 +837,24 @@ public:
             "iters_since_improvement=%d solve_loop_us=%ld "
             "lagrange_update_us=%ld elapsed_sec=%.1f eta_sec=%.1f\n",
             scale_, i, total_optimization_iterations_, nstep,
-            double(lower_bound) / scale_, double(best_lower_bound) / scale_,
-            double(lower_bound) / scale_, double(best_lower_bound) / scale_,
-            double(regularized_objective) / scale_,
-            double(std::max(max_regularized_objective_raw_,
-                            regularized_objective)) /
-                scale_,
-            current_upper_bound_ == std::numeric_limits<long>::max()
+            integer_to_double(lower_bound) / scale_,
+            integer_to_double(best_lower_bound) / scale_,
+            integer_to_double(lower_bound) / scale_,
+            integer_to_double(best_lower_bound) / scale_,
+            integer_to_double(regularized_objective) / scale_,
+            integer_to_double(best_regularized_objective) / scale_,
+            !has_current_upper_bound_
                 ? std::numeric_limits<double>::infinity()
-                : double(current_upper_bound_) / scale_,
-            current_upper_bound_ == std::numeric_limits<long>::max()
+                : integer_to_double(current_upper_bound_) / scale_,
+            !has_current_upper_bound_
                 ? std::numeric_limits<double>::infinity()
-                : double(current_upper_bound_ - lower_bound) / scale_,
+                : integer_to_double(current_upper_bound_ - lower_bound) /
+                      scale_,
             static_cast<long>(disagreeing_global_indices_.size()),
             update_stats.disagreement_norm_sq, step_size,
             update_stats.effective_step_size, regularization_strength,
-            double(last_regularization_budget_) / scale_,
-            double(last_regularization_contribution_) / scale_,
+            integer_to_double(last_regularization_budget_) / scale_,
+            integer_to_double(last_regularization_contribution_) / scale_,
             last_regularization_anchor_sink_count_,
             last_regularization_active_sink_count_,
             i - last_improvement_iter, solve_loop_time.count(),
@@ -811,33 +863,41 @@ public:
       }
       if (options_.verbose) {
         printf("iter : %6d lower_bound : %8.6lf best_lower_bound : %8.6lf upper_bound : %8.6lf gap : %8.6lf num_disagreeing : %6ld disagreement_norm_sq : %8.1lf step_size : %8ld regularization_strength : %6d regularization_budget : %8.6lf regularization_contribution : %8.6lf regularization_anchor_sink_count : %6ld regularization_active_sink_count : %6ld iters_since_improvement : %6d solve_loop_time: %8ldms lagrange_update_time: %8ldms\n",
-               i, double(lower_bound) / scale_,
-               double(std::max(max_lower_bound, lower_bound)) / scale_,
-               current_upper_bound_ == std::numeric_limits<long>::max()
+               i, integer_to_double(lower_bound) / scale_,
+               integer_to_double(best_lower_bound) / scale_,
+               !has_current_upper_bound_
                    ? std::numeric_limits<double>::infinity()
-                   : double(current_upper_bound_) / scale_,
-               current_upper_bound_ == std::numeric_limits<long>::max()
+                   : integer_to_double(current_upper_bound_) / scale_,
+               !has_current_upper_bound_
                    ? std::numeric_limits<double>::infinity()
-                   : double(current_upper_bound_ - lower_bound) / scale_,
+                   : integer_to_double(current_upper_bound_ - lower_bound) /
+                         scale_,
                disagreeing_global_indices_.size(),
                update_stats.disagreement_norm_sq, update_stats.effective_step_size,
                regularization_strength,
-               double(last_regularization_budget_) / scale_,
-               double(last_regularization_contribution_) / scale_,
+               integer_to_double(last_regularization_budget_) / scale_,
+               integer_to_double(last_regularization_contribution_) / scale_,
                last_regularization_anchor_sink_count_,
                last_regularization_active_sink_count_,
                i - last_improvement_iter, solve_loop_time.count(),
                lagrange_update_time.count());
       }
 
-      max_lower_bound_ =
-          std::max<double>(max_lower_bound_, double(lower_bound) / scale_);
-      max_lower_bound_raw_ = std::max(max_lower_bound_raw_, lower_bound);
-      max_regularized_objective_raw_ =
-          std::max(max_regularized_objective_raw_, regularized_objective);
+      max_lower_bound_ = std::max<double>(
+          max_lower_bound_, integer_to_double(lower_bound) / scale_);
+      if (!has_max_lower_bound_raw_ || lower_bound > max_lower_bound_raw_) {
+        max_lower_bound_raw_ = lower_bound;
+        has_max_lower_bound_raw_ = true;
+      }
+      if (!has_max_regularized_objective_raw_ ||
+          regularized_objective > max_regularized_objective_raw_) {
+        max_regularized_objective_raw_ = regularized_objective;
+        has_max_regularized_objective_raw_ = true;
+      }
 
-      if ( lower_bound > max_lower_bound ) {
+      if (!has_scale_max_lower_bound || lower_bound > max_lower_bound) {
         max_lower_bound = lower_bound;
+        has_scale_max_lower_bound = true;
         if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
             options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
@@ -875,7 +935,7 @@ public:
         break;
       }
 
-      if (best_upper_bound_ != std::numeric_limits<long>::max() &&
+      if (has_best_upper_bound_ &&
           max_lower_bound >= best_upper_bound_) {
         if (report_progress) {
           if (regularization_strength == 0) {
@@ -883,15 +943,15 @@ public:
                          "mcpd3_progress stage=dd_solve_stop "
                          "reason=lower_bound_closed_upper lower=%.6lf "
                          "upper=%.6lf\n",
-                         double(max_lower_bound) / scale_,
-                         double(best_upper_bound_) / scale_);
+                         integer_to_double(max_lower_bound) / scale_,
+                         integer_to_double(best_upper_bound_) / scale_);
           } else {
             std::fprintf(stderr,
                          "mcpd3_progress stage=dd_solve_stop "
                          "reason=regularized_closed_upper lower=%.6lf "
                          "upper=%.6lf regularization_strength=%d\n",
-                         double(max_lower_bound) / scale_,
-                         double(best_upper_bound_) / scale_,
+                         integer_to_double(max_lower_bound) / scale_,
+                         integer_to_double(best_upper_bound_) / scale_,
                          regularization_strength);
           }
           std::fflush(stderr);
@@ -899,12 +959,12 @@ public:
         if (options_.verbose) {
           if (regularization_strength == 0) {
             printf("breaking because lower bound closed primal upper bound: lower=%8.6lf upper=%8.6lf\n",
-                   double(max_lower_bound) / scale_,
-                   double(best_upper_bound_) / scale_);
+                   integer_to_double(max_lower_bound) / scale_,
+                   integer_to_double(best_upper_bound_) / scale_);
           } else {
             printf("breaking because scaled epsilon regularization closed primal upper bound: lower=%8.6lf upper=%8.6lf regularization_strength=%d\n",
-                   double(max_lower_bound) / scale_,
-                   double(best_upper_bound_) / scale_,
+                   integer_to_double(max_lower_bound) / scale_,
+                   integer_to_double(best_upper_bound_) / scale_,
                    regularization_strength);
           }
         }
@@ -912,7 +972,7 @@ public:
         break;
       }
 
-      lower_bound_group_stats.addValue(lower_bound);
+      lower_bound_group_stats.addValue(integer_to_double(lower_bound));
       if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
           options_.enable_group_stopping &&
           lower_bound_group_stats.areGroupsPopulated()) {
@@ -943,7 +1003,7 @@ public:
             std::fprintf(stderr,
                          "mcpd3_progress stage=dd_solve_stop "
                          "reason=no_disagreement iter=%d lower=%.6lf\n",
-                         i, double(lower_bound) / scale_);
+                         i, integer_to_double(lower_bound) / scale_);
             std::fflush(stderr);
           }
           if (options_.verbose) {
@@ -957,13 +1017,17 @@ public:
                          "reason=regularized_no_disagreement "
                          "regularization_strength=%d iter=%d lower=%.6lf\n",
                          regularization_strength, i,
-                         double(lower_bound) / scale_);
+                         integer_to_double(lower_bound) / scale_);
             std::fflush(stderr);
           }
           if (options_.verbose) {
-            printf("breaking because scaled epsilon regularized subproblems agree: regularization_strength=%d regularization_budget=%ld regularization_budget_limit=%ld\n",
-                   regularization_strength, last_regularization_budget_,
-                   regularizationBudgetLimit());
+            std::cout
+                << "breaking because scaled epsilon regularized subproblems "
+                   "agree: regularization_strength="
+                << regularization_strength << " regularization_budget="
+                << integer_to_string(last_regularization_budget_)
+                << " regularization_budget_limit="
+                << integer_to_string(regularizationBudgetLimit()) << "\n";
           }
           opt_status = OPTIMAL;
         }
@@ -981,7 +1045,8 @@ public:
       //}
     }
     if (options_.verbose) {
-      printf(" === MAX === lower_bound : %ld\n", max_lower_bound);
+      std::cout << " === MAX === lower_bound : "
+                << integer_to_string(max_lower_bound) << "\n";
     }
     if (report_progress) {
       const double elapsed =
@@ -992,7 +1057,7 @@ public:
                    "mcpd3_progress stage=dd_solve_scale_done scale=%ld "
                    "status=%d best_lower_bound=%.6lf elapsed_sec=%.1f\n",
                    scale_, static_cast<int>(opt_status),
-                   double(max_lower_bound) / scale_, elapsed);
+                   integer_to_double(max_lower_bound) / scale_, elapsed);
       std::fflush(stderr);
     }
     return opt_status;
@@ -1010,10 +1075,12 @@ public:
     scale_ = checkedScaleLong(scale_, scale);
     options_.objective_scale = checkedScaleLong(options_.objective_scale, scale);
     for (auto &cap : original_arc_capacities_) {
-      cap = checkedScaleInt(cap, scale, options_.saturate_capacity_overflow);
+      cap = checked_scale_capacity(cap, scale,
+                                   options_.saturate_capacity_overflow);
     }
     for (auto &cap : original_terminal_capacities_) {
-      cap = checkedScaleInt(cap, scale, options_.saturate_capacity_overflow);
+      cap = checked_scale_capacity(cap, scale,
+                                   options_.saturate_capacity_overflow);
     }
     for (auto &solver_uptr : solvers_) {
       auto *solver = solver_uptr.get();
@@ -1026,22 +1093,23 @@ public:
     thread_pool_.wait();
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
-        constraint.alpha = checkedScaleLong(constraint.alpha, scale);
-        constraint.last_alpha = checkedScaleLong(constraint.last_alpha, scale);
+        constraint.alpha = checked_scale_capacity(constraint.alpha, scale);
+        constraint.last_alpha =
+            checked_scale_capacity(constraint.last_alpha, scale);
       }
     }
-    if (max_lower_bound_raw_ != std::numeric_limits<long>::min()) {
-      max_lower_bound_raw_ = checkedScaleLong(max_lower_bound_raw_, scale);
+    if (has_max_lower_bound_raw_) {
+      max_lower_bound_raw_ = checked_scale(max_lower_bound_raw_, scale);
     }
-    if (max_regularized_objective_raw_ != std::numeric_limits<long>::min()) {
+    if (has_max_regularized_objective_raw_) {
       max_regularized_objective_raw_ =
-          checkedScaleLong(max_regularized_objective_raw_, scale);
+          checked_scale(max_regularized_objective_raw_, scale);
     }
-    if (best_upper_bound_ != std::numeric_limits<long>::max()) {
-      best_upper_bound_ = checkedScaleLong(best_upper_bound_, scale);
+    if (has_best_upper_bound_) {
+      best_upper_bound_ = checked_scale(best_upper_bound_, scale);
     }
-    if (current_upper_bound_ != std::numeric_limits<long>::max()) {
-      current_upper_bound_ = checkedScaleLong(current_upper_bound_, scale);
+    if (has_current_upper_bound_) {
+      current_upper_bound_ = checked_scale(current_upper_bound_, scale);
     }
     warned_regularization_budget_exceeded_ = false;
   }
@@ -1060,20 +1128,6 @@ private:
     return value * scale;
   }
 
-  static int checkedScaleInt(int value, long scale,
-                             bool saturate_capacity_overflow = false) {
-    const long result = checkedScaleLong(value, scale);
-    if (result > std::numeric_limits<int>::max() ||
-        result < std::numeric_limits<int>::min()) {
-      if (saturate_capacity_overflow) {
-        return result < 0 ? std::numeric_limits<int>::min()
-                          : std::numeric_limits<int>::max();
-      }
-      throw std::overflow_error("objective scale promotion exceeds int");
-    }
-    return static_cast<int>(result);
-  }
-
   static size_t resolveThreadCount(int npartition, size_t requested) {
     size_t hardware = std::thread::hardware_concurrency();
     if (hardware == 0) {
@@ -1084,18 +1138,18 @@ private:
   }
 
   long getDualSolutionHash(const std::list<int> &disagreeing_global_indices,
-                           long lower_bound) const {
-    std::hash<long> hasher{};
-    long hash = hasher(lower_bound);
+                           const Objective &lower_bound) const {
+    std::hash<std::string> hasher{};
+    long hash = static_cast<long>(hasher(integer_to_string(lower_bound)));
     for (const auto &global_index : disagreeing_global_indices) {
-      hash ^= hasher(global_index);
+      hash ^= static_cast<long>(hasher(std::to_string(global_index)));
     }
     return hash;
   }
 
   LagrangeUpdateStats runLagrangeMultipliersUpdateStep(long step_size,
                                                        bool use_momentum,
-                                                       long lower_bound) {
+                                                       const Objective &lower_bound) {
     LagrangeUpdateStats stats;
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
@@ -1136,9 +1190,14 @@ private:
             const long alpha_update =
                 stats.effective_step_size *
                 static_cast<int>(momentum_scale * constraint.alpha_momentum);
-            constraint.alpha += alpha_update;
+            constraint.alpha = checked_add(
+                constraint.alpha, capacity_from_integer(alpha_update),
+                "lagrange multiplier overflow");
           } else {
-            constraint.alpha += stats.effective_step_size * diff;
+            constraint.alpha = checked_add(
+                constraint.alpha,
+                capacity_from_integer(stats.effective_step_size * diff),
+                "lagrange multiplier overflow");
           }
         }
       }
@@ -1204,32 +1263,35 @@ private:
     }
   }
 
-  long regularizationBudgetLimit() const {
+  Objective regularizationBudgetLimit() const {
     return options_.regularization_budget_limit > 0
                ? options_.regularization_budget_limit
-               : options_.objective_scale;
+               : Objective(options_.objective_scale);
   }
 
-  void warnIfRegularizationBudgetExceeded(long budget,
-                                          int regularization_strength) {
+  void warnIfRegularizationBudgetExceeded(const Objective &budget,
+                                          const Capacity &regularization_strength) {
     if (!isRegularizationBudgetExceeded(budget, regularization_strength) ||
         warned_regularization_budget_exceeded_) {
       return;
     }
-    std::fprintf(stderr,
-                 "warning: regularization budget %ld is not below limit %ld; "
-                 "a regularized agreement may not certify optimality\n",
-                 budget, regularizationBudgetLimit());
+    std::fprintf(
+        stderr,
+        "warning: regularization budget %s is not below limit %s; "
+        "a regularized agreement may not certify optimality\n",
+        integer_to_string(budget).c_str(),
+        integer_to_string(regularizationBudgetLimit()).c_str());
     std::fflush(stderr);
     warned_regularization_budget_exceeded_ = true;
   }
 
-  bool isRegularizationBudgetExceeded(long budget,
-                                      int regularization_strength) const {
+  bool isRegularizationBudgetExceeded(
+      const Objective &budget, const Capacity &regularization_strength) const {
     return regularization_strength > 0 && budget >= regularizationBudgetLimit();
   }
 
-  bool shouldSuppressEarlyScaleExit(int regularization_strength) const {
+  bool shouldSuppressEarlyScaleExit(
+      const Capacity &regularization_strength) const {
     return options_.exhaust_scale_iterations ||
            (options_.exhaust_regularized_scale_iterations &&
             regularization_strength > 0);
@@ -1262,13 +1324,13 @@ private:
     return true;
   }
 
-  long computePrimalCutValue(const std::vector<bool> &labels) const {
-    long cut_value = 0;
+  Objective computePrimalCutValue(const std::vector<bool> &labels) const {
+    Objective cut_value = 0;
     for (int i = 0; i < narc_; ++i) {
       const int s = original_arcs_[2 * i + 0];
       const int t = original_arcs_[2 * i + 1];
-      const int forward_capacity = original_arc_capacities_[2 * i + 0];
-      const int backward_capacity = original_arc_capacities_[2 * i + 1];
+      const Capacity forward_capacity = original_arc_capacities_[2 * i + 0];
+      const Capacity backward_capacity = original_arc_capacities_[2 * i + 1];
       if (!labels[s] && labels[t]) {
         cut_value += forward_capacity;
       } else if (labels[s] && !labels[t]) {
@@ -1276,7 +1338,7 @@ private:
       }
     }
     for (int i = 0; i < nnode_; ++i) {
-      const int terminal_capacity = original_terminal_capacities_[i];
+      const Capacity terminal_capacity = original_terminal_capacities_[i];
       if (!labels[i] && terminal_capacity < 0) {
         cut_value += -terminal_capacity;
       } else if (labels[i] && terminal_capacity > 0) {
@@ -1286,7 +1348,7 @@ private:
     return cut_value;
   }
 
-  long updatePrimalUpperBound() {
+  Objective updatePrimalUpperBound() {
     std::vector<int> vote_count(nnode_, 0);
     std::vector<int> sink_vote_count(nnode_, 0);
     for (int i = 0; i < npartition_; ++i) {
@@ -1306,9 +1368,10 @@ private:
       // Deterministic tie-break: source side, label 0.
       decoded[i] = sink_vote_count[i] * 2 > vote_count[i];
     }
-    const long upper_bound = computePrimalCutValue(decoded);
-    if (upper_bound < best_upper_bound_) {
+    const Objective upper_bound = computePrimalCutValue(decoded);
+    if (!has_best_upper_bound_ || upper_bound < best_upper_bound_) {
       best_upper_bound_ = upper_bound;
+      has_best_upper_bound_ = true;
       best_primal_solution_ = decoded;
     }
     primal_solution_ = decoded;
@@ -1430,8 +1493,8 @@ private:
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
-      int forward_capacity = arc_capacities_[2 * i + 0];
-      int backward_capacity = arc_capacities_[2 * i + 1];
+      Capacity forward_capacity = arc_capacities_[2 * i + 0];
+      Capacity backward_capacity = arc_capacities_[2 * i + 1];
       bool swapped = false;
       if (s > t) {
         std::swap(s, t);
@@ -1585,12 +1648,13 @@ private:
     std::uniform_int_distribution<long> initial_alpha_distribution(
         -options_.initial_alpha_random_radius,
         options_.initial_alpha_random_radius);
-    auto initial_alpha = [&]() -> long {
+    auto initial_alpha = [&]() -> Capacity {
       if (!options_.randomize_initial_alphas ||
           options_.initial_alpha_random_radius == 0) {
         return 0;
       }
-      return initial_alpha_distribution(initial_alpha_generator);
+      return capacity_from_integer(
+          initial_alpha_distribution(initial_alpha_generator));
     };
     for (auto &[global_index, partitions] : constrained_nodes) {
       constraint_arc_map_.push_back({global_index, {}});
@@ -1609,7 +1673,7 @@ private:
           int local_index_target =
               min_cut_sub_graphs_[partition_target].getNode(global_index);
           const int constraint_id = next_constraint_id++;
-          const long alpha = initial_alpha();
+          const Capacity alpha = initial_alpha();
           constraint_arcs.emplace_back(
               /*alpha=*/alpha,
               /*last_alpha=*/alpha,
@@ -1716,11 +1780,11 @@ private:
   int nnode_;
   int narc_;
   std::vector<int> arcs_;
-  std::vector<int> arc_capacities_;
-  std::vector<int> terminal_capacities_;
+  std::vector<Capacity> arc_capacities_;
+  std::vector<Capacity> terminal_capacities_;
   std::vector<int> original_arcs_;
-  std::vector<int> original_arc_capacities_;
-  std::vector<int> original_terminal_capacities_;
+  std::vector<Capacity> original_arc_capacities_;
+  std::vector<Capacity> original_terminal_capacities_;
 
   struct ArcLocation {
     int partition = -1;
@@ -1785,7 +1849,8 @@ private:
     }
 
     void insertArc(int global_source_index, int global_target_index,
-                   int forward_capacity, int backward_capacity) {
+                   const Capacity &forward_capacity,
+                   const Capacity &backward_capacity) {
       int s = getOrInsertNode(global_source_index);
       int t = getOrInsertNode(global_target_index);
       graph.arc_capacities.push_back(forward_capacity);
@@ -1795,7 +1860,7 @@ private:
       graph.narc++;
     }
 
-    void insertTerminal(int global_index, int terminal_capacity) {
+    void insertTerminal(int global_index, const Capacity &terminal_capacity) {
       int s = getOrInsertNode(global_index);
       if (static_cast<int>(graph.terminal_capacities.size()) < graph.nnode) {
         graph.terminal_capacities.resize(graph.nnode, 0);
@@ -1825,17 +1890,21 @@ private:
   long solve_loop_time_;
   long lagrange_update_time_;
   double max_lower_bound_;
-  long max_lower_bound_raw_;
-  long max_regularized_objective_raw_;
-  long best_upper_bound_;
-  long current_upper_bound_;
-  long last_original_objective_raw_;
-  long last_certified_lower_bound_raw_;
-  long last_regularized_objective_raw_;
+  Objective max_lower_bound_raw_;
+  Objective max_regularized_objective_raw_;
+  Objective best_upper_bound_;
+  Objective current_upper_bound_;
+  bool has_max_lower_bound_raw_;
+  bool has_max_regularized_objective_raw_;
+  bool has_best_upper_bound_;
+  bool has_current_upper_bound_;
+  Objective last_original_objective_raw_;
+  Objective last_certified_lower_bound_raw_;
+  Objective last_regularized_objective_raw_;
   long last_disagreement_count_;
   double last_disagreement_norm_sq_;
-  long last_regularization_budget_;
-  long last_regularization_contribution_;
+  Objective last_regularization_budget_;
+  Objective last_regularization_contribution_;
   long last_regularization_anchor_sink_count_;
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;

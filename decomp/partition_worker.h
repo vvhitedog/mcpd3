@@ -41,15 +41,15 @@ struct ConstraintEndpointBinding {
   int global_node_id = -1;
   int local_index = -1;
   bool is_source = true;
-  long alpha = 0;
-  long last_alpha = 0;
+  Capacity alpha = 0;
+  Capacity last_alpha = 0;
   float alpha_momentum = 0;
 };
 
 struct AlphaUpdate {
   int constraint_id = -1;
-  long alpha = 0;
-  long last_alpha = 0;
+  Capacity alpha = 0;
+  Capacity last_alpha = 0;
   float alpha_momentum = 0;
 };
 
@@ -70,8 +70,8 @@ struct PartitionPackage {
   int partition_id = -1;
   int local_node_count = 0;
   std::vector<int> arcs;
-  std::vector<int> arc_capacities;
-  std::vector<int> terminal_capacities;
+  std::vector<Capacity> arc_capacities;
+  std::vector<Capacity> terminal_capacities;
   std::vector<int> local_to_global;
   std::vector<ConstraintEndpointBinding> constraint_endpoints;
 };
@@ -80,7 +80,7 @@ struct PartitionSolveRequest {
   long round_id = 0;
   int partition_id = -1;
   long scale = 1;
-  int regularization_strength = 0;
+  Capacity regularization_strength = 0;
   bool return_full_labels = false;
   std::vector<AlphaUpdate> alpha_updates;
 };
@@ -88,9 +88,9 @@ struct PartitionSolveRequest {
 struct PartitionSolveResult {
   long round_id = 0;
   int partition_id = -1;
-  long lower_bound = 0;
-  long regularization_budget = 0;
-  long regularization_contribution = 0;
+  Objective lower_bound = 0;
+  Objective regularization_budget = 0;
+  Objective regularization_contribution = 0;
   long regularization_anchor_sink_count = 0;
   long regularization_active_sink_count = 0;
   std::vector<ConstraintLabel> constrained_labels;
@@ -102,31 +102,15 @@ struct PartitionWorkerResourceEstimate {
   long ram_gb = 0;
 };
 
-inline long checkedScaleWorkerLong(long value, long scale) {
-  if (scale <= 0) {
-    throw std::runtime_error("scale factor must be positive");
-  }
-  if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
-    throw std::overflow_error("objective scale promotion overflow");
-  }
-  if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
-    throw std::overflow_error("objective scale promotion overflow");
-  }
-  return value * scale;
+inline Objective checkedScaleWorkerObjective(const Objective &value,
+                                              long scale) {
+  return checked_scale(value, scale, "objective scale promotion overflow");
 }
 
-inline int checkedScaleWorkerInt(int value, long scale,
-                                 bool saturate_capacity_overflow = false) {
-  const long result = checkedScaleWorkerLong(value, scale);
-  if (result > std::numeric_limits<int>::max() ||
-      result < std::numeric_limits<int>::min()) {
-    if (saturate_capacity_overflow) {
-      return result < 0 ? std::numeric_limits<int>::min()
-                        : std::numeric_limits<int>::max();
-    }
-    throw std::overflow_error("objective scale promotion exceeds int");
-  }
-  return static_cast<int>(result);
+inline Capacity checkedScaleWorkerCapacity(
+    const Capacity &value, long scale,
+    bool saturate_capacity_overflow = false) {
+  return checked_scale_capacity(value, scale, saturate_capacity_overflow);
 }
 
 inline void validatePartitionPackage(const PartitionPackage &package) {
@@ -290,9 +274,10 @@ public:
     for (auto &[partition_id, loaded] : partitions_) {
       (void)partition_id;
       for (auto &constraint_arc : loaded.constraint_arcs) {
-        constraint_arc.alpha = checkedScaleLong(constraint_arc.alpha, factor);
-        constraint_arc.last_alpha =
-            checkedScaleLong(constraint_arc.last_alpha, factor);
+        constraint_arc.alpha = checkedScaleWorkerCapacity(
+            constraint_arc.alpha, factor, saturate_capacity_overflow);
+        constraint_arc.last_alpha = checkedScaleWorkerCapacity(
+            constraint_arc.last_alpha, factor, saturate_capacity_overflow);
       }
       loaded.solver->scaleProblem(factor, saturate_capacity_overflow);
     }
@@ -342,19 +327,6 @@ public:
   }
 
 private:
-  static long checkedScaleLong(long value, long scale) {
-    if (scale <= 0) {
-      throw std::runtime_error("scale factor must be positive");
-    }
-    if (value > 0 && value > std::numeric_limits<long>::max() / scale) {
-      throw std::overflow_error("objective scale promotion overflow");
-    }
-    if (value < 0 && value < std::numeric_limits<long>::min() / scale) {
-      throw std::overflow_error("objective scale promotion overflow");
-    }
-    return value * scale;
-  }
-
   static void validatePackage(const PartitionPackage &package) {
     if (package.partition_id < 0) {
       throw std::runtime_error("partition id must be non-negative");
@@ -661,17 +633,18 @@ public:
     for (auto &[partition_id, stored] : partitions_) {
       (void)partition_id;
       for (auto &binding : stored.constraint_endpoints) {
-        binding.alpha = checkedScaleWorkerLong(binding.alpha, factor);
-        binding.last_alpha = checkedScaleWorkerLong(binding.last_alpha, factor);
+        binding.alpha = checkedScaleWorkerCapacity(binding.alpha, factor);
+        binding.last_alpha =
+            checkedScaleWorkerCapacity(binding.last_alpha, factor);
       }
       auto package = readPackagePayload(stored);
       for (auto &capacity : package.arc_capacities) {
-        capacity =
-            checkedScaleWorkerInt(capacity, factor, saturate_capacity_overflow);
+        capacity = checkedScaleWorkerCapacity(
+            capacity, factor, saturate_capacity_overflow);
       }
       for (auto &capacity : package.terminal_capacities) {
-        capacity =
-            checkedScaleWorkerInt(capacity, factor, saturate_capacity_overflow);
+        capacity = checkedScaleWorkerCapacity(
+            capacity, factor, saturate_capacity_overflow);
       }
       writePackagePayload(stored.path, package);
       if (stored.resident_worker) {
@@ -784,6 +757,92 @@ private:
     return values;
   }
 
+  template <typename Integer>
+  static void writeInteger(std::ostream &out, const Integer &value,
+                           const std::string &name) {
+    if constexpr (std::is_trivially_copyable_v<Integer>) {
+      writeScalar(out, value, name);
+    } else {
+      const std::string text = integer_to_string(value);
+      const std::uint64_t size = text.size();
+      writeScalar(out, size, name + " size");
+      out.write(text.data(), static_cast<std::streamsize>(text.size()));
+      if (!out) {
+        throw std::runtime_error("failed to write " + name);
+      }
+    }
+  }
+
+  template <typename Integer, typename Parser>
+  static Integer readInteger(std::istream &in, const std::string &name,
+                             Parser parser) {
+    if constexpr (std::is_trivially_copyable_v<Integer>) {
+      return readScalar<Integer>(in, name);
+    } else {
+      const auto size = readScalar<std::uint64_t>(in, name + " size");
+      if (size > static_cast<std::uint64_t>(
+                     std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error(name + " is too large");
+      }
+      std::string text(static_cast<std::size_t>(size), '\0');
+      in.read(text.data(), static_cast<std::streamsize>(text.size()));
+      if (!in) {
+        throw std::runtime_error("failed to read " + name);
+      }
+      return parser(text);
+    }
+  }
+
+  template <typename Integer>
+  static void writeIntegerVector(std::ostream &out,
+                                 const std::vector<Integer> &values,
+                                 const std::string &name) {
+    const std::uint64_t size = values.size();
+    writeScalar(out, size, name + " size");
+    if constexpr (std::is_trivially_copyable_v<Integer>) {
+      if (!values.empty()) {
+        out.write(reinterpret_cast<const char *>(values.data()),
+                  static_cast<std::streamsize>(values.size() *
+                                               sizeof(Integer)));
+        if (!out) {
+          throw std::runtime_error("failed to write " + name);
+        }
+      }
+    } else {
+      for (const auto &value : values) {
+        writeInteger(out, value, name + " value");
+      }
+    }
+  }
+
+  template <typename Integer, typename Parser>
+  static std::vector<Integer>
+  readIntegerVector(std::istream &in, const std::string &name, Parser parser) {
+    const auto size = readScalar<std::uint64_t>(in, name + " size");
+    if (size >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+      throw std::runtime_error(name + " is too large");
+    }
+    std::vector<Integer> values;
+    values.reserve(static_cast<std::size_t>(size));
+    if constexpr (std::is_trivially_copyable_v<Integer>) {
+      values.resize(static_cast<std::size_t>(size));
+      if (!values.empty()) {
+        in.read(reinterpret_cast<char *>(values.data()),
+                static_cast<std::streamsize>(values.size() *
+                                             sizeof(Integer)));
+        if (!in) {
+          throw std::runtime_error("failed to read " + name);
+        }
+      }
+    } else {
+      for (std::uint64_t index = 0; index < size; ++index) {
+        values.push_back(readInteger<Integer>(in, name + " value", parser));
+      }
+    }
+    return values;
+  }
+
   static void writeIntVector(std::ostream &out,
                              const std::vector<int> &values,
                              const std::string &name) {
@@ -804,14 +863,15 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435033;
-    const std::uint32_t version = 2;
+    const std::uint32_t version = 3;
     writeScalar(out, magic, "package magic");
     writeScalar(out, version, "package version");
     writeScalar(out, package.partition_id, "partition id");
     writeScalar(out, package.local_node_count, "local node count");
     writeIntVector(out, package.arcs, "arcs");
-    writeIntVector(out, package.arc_capacities, "arc capacities");
-    writeIntVector(out, package.terminal_capacities, "terminal capacities");
+    writeIntegerVector(out, package.arc_capacities, "arc capacities");
+    writeIntegerVector(out, package.terminal_capacities,
+                       "terminal capacities");
     writeIntVector(out, package.local_to_global, "local to global");
     out.close();
     if (!out) {
@@ -831,11 +891,11 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435357;
-    const std::uint32_t version = 1;
+    const std::uint32_t version = 2;
     writeScalar(out, magic, "warm state magic");
     writeScalar(out, version, "warm state version");
-    writeVector(out, state.v_flow, "v flow");
-    writeVector(out, state.d_flow, "d flow");
+    writeIntegerVector(out, state.v_flow, "v flow");
+    writeIntegerVector(out, state.d_flow, "d flow");
     writeVector(out, state.x, "min cut labels");
     writeScalar(out, static_cast<std::uint8_t>(state.is_first_iteration ? 1 : 0),
                 "is first iteration");
@@ -845,16 +905,16 @@ private:
                 "is first iteration of new scale");
     writeScalar(out, static_cast<std::uint8_t>(state.has_solution ? 1 : 0),
                 "has solution");
-    writeScalar(out, state.mincut_value, "mincut value");
-    writeVector(out, state.cached_lagrange_multipliers,
-                "cached lagrange multipliers");
-    writeVector(out, state.cached_last_lagrange_multipliers,
-                "cached last lagrange multipliers");
-    writeScalar(out, state.regularization_str, "regularization strength");
-    writeScalar(out, state.last_regularization_budget,
-                "last regularization budget");
-    writeScalar(out, state.last_regularization_contribution,
-                "last regularization contribution");
+    writeInteger(out, state.mincut_value, "mincut value");
+    writeIntegerVector(out, state.cached_lagrange_multipliers,
+                       "cached lagrange multipliers");
+    writeIntegerVector(out, state.cached_last_lagrange_multipliers,
+                       "cached last lagrange multipliers");
+    writeInteger(out, state.regularization_str, "regularization strength");
+    writeInteger(out, state.last_regularization_budget,
+                 "last regularization budget");
+    writeInteger(out, state.last_regularization_contribution,
+                 "last regularization contribution");
     writeScalar(out, state.last_regularization_anchor_sink_count,
                 "last regularization anchor sink count");
     writeScalar(out, state.last_regularization_active_sink_count,
@@ -864,19 +924,20 @@ private:
     const auto &graph_state = state.maxflow_graph_state;
     writeScalar(out, graph_state.node_num, "warm graph node count");
     writeScalar(out, graph_state.arc_num, "warm graph arc count");
-    writeScalar(out, graph_state.flow, "warm graph flow");
+    writeInteger(out, graph_state.flow, "warm graph flow");
     writeScalar(out, graph_state.maxflow_iteration,
                 "warm graph maxflow iteration");
     writeScalar(out, graph_state.time, "warm graph time");
-    writeVector(out, graph_state.node_tr_caps, "warm graph node tr caps");
+    writeIntegerVector(out, graph_state.node_tr_caps,
+                       "warm graph node tr caps");
     writeVector(out, graph_state.node_parent_arc_indices,
                 "warm graph node parent arc indices");
     writeVector(out, graph_state.node_timestamps,
                 "warm graph node timestamps");
     writeVector(out, graph_state.node_distances, "warm graph node distances");
     writeVector(out, graph_state.node_is_sink, "warm graph node is sink");
-    writeVector(out, graph_state.arc_residual_capacities,
-                "warm graph arc residual capacities");
+    writeIntegerVector(out, graph_state.arc_residual_capacities,
+                       "warm graph arc residual capacities");
     out.close();
     if (!out) {
       throw std::runtime_error("failed to flush streaming warm-state file " +
@@ -894,30 +955,35 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "warm state magic");
     const auto version = readScalar<std::uint32_t>(in, "warm state version");
-    if (magic != 0x4d435357 || version != 1) {
+    if (magic != 0x4d435357 || version != 2) {
       throw std::runtime_error("invalid streaming warm-state file " +
                                path.string());
     }
     PrimalDualMinCutSolver::WarmState state;
-    state.v_flow = readVector<int>(in, "v flow");
-    state.d_flow = readVector<int>(in, "d flow");
+    state.v_flow = readIntegerVector<Capacity>(in, "v flow", parse_capacity);
+    state.d_flow = readIntegerVector<Capacity>(in, "d flow", parse_capacity);
     state.x = readVector<int>(in, "min cut labels");
     state.is_first_iteration =
         readScalar<std::uint8_t>(in, "is first iteration") != 0;
     state.is_first_iteration_of_new_scale =
         readScalar<std::uint8_t>(in, "is first iteration of new scale") != 0;
     state.has_solution = readScalar<std::uint8_t>(in, "has solution") != 0;
-    state.mincut_value = readScalar<long>(in, "mincut value");
+    state.mincut_value =
+        readInteger<Objective>(in, "mincut value", parse_objective);
     state.cached_lagrange_multipliers =
-        readVector<int>(in, "cached lagrange multipliers");
+        readIntegerVector<Capacity>(in, "cached lagrange multipliers",
+                                    parse_capacity);
     state.cached_last_lagrange_multipliers =
-        readVector<int>(in, "cached last lagrange multipliers");
+        readIntegerVector<Capacity>(in, "cached last lagrange multipliers",
+                                    parse_capacity);
     state.regularization_str =
-        readScalar<int>(in, "regularization strength");
+        readInteger<Capacity>(in, "regularization strength", parse_capacity);
     state.last_regularization_budget =
-        readScalar<long>(in, "last regularization budget");
+        readInteger<Objective>(in, "last regularization budget",
+                               parse_objective);
     state.last_regularization_contribution =
-        readScalar<long>(in, "last regularization contribution");
+        readInteger<Objective>(in, "last regularization contribution",
+                               parse_objective);
     state.last_regularization_anchor_sink_count =
         readScalar<long>(in, "last regularization anchor sink count");
     state.last_regularization_active_sink_count =
@@ -927,12 +993,13 @@ private:
     auto &graph_state = state.maxflow_graph_state;
     graph_state.node_num = readScalar<int>(in, "warm graph node count");
     graph_state.arc_num = readScalar<int>(in, "warm graph arc count");
-    graph_state.flow = readScalar<long>(in, "warm graph flow");
+    graph_state.flow =
+        readInteger<Objective>(in, "warm graph flow", parse_objective);
     graph_state.maxflow_iteration =
         readScalar<int>(in, "warm graph maxflow iteration");
     graph_state.time = readScalar<long>(in, "warm graph time");
-    graph_state.node_tr_caps =
-        readVector<int>(in, "warm graph node tr caps");
+    graph_state.node_tr_caps = readIntegerVector<Capacity>(
+        in, "warm graph node tr caps", parse_capacity);
     graph_state.node_parent_arc_indices =
         readVector<int>(in, "warm graph node parent arc indices");
     graph_state.node_timestamps =
@@ -941,8 +1008,8 @@ private:
         readVector<int>(in, "warm graph node distances");
     graph_state.node_is_sink =
         readVector<unsigned char>(in, "warm graph node is sink");
-    graph_state.arc_residual_capacities =
-        readVector<int>(in, "warm graph arc residual capacities");
+    graph_state.arc_residual_capacities = readIntegerVector<Capacity>(
+        in, "warm graph arc residual capacities", parse_capacity);
     return state;
   }
 
@@ -954,7 +1021,7 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "package magic");
     const auto version = readScalar<std::uint32_t>(in, "package version");
-    if (magic != 0x4d435033 || (version != 1 && version != 2)) {
+    if (magic != 0x4d435033 || version != 3) {
       throw std::runtime_error("invalid streaming package file " +
                                stored.path.string());
     }
@@ -963,13 +1030,11 @@ private:
     package.partition_id = readScalar<int>(in, "partition id");
     package.local_node_count = readScalar<int>(in, "local node count");
     package.arcs = readIntVector(in, "arcs");
-    package.arc_capacities = readIntVector(in, "arc capacities");
-    package.terminal_capacities = readIntVector(in, "terminal capacities");
-    if (version >= 2) {
-      package.local_to_global = readIntVector(in, "local to global");
-    } else {
-      package.local_to_global = stored.local_to_global;
-    }
+    package.arc_capacities = readIntegerVector<Capacity>(
+        in, "arc capacities", parse_capacity);
+    package.terminal_capacities = readIntegerVector<Capacity>(
+        in, "terminal capacities", parse_capacity);
+    package.local_to_global = readIntVector(in, "local to global");
     package.constraint_endpoints = stored.constraint_endpoints;
     validatePartitionPackage(package);
     return package;

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <capacity.h>
+
 #include <vector>
 
 namespace mcpd3 {
@@ -23,8 +25,8 @@ namespace mcpd3 {
 struct MinCutGraph {
   int nnode, narc;
   std::vector<int> arcs;
-  std::vector<int> arc_capacities;
-  std::vector<int> terminal_capacities;
+  std::vector<Capacity> arc_capacities;
+  std::vector<Capacity> terminal_capacities;
 };
 
 } // namespace mcpd3

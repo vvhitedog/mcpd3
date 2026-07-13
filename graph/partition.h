@@ -88,15 +88,19 @@ inline double env_double_or_default(const char *name, double default_value) {
                                               : default_value;
 }
 
-inline double partition_edge_weight(const std::vector<int> *arc_capacities,
+inline double partition_edge_weight(const std::vector<Capacity> *arc_capacities,
                                     int edge_index, double lambda) {
   if (arc_capacities == nullptr || arc_capacities->empty() || lambda == 0.0) {
     return 1.0;
   }
   const size_t base = static_cast<size_t>(2) * edge_index;
-  const double cap0 = base < arc_capacities->size() ? (*arc_capacities)[base] : 0;
+  const double cap0 = base < arc_capacities->size()
+                          ? integer_to_double((*arc_capacities)[base])
+                          : 0;
   const double cap1 =
-      base + 1 < arc_capacities->size() ? (*arc_capacities)[base + 1] : 0;
+      base + 1 < arc_capacities->size()
+          ? integer_to_double((*arc_capacities)[base + 1])
+          : 0;
   const double cap = std::max(cap0, cap1);
   return 1.0 + lambda * std::log1p(std::max(0.0, cap));
 }
@@ -204,7 +208,7 @@ inline std::vector<int> region_grow_initial_partition(
 
 inline std::vector<int> local_search_graph_partition(
     int npartition, int narc, int nnode, const std::vector<int> &arc,
-    const std::vector<int> *arc_capacities = nullptr) {
+    const std::vector<Capacity> *arc_capacities = nullptr) {
   const bool report_progress = partition_progress_enabled();
   const long progress_interval = 10000000;
   const int passes = std::max(0, env_int_or_default("MCPD3_LOCAL_PARTITION_PASSES", 3));
@@ -528,7 +532,7 @@ std::vector<int> metis_partition(int npartition,
 
 inline std::vector<int> configured_graph_partition(
     int npartition, int narc, int nnode, const std::vector<int> &arc,
-    const std::vector<int> *arc_capacities = nullptr) {
+    const std::vector<Capacity> *arc_capacities = nullptr) {
   const char *mode_env = std::getenv("MCPD3_PARTITIONER");
   const std::string mode = mode_env == nullptr ? "metis" : mode_env;
   if (mode == "basic" || mode == "contiguous") {

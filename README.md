@@ -66,13 +66,41 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
+Capacity precision is selected at configure time with
+`MCPD_CAPACITY_MODE`. The default remains `32` for compatibility:
+
+```bash
+# 32-bit capacities, 64-bit accumulated objectives (default)
+cmake -S . -B build-32 -DMCPD_CAPACITY_MODE=32
+
+# 64-bit capacities, 128-bit accumulated objectives
+cmake -S . -B build-64 -DMCPD_CAPACITY_MODE=64
+
+# 128-bit capacities, 256-bit accumulated objectives
+cmake -S . -B build-128 -DMCPD_CAPACITY_MODE=128
+
+# Arbitrary-precision capacities and objectives using GMP
+cmake -S . -B build-gmp -DMCPD_CAPACITY_MODE=gmp
+```
+
+All modes require Boost.Multiprecision headers. GMP mode additionally requires
+the GMP C and C++ development packages, commonly installed as `libgmp-dev` on
+Debian/Ubuntu. `BOOST_ROOT` and `GMP_ROOT` can point CMake at non-system
+installations.
+
+GMP capacities are nontrivial C++ objects, so BK node and arc arrays use heap
+storage in GMP mode. File-backed and anonymous BK mmap storage remain available
+for the fixed-width modes.
+
 Run tests:
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-The main test target is `partition_worker_test`, which exercises the extracted
+`capacity_precision_test` drives the configured extreme value through BK,
+DIMACS parsing, the mcpd3 solver, in-process workers, and streaming worker
+storage. `partition_worker_test` exercises the extracted
 partition-worker API, in-process coordinator loop, batched worker solves,
 scaled-epsilon regularization, objective-scale promotion, randomized initial
 alpha behavior, and lower-bound certificate accounting.

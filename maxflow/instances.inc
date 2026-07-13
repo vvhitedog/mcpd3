@@ -1,4 +1,5 @@
 #include "graph.h"
+#include <capacity.h>
 
 #ifdef _MSC_VER
 #pragma warning(disable: 4661)
@@ -16,3 +17,6 @@ template class Graph<short,int,int>;
 template class Graph<float,float,float>;
 template class Graph<double,double,double>;
 
+#if !defined(MCPD_CAPACITY_MODE_32)
+template class Graph<mcpd3::Capacity, mcpd3::Capacity, mcpd3::Objective>;
+#endif

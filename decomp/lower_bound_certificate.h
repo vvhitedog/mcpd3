@@ -1,41 +1,33 @@
 #pragma once
 
-#include <limits>
-#include <stdexcept>
+#include <capacity.h>
 
 namespace mcpd3 {
 
-inline long checkedAddObjectiveRaw(long lhs, long rhs, const char *context) {
-  if (rhs > 0 && lhs > std::numeric_limits<long>::max() - rhs) {
-    throw std::overflow_error(context);
-  }
-  if (rhs < 0 && lhs < std::numeric_limits<long>::min() - rhs) {
-    throw std::overflow_error(context);
-  }
-  return lhs + rhs;
-}
-
-inline long checkedSubtractObjectiveRaw(long lhs, long rhs,
+inline Objective checkedAddObjectiveRaw(const Objective &lhs,
+                                        const Objective &rhs,
                                         const char *context) {
-  if (rhs > 0 && lhs < std::numeric_limits<long>::min() + rhs) {
-    throw std::overflow_error(context);
-  }
-  if (rhs < 0 && lhs > std::numeric_limits<long>::max() + rhs) {
-    throw std::overflow_error(context);
-  }
-  return lhs - rhs;
+  return checked_add(lhs, rhs, context);
 }
 
-inline long regularizedObjectiveRaw(long original_objective_raw,
-                                    long regularization_contribution_raw) {
+inline Objective checkedSubtractObjectiveRaw(const Objective &lhs,
+                                             const Objective &rhs,
+                                             const char *context) {
+  return checked_subtract(lhs, rhs, context);
+}
+
+inline Objective regularizedObjectiveRaw(
+    const Objective &original_objective_raw,
+    const Objective &regularization_contribution_raw) {
   return checkedAddObjectiveRaw(original_objective_raw,
                                 regularization_contribution_raw,
                                 "regularized objective overflow");
 }
 
-inline long certifiedOriginalLowerBoundRaw(
-    long original_objective_raw, long regularization_contribution_raw,
-    long regularization_budget_raw) {
+inline Objective certifiedOriginalLowerBoundRaw(
+    const Objective &original_objective_raw,
+    const Objective &regularization_contribution_raw,
+    const Objective &regularization_budget_raw) {
   return checkedSubtractObjectiveRaw(
       regularizedObjectiveRaw(original_objective_raw,
                               regularization_contribution_raw),

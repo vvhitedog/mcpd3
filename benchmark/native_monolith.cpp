@@ -58,7 +58,7 @@ struct Config {
   bool exhaust_regularized_scale_iterations = false;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
-  long regularization_budget_limit = 0;
+  mcpd3::Objective regularization_budget_limit = 0;
   mcpd3::DualDecompositionRegularizationScheme regularization_scheme =
       mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON;
   bool randomize_initial_alphas = false;
@@ -224,7 +224,8 @@ Config parseArgs(int argc, char **argv) {
       config.regularization_scheme =
           mcpd3::DualDecompositionRegularizationScheme::NONE;
     } else if (arg == "--regularization-budget-limit") {
-      config.regularization_budget_limit = parseLong(requireValue(arg), arg);
+      config.regularization_budget_limit =
+          mcpd3::parse_objective(requireValue(arg));
     } else if (arg == "--disable-scale-promotion") {
       config.promote_objective_scale_on_overbudget = false;
     } else if (arg == "--max-scale-promotions") {
@@ -281,36 +282,15 @@ void configureBkStorage(const Config &config) {
   }
 }
 
-int scaleIntCapacity(int value, long factor, bool saturate) {
-  if (factor == 1 || value == 0) {
-    return value;
-  }
-  const long int_max = std::numeric_limits<int>::max();
-  const long int_min = std::numeric_limits<int>::min();
-  const long value_long = static_cast<long>(value);
-  const bool int_overflow =
-      (value > 0 && factor > int_max / value_long) ||
-      (value < 0 && factor > int_min / value_long);
-  if (int_overflow && saturate) {
-    return value > 0 ? std::numeric_limits<int>::max()
-                     : std::numeric_limits<int>::min();
-  }
-  if (int_overflow) {
-    throw std::overflow_error("objective scale exceeds int range");
-  }
-  const long scaled = static_cast<long>(value) * factor;
-  return static_cast<int>(scaled);
-}
-
 void scaleGraph(mcpd3::MinCutGraph *graph, long factor, bool saturate) {
   if (factor == 1) {
     return;
   }
   for (auto &capacity : graph->arc_capacities) {
-    capacity = scaleIntCapacity(capacity, factor, saturate);
+    capacity = mcpd3::checked_scale_capacity(capacity, factor, saturate);
   }
   for (auto &capacity : graph->terminal_capacities) {
-    capacity = scaleIntCapacity(capacity, factor, saturate);
+    capacity = mcpd3::checked_scale_capacity(capacity, factor, saturate);
   }
 }
 
@@ -371,7 +351,8 @@ void printConfig(const Config &config) {
   std::cout << "regularization "
             << regularizationSchemeName(config.regularization_scheme) << "\n";
   std::cout << "regularization_budget_limit "
-            << config.regularization_budget_limit << "\n";
+            << mcpd3::integer_to_string(config.regularization_budget_limit)
+            << "\n";
   std::cout << "promote_objective_scale_on_overbudget "
             << config.promote_objective_scale_on_overbudget << "\n";
   std::cout << "max_objective_scale_promotions "
@@ -404,22 +385,36 @@ void printFinal(const Timing &timing, const Config &config,
   std::cout << "status_name " << (agreed ? "agreement" : "not_converged")
             << "\n";
   std::cout << "final_objective_raw "
-            << dual_decomp.getBestCertifiedLowerBoundRaw() << "\n";
+            << mcpd3::integer_to_string(
+                   dual_decomp.getBestCertifiedLowerBoundRaw())
+            << "\n";
   std::cout << "final_objective "
             << dual_decomp.getBestCertifiedLowerBound() << "\n";
   std::cout << "best_certified_lower_bound_raw "
-            << dual_decomp.getBestCertifiedLowerBoundRaw() << "\n";
+            << mcpd3::integer_to_string(
+                   dual_decomp.getBestCertifiedLowerBoundRaw())
+            << "\n";
   std::cout << "best_certified_lower_bound "
             << dual_decomp.getBestCertifiedLowerBound() << "\n";
   std::cout << "best_regularized_objective_raw "
-            << dual_decomp.getBestRegularizedObjectiveRaw() << "\n";
+            << mcpd3::integer_to_string(
+                   dual_decomp.getBestRegularizedObjectiveRaw())
+            << "\n";
   std::cout << "best_regularized_objective "
             << dual_decomp.getBestRegularizedObjective() << "\n";
-  std::cout << "best_upper_bound_raw " << dual_decomp.getBestUpperBoundRaw()
+  std::cout << "best_upper_bound_raw "
+            << (dual_decomp.hasBestUpperBound()
+                    ? mcpd3::integer_to_string(
+                          dual_decomp.getBestUpperBoundRaw())
+                    : "unavailable")
             << "\n";
   std::cout << "best_upper_bound " << dual_decomp.getBestUpperBound() << "\n";
   std::cout << "current_upper_bound_raw "
-            << dual_decomp.getCurrentUpperBoundRaw() << "\n";
+            << (dual_decomp.hasCurrentUpperBound()
+                    ? mcpd3::integer_to_string(
+                          dual_decomp.getCurrentUpperBoundRaw())
+                    : "unavailable")
+            << "\n";
   std::cout << "objective_scale " << dual_decomp.getScale() << "\n";
   std::cout << "objective_scale_promotions "
             << dual_decomp.getObjectiveScalePromotionCount() << "\n";
@@ -430,9 +425,13 @@ void printFinal(const Timing &timing, const Config &config,
   std::cout << "final_disagreement_norm_sq "
             << dual_decomp.getLastDisagreementNormSq() << "\n";
   std::cout << "final_regularization_budget "
-            << dual_decomp.getLastRegularizationBudget() << "\n";
+            << mcpd3::integer_to_string(
+                   dual_decomp.getLastRegularizationBudget())
+            << "\n";
   std::cout << "final_regularization_contribution "
-            << dual_decomp.getLastRegularizationContribution() << "\n";
+            << mcpd3::integer_to_string(
+                   dual_decomp.getLastRegularizationContribution())
+            << "\n";
   std::cout << "final_regularization_anchor_sink_count "
             << dual_decomp.getLastRegularizationAnchorSinkCount() << "\n";
   std::cout << "final_regularization_active_sink_count "
