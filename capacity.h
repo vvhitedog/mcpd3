@@ -374,6 +374,43 @@ inline Integer checked_scale(
   }
 }
 
+template <typename Integer>
+inline Integer checked_multiply_by_positive(
+    const Integer &value, const Integer &multiplier,
+    const char *message = "integer multiplication overflow") {
+  if (multiplier <= 0) {
+    throw std::invalid_argument("multiplier must be positive");
+  }
+  if constexpr (!integer_is_bounded<Integer>()) {
+    return value * multiplier;
+  } else {
+    if (value > 0 &&
+        value > std::numeric_limits<Integer>::max() / multiplier) {
+      throw std::overflow_error(message);
+    }
+    if (value < 0 &&
+        value < std::numeric_limits<Integer>::min() / multiplier) {
+      throw std::overflow_error(message);
+    }
+    return value * multiplier;
+  }
+}
+
+inline bool capacities_have_ratio(const Capacity &old_capacity,
+                                  const Capacity &new_capacity,
+                                  const Objective &numerator,
+                                  const Objective &denominator) {
+  if (numerator <= 0 || denominator <= 0) {
+    throw std::invalid_argument("flow scale ratio must be positive");
+  }
+  return checked_multiply_by_positive(
+             widen_capacity(old_capacity), numerator,
+             "capacity ratio multiplication overflow") ==
+         checked_multiply_by_positive(
+             widen_capacity(new_capacity), denominator,
+             "capacity ratio multiplication overflow");
+}
+
 inline Capacity checked_scale_capacity(const Capacity &value, long scale,
                                         bool saturate = false) {
   try {
@@ -409,6 +446,17 @@ inline Capacity narrow_objective_to_capacity(const Objective &value,
   }
   return static_cast<Capacity>(value);
 #endif
+}
+
+inline Capacity checked_scale_capacity_ratio(
+    const Capacity &value, const Objective &numerator,
+    const Objective &denominator) {
+  if (numerator <= 0 || denominator <= 0) {
+    throw std::invalid_argument("flow scale ratio must be positive");
+  }
+  const Objective product = checked_multiply_by_positive(
+      widen_capacity(value), numerator, "flow scale multiplication overflow");
+  return narrow_objective_to_capacity(product / denominator);
 }
 
 inline Capacity capacity_test_extreme_value() {

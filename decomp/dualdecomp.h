@@ -425,7 +425,9 @@ public:
       const std::vector<Capacity> &arc_capacities,
       const std::vector<Capacity> &terminal_capacities,
       bool preserve_alpha_state = true,
-      bool preserve_flow_state = true) {
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
     requireConstructedSolvers("replaceProblemCapacities");
     if (arc_capacities.size() != static_cast<size_t>(2 * narc_)) {
       throw std::runtime_error("replacement arc capacity count mismatch");
@@ -473,10 +475,21 @@ public:
           terminal_capacities[node];
     }
 
+    if (preserve_flow_state &&
+        flow_scale_numerator != flow_scale_denominator) {
+      for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+        solvers_[partition]->validateProblemCapacityReplacement(
+            local_arc_capacities[partition],
+            local_terminal_capacities[partition], preserve_flow_state,
+            flow_scale_numerator, flow_scale_denominator);
+      }
+    }
+
     for (size_t partition = 0; partition < solvers_.size(); ++partition) {
       solvers_[partition]->replaceProblemCapacities(
           local_arc_capacities[partition],
-          local_terminal_capacities[partition], preserve_flow_state);
+          local_terminal_capacities[partition], preserve_flow_state,
+          flow_scale_numerator, flow_scale_denominator);
       if (options_.emit_partition_packages) {
         partition_packages_[partition].arc_capacities =
             local_arc_capacities[partition];
@@ -531,10 +544,13 @@ public:
   void replaceProblemCapacities(
       const std::vector<InputCapacity> &arc_capacities,
       const std::vector<InputCapacity> &terminal_capacities,
-      bool preserve_alpha_state = true, bool preserve_flow_state = true) {
+      bool preserve_alpha_state = true, bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
     replaceProblemCapacities(capacity_vector_from(arc_capacities),
                              capacity_vector_from(terminal_capacities),
-                             preserve_alpha_state, preserve_flow_state);
+                             preserve_alpha_state, preserve_flow_state,
+                             flow_scale_numerator, flow_scale_denominator);
   }
 
   int regularizationStrengthForStepSize(long step_size) const {

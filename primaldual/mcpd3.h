@@ -564,9 +564,12 @@ public:
     has_solution_ = true;
   }
 
-  void replaceProblemCapacities(const std::vector<Capacity> &arc_capacities,
-                                const std::vector<Capacity> &terminal_capacities,
-                                bool preserve_flow_state = true) {
+  void validateProblemCapacityReplacement(
+      const std::vector<Capacity> &arc_capacities,
+      const std::vector<Capacity> &terminal_capacities,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) const {
     if (arc_capacities.size() != arc_capacities_.size()) {
       throw std::runtime_error("replacement arc capacity count mismatch");
     }
@@ -581,10 +584,48 @@ public:
       }
     }
 
+    if (flow_scale_numerator <= 0 || flow_scale_denominator <= 0) {
+      throw std::invalid_argument("flow scale ratio must be positive");
+    }
+
+    if (preserve_flow_state &&
+        flow_scale_numerator != flow_scale_denominator) {
+      for (size_t i = 0; i < arc_capacities.size(); ++i) {
+        if (!capacities_have_ratio(
+                arc_capacities_[i], arc_capacities[i],
+                flow_scale_numerator, flow_scale_denominator)) {
+          throw std::runtime_error(
+              "flow scaling requires proportional arc capacities");
+        }
+      }
+    }
+  }
+
+  void replaceProblemCapacities(const std::vector<Capacity> &arc_capacities,
+                                const std::vector<Capacity> &terminal_capacities,
+                                bool preserve_flow_state = true,
+                                const Objective &flow_scale_numerator = 1,
+                                const Objective &flow_scale_denominator = 1) {
+    validateProblemCapacityReplacement(
+        arc_capacities, terminal_capacities, preserve_flow_state,
+        flow_scale_numerator, flow_scale_denominator);
+
+    std::vector<Capacity> replacement_flow;
+    if (preserve_flow_state &&
+        flow_scale_numerator != flow_scale_denominator) {
+      replacement_flow.reserve(v_flow_.size());
+      for (const Capacity &flow : v_flow_) {
+        replacement_flow.push_back(checked_scale_capacity_ratio(
+            flow, flow_scale_numerator, flow_scale_denominator));
+      }
+    }
+
     arc_capacities_ = arc_capacities;
     terminal_capacities_ = terminal_capacities;
     if (!preserve_flow_state) {
       std::fill(v_flow_.begin(), v_flow_.end(), 0);
+    } else if (!replacement_flow.empty()) {
+      v_flow_ = std::move(replacement_flow);
     }
     std::fill(d_flow_.begin(), d_flow_.end(), 0);
     for (int i = 0; i < narc_; ++i) {
@@ -615,10 +656,13 @@ public:
   void replaceProblemCapacities(
       const std::vector<InputCapacity> &arc_capacities,
       const std::vector<InputCapacity> &terminal_capacities,
-      bool preserve_flow_state = true) {
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
     replaceProblemCapacities(capacity_vector_from(arc_capacities),
                              capacity_vector_from(terminal_capacities),
-                             preserve_flow_state);
+                             preserve_flow_state, flow_scale_numerator,
+                             flow_scale_denominator);
   }
 
   WarmState captureWarmState() const {

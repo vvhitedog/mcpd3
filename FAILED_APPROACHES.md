@@ -1,5 +1,15 @@
 # Failed Approaches
 
+## Persistent quantum state
+
+- Do not treat an arbitrary capacity refresh as a flow-scaling transition.
+  Scale local flow only when every internal forward and reverse capacity is
+  proven proportional; otherwise preserve/project or reset through the
+  existing unscaled path.
+- Do not automatically scale DD alpha, last-alpha, or momentum with local
+  internal flow. Those variables can include effects from objective terms that
+  did not receive the same multiplier.
+
 ## Capacity precision refactor
 
 - Do not raw-copy, `memset`, `realloc`, mmap, or binary-serialize BK nodes,

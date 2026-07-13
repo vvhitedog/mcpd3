@@ -1,5 +1,20 @@
 # Progress Log
 
+## 2026-07-13 15:47 PDT - Ratio-aware persistent flow refresh
+
+- Extended primal-dual and dual-decomposition capacity refresh APIs with an
+  optional widened rational flow scale.
+- Require every internal forward/reverse capacity to have the supplied ratio
+  before scaling; update signed arc flow with checked truncation toward zero,
+  recompute node balances, and rebuild BK residual state.
+- Validate all local partitions before applying a scaled DD refresh, so a
+  rejection leaves every partition unchanged.
+- Preserve alpha, last-alpha, and momentum independently from local flow.
+- Added tests for both flow signs, fractional ratios, reset precedence,
+  non-positive ratios, arithmetic overflow, non-proportional capacities,
+  partition forwarding, balance reconstruction, and unchanged dual state.
+- Passed both mcpd3 tests in all four capacity modes: 8/8 tests.
+
 ## 2026-07-13 11:37 PDT - Build-time capacity precision
 
 - Added `MCPD_CAPACITY_MODE=32|64|128|gmp`; 32-bit remains the default.

@@ -3322,6 +3322,100 @@ void primalDualCapacityRefreshCanResetFlowState() {
           "capacity refresh should reset arc flow when requested");
 }
 
+void primalDualCapacityRefreshScalesFlowStateByQuantumRatio() {
+  auto seeded_state = [](mcpd3::Capacity flow) {
+    mcpd3::PrimalDualMinCutSolver initial(
+        /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+        std::vector<int>{6, 6}, std::vector<int>{8, -8});
+    initial.solve();
+    auto state = initial.captureFlowWarmStart();
+    state.v_flow[0] = flow;
+    state.d_flow[0] = flow;
+    state.d_flow[1] = -flow;
+    return state;
+  };
+
+  for (const mcpd3::Capacity old_flow :
+       {mcpd3::Capacity{3}, mcpd3::Capacity{-3}}) {
+    mcpd3::PrimalDualMinCutSolver solver(
+        /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+        std::vector<int>{6, 6}, std::vector<int>{8, -8});
+    solver.restoreFlowWarmStart(seeded_state(old_flow));
+    solver.replaceProblemCapacities(
+        std::vector<int>{15, 15}, std::vector<int>{17, -19},
+        /*preserve_flow_state=*/true,
+        /*flow_scale_numerator=*/mcpd3::Objective{5},
+        /*flow_scale_denominator=*/mcpd3::Objective{2});
+
+    const auto scaled = solver.captureFlowWarmStart();
+    const mcpd3::Capacity expected =
+        old_flow > 0 ? mcpd3::Capacity{7} : mcpd3::Capacity{-7};
+    require(scaled.v_flow == std::vector<mcpd3::Capacity>{expected},
+            "capacity refresh should scale signed arc flow toward zero");
+    require(scaled.d_flow ==
+                std::vector<mcpd3::Capacity>{expected, -expected},
+            "capacity refresh should recompute balance from scaled flow");
+  }
+
+  mcpd3::PrimalDualMinCutSolver reset(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{6, 6}, std::vector<int>{8, -8});
+  reset.restoreFlowWarmStart(seeded_state(3));
+  reset.replaceProblemCapacities(
+      std::vector<int>{15, 15}, std::vector<int>{17, -19},
+      /*preserve_flow_state=*/false,
+      /*flow_scale_numerator=*/mcpd3::Objective{5},
+      /*flow_scale_denominator=*/mcpd3::Objective{2});
+  require(reset.captureFlowWarmStart().v_flow[0] == 0,
+          "flow reset should take precedence over a supplied scale ratio");
+
+  auto require_invalid_scale = [&](const mcpd3::Objective &numerator,
+                                   const mcpd3::Objective &denominator) {
+    mcpd3::PrimalDualMinCutSolver solver(
+        /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+        std::vector<int>{6, 6}, std::vector<int>{8, -8});
+    solver.restoreFlowWarmStart(seeded_state(3));
+    requireThrows(
+        [&] {
+          solver.replaceProblemCapacities(
+              std::vector<int>{15, 15}, std::vector<int>{17, -19}, true,
+              numerator, denominator);
+        },
+        "capacity refresh should reject a non-positive flow scale ratio");
+  };
+  require_invalid_scale(0, 1);
+  require_invalid_scale(1, 0);
+  require_invalid_scale(-1, 1);
+  require_invalid_scale(1, -1);
+
+  mcpd3::PrimalDualMinCutSolver non_proportional(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{6, 6}, std::vector<int>{8, -8});
+  non_proportional.restoreFlowWarmStart(seeded_state(3));
+  requireThrows(
+      [&] {
+        non_proportional.replaceProblemCapacities(
+            std::vector<int>{14, 15}, std::vector<int>{17, -19}, true,
+            mcpd3::Objective{5}, mcpd3::Objective{2});
+      },
+      "flow scaling should reject non-proportional internal capacities");
+
+  if (mcpd3::capacity_is_bounded()) {
+    mcpd3::PrimalDualMinCutSolver overflow(
+        /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+        std::vector<int>{6, 6}, std::vector<int>{8, -8});
+    overflow.restoreFlowWarmStart(seeded_state(3));
+    requireThrows(
+        [&] {
+          overflow.replaceProblemCapacities(
+              std::vector<int>{15, 15}, std::vector<int>{17, -19}, true,
+              std::numeric_limits<mcpd3::Objective>::max(),
+              mcpd3::Objective{1});
+        },
+        "flow scaling should reject widened ratio arithmetic overflow");
+  }
+}
+
 long binaryCutValue(const std::vector<int> &labels,
                     const std::vector<int> &arcs,
                     const std::vector<int> &arc_capacities,
@@ -3875,10 +3969,85 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
             "capacity refresh should preserve alpha and momentum state");
   }
 
+  const auto flow_before_scale = persistent.captureFlowWarmStart();
+  const auto constraints_before_scale = persistent.getConstraintSnapshots();
+  std::vector<int> doubled_arcs = refreshed_arcs;
+  for (int &capacity : doubled_arcs) {
+    capacity *= 2;
+  }
+  persistent.replaceProblemCapacities(
+      doubled_arcs, refreshed_terminals,
+      /*preserve_alpha_state=*/true,
+      /*preserve_flow_state=*/true,
+      /*flow_scale_numerator=*/mcpd3::Objective{2},
+      /*flow_scale_denominator=*/mcpd3::Objective{1});
+  const auto flow_after_scale = persistent.captureFlowWarmStart();
+  require(flow_after_scale.partitions.size() ==
+              flow_before_scale.partitions.size(),
+          "scaled DD flow state should preserve partition count");
+  for (size_t partition = 0;
+       partition < flow_before_scale.partitions.size(); ++partition) {
+    const auto &before = flow_before_scale.partitions[partition];
+    const auto &after = flow_after_scale.partitions[partition];
+    require(after.v_flow.size() == before.v_flow.size() &&
+                after.d_flow.size() == before.d_flow.size(),
+            "scaled DD flow state should preserve local shapes");
+    for (size_t i = 0; i < before.v_flow.size(); ++i) {
+      require(after.v_flow[i] == before.v_flow[i] * 2,
+              "DD refresh should forward the flow scale to every arc");
+    }
+    for (size_t i = 0; i < before.d_flow.size(); ++i) {
+      require(after.d_flow[i] == before.d_flow[i] * 2,
+              "DD refresh should rebuild every scaled local balance");
+    }
+  }
+  const auto constraints_after_scale = persistent.getConstraintSnapshots();
+  require(constraints_after_scale.size() == constraints_before_scale.size(),
+          "flow scaling should preserve DD constraint count");
+  for (size_t i = 0; i < constraints_before_scale.size(); ++i) {
+    require(constraints_after_scale[i].alpha ==
+                    constraints_before_scale[i].alpha &&
+                constraints_after_scale[i].last_alpha ==
+                    constraints_before_scale[i].last_alpha &&
+                constraints_after_scale[i].alpha_momentum ==
+                    constraints_before_scale[i].alpha_momentum,
+            "flow scaling must not scale alpha or momentum state");
+  }
+
+  const auto before_rejected_scale = persistent.captureFlowWarmStart();
+  std::vector<int> non_proportional_arcs = doubled_arcs;
+  for (int &capacity : non_proportional_arcs) {
+    capacity *= 2;
+  }
+  --non_proportional_arcs.back();
+  requireThrows(
+      [&] {
+        persistent.replaceProblemCapacities(
+            non_proportional_arcs, refreshed_terminals,
+            /*preserve_alpha_state=*/true,
+            /*preserve_flow_state=*/true,
+            /*flow_scale_numerator=*/mcpd3::Objective{2},
+            /*flow_scale_denominator=*/mcpd3::Objective{1});
+      },
+      "DD flow scaling should reject a non-proportional partition");
+  const auto after_rejected_scale = persistent.captureFlowWarmStart();
+  require(after_rejected_scale.partitions.size() ==
+              before_rejected_scale.partitions.size(),
+          "rejected DD flow scaling should preserve partition count");
+  for (size_t partition = 0;
+       partition < before_rejected_scale.partitions.size(); ++partition) {
+    const auto &before = before_rejected_scale.partitions[partition];
+    const auto &after = after_rejected_scale.partitions[partition];
+    require(after.arc_capacities == before.arc_capacities &&
+                after.terminal_capacities == before.terminal_capacities &&
+                after.v_flow == before.v_flow && after.d_flow == before.d_flow,
+            "rejected DD flow scaling must not partially mutate partitions");
+  }
+
   persistent.solve();
   mcpd3::DualDecomposition cold(
       /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
-      std::vector<int>{0, 1, 1, 2, 2, 3}, refreshed_arcs,
+      std::vector<int>{0, 1, 1, 2, 2, 3}, doubled_arcs,
       refreshed_terminals, options);
   cold.solve();
   require(persistent.getLastDisagreementCount() == 0,
@@ -3888,7 +4057,7 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
           "refreshed persistent objective should match cold solve");
 
   persistent.replaceProblemCapacities(
-      refreshed_arcs, refreshed_terminals,
+      doubled_arcs, refreshed_terminals,
       /*preserve_alpha_state=*/false,
       /*preserve_flow_state=*/true);
   for (const auto &constraint : persistent.getConstraintSnapshots()) {
@@ -4012,6 +4181,7 @@ int main() {
     primalDualFlowWarmStartMatchesColdPromotedSolve();
     primalDualFlowWarmStartRejectsUnsafeReuse();
     primalDualCapacityRefreshCanResetFlowState();
+    primalDualCapacityRefreshScalesFlowStateByQuantumRatio();
     canonicalCutSelectionMatchesExhaustiveLatticeExtremes();
     referenceGuidedCutSelectionMatchesClosestExhaustiveOptimum();
     referenceGuidedCutSelectionValidatesLabels();
