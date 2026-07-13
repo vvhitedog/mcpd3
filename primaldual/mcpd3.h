@@ -397,6 +397,51 @@ public:
   }
 
   long getMinCutValue() const { return mincut_value_; }
+
+  long getCutValueForLabels(const std::vector<int> &labels) const {
+    if (labels.size() != static_cast<size_t>(nnode_)) {
+      throw std::invalid_argument(
+          "cut value label count must match the local node count");
+    }
+    long value = 0;
+    for (int i = 0; i < narc_; ++i) {
+      const int source = arcs_[2 * i];
+      const int target = arcs_[2 * i + 1];
+      if ((labels[source] != 0 && labels[source] != 1) ||
+          (labels[target] != 0 && labels[target] != 1)) {
+        throw std::invalid_argument("cut value labels must be binary");
+      }
+      if (labels[source] == 0 && labels[target] == 1) {
+        value += arc_capacities_[2 * i];
+      } else if (labels[source] == 1 && labels[target] == 0) {
+        value += arc_capacities_[2 * i + 1];
+      }
+    }
+    for (int i = 0; i < nnode_; ++i) {
+      if (labels[i] != 0 && labels[i] != 1) {
+        throw std::invalid_argument("cut value labels must be binary");
+      }
+      const int terminal_capacity = terminal_capacities_[i];
+      if (labels[i] == 0 && terminal_capacity < 0) {
+        value += -terminal_capacity;
+      } else if (labels[i] == 1 && terminal_capacity > 0) {
+        value += terminal_capacity;
+      }
+    }
+    size_t constraint_index = 0;
+    for (const auto &constraint : dual_decomposition_constraints_) {
+      long multiplier = 0;
+      for (const auto &arc_reference : constraint.source_arc_references) {
+        multiplier -= arc_reference->alpha;
+      }
+      for (const auto &arc_reference : constraint.target_arc_references) {
+        multiplier += arc_reference->alpha;
+      }
+      value += multiplier *
+               labels[dual_decomposition_local_indices_[constraint_index++]];
+    }
+    return value;
+  }
   int getRegularizationStrength() const { return regularization_str_; }
   long getLastRegularizationBudget() const { return last_regularization_budget_; }
   long getLastRegularizationContribution() const {
@@ -739,39 +784,7 @@ private:
   }
 
   void computeMinCutValueInitial() {
-    mincut_value_ = 0;
-    for (int i = 0; i < narc_; ++i) {
-      int s = arcs_[2 * i + 0];
-      int t = arcs_[2 * i + 1];
-      auto forward_capacity = arc_capacities_[2 * i + 0];
-      auto backward_capacity = arc_capacities_[2 * i + 1];
-      if (x_[s] == 0 && x_[t] == 1) {
-        mincut_value_ += forward_capacity;
-      } else if (x_[s] == 1 && x_[t] == 0) {
-        mincut_value_ += backward_capacity;
-      }
-    }
-    for (int i = 0; i < nnode_; ++i) {
-      auto terminal_capacity = terminal_capacities_[i];
-      if (x_[i] == 0 && terminal_capacity < 0) {
-        mincut_value_ += -terminal_capacity;
-      } else if (x_[i] == 1 && terminal_capacity > 0) {
-        mincut_value_ += terminal_capacity;
-      }
-    }
-    // add dual decomposition node potential terms (when/if applicable)
-    size_t i = 0;
-    for (const auto &constraint : dual_decomposition_constraints_) {
-      long lagrange_multiplier_term = 0;
-      for (const auto &arc_reference : constraint.source_arc_references) {
-        lagrange_multiplier_term -= arc_reference->alpha;
-      }
-      for (const auto &arc_reference : constraint.target_arc_references) {
-        lagrange_multiplier_term += arc_reference->alpha;
-      }
-      mincut_value_ +=
-          lagrange_multiplier_term * x_[dual_decomposition_local_indices_[i++]];
-    }
+    mincut_value_ = getCutValueForLabels(x_);
   }
 
   void initializeMaxflowGraph() {

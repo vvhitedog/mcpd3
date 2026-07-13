@@ -37,6 +37,7 @@
 #include <decomp/constraint.h>
 #include <decomp/lower_bound_certificate.h>
 #include <decomp/partition_worker.h>
+#include <decomp/target_alpha_initialization.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
@@ -120,6 +121,8 @@ struct DualDecompositionOptions {
   ReferenceCutSelection reference_cut_selection =
       ReferenceCutSelection::CLOSEST_EXACT;
   long reference_cut_check_interval = 1;
+  std::vector<int> target_alpha_reference_labels;
+  double target_alpha_initialization_damping = 0.0;
 };
 
 class DualDecomposition {
@@ -163,6 +166,11 @@ public:
         last_regularization_active_sink_count_(0),
         total_optimization_iterations_(0),
         objective_scale_promotion_count_(0),
+        target_alpha_initialization_count_(0),
+        target_alpha_initialization_nonzero_count_(0),
+        target_alpha_initialization_total_abs_delta_(0),
+        target_alpha_initialization_max_abs_delta_(0),
+        target_alpha_initialization_pending_(false),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
     initializeDecomposition();
@@ -264,6 +272,18 @@ public:
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
   }
+  long getTargetAlphaInitializationCount() const {
+    return target_alpha_initialization_count_;
+  }
+  long getTargetAlphaInitializationNonzeroCount() const {
+    return target_alpha_initialization_nonzero_count_;
+  }
+  long getTargetAlphaInitializationTotalAbsDelta() const {
+    return target_alpha_initialization_total_abs_delta_;
+  }
+  long getTargetAlphaInitializationMaxAbsDelta() const {
+    return target_alpha_initialization_max_abs_delta_;
+  }
   int getConfiguredNumOptimizationScales() const {
     return options_.num_optimization_scales;
   }
@@ -288,6 +308,12 @@ public:
     options_.max_step_size = initial_step_size;
     options_.exhaust_regularized_scale_iterations =
         exhaust_regularized_scale_iterations;
+  }
+  void configureTargetAlphaInitialization(std::vector<int> reference_labels,
+                                          double damping) {
+    validateTargetAlphaInitialization(reference_labels, damping);
+    options_.target_alpha_reference_labels = std::move(reference_labels);
+    options_.target_alpha_initialization_damping = damping;
   }
   const std::vector<PartitionPackage> &getPartitionPackages() const {
     if (!options_.emit_partition_packages) {
@@ -589,6 +615,13 @@ public:
     long step_size = options_.initial_step_size;
     scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
+    target_alpha_initialization_count_ = 0;
+    target_alpha_initialization_nonzero_count_ = 0;
+    target_alpha_initialization_total_abs_delta_ = 0;
+    target_alpha_initialization_max_abs_delta_ = 0;
+    target_alpha_initialization_pending_ =
+        options_.target_alpha_initialization_damping > 0.0 &&
+        !options_.target_alpha_reference_labels.empty();
     int iscale = 0;
     while (iscale < options_.num_optimization_scales && step_size >= 1) {
       OptimizationStatus status;
@@ -753,6 +786,10 @@ public:
         update_stats =
             runLagrangeMultipliersUpdateStep(step_size, use_momentum,
                                              lower_bound);
+        if (target_alpha_initialization_pending_ &&
+            update_stats.disagreement_count > 0) {
+          applyTargetAlphaInitialization();
+        }
         disagreeing_global_indices_ =
             std::move(update_stats.disagreeing_global_indices);
           });
@@ -1063,6 +1100,116 @@ private:
     return value * scale;
   }
 
+  static long checkedAddLong(long lhs, long rhs) {
+    if ((rhs > 0 && lhs > std::numeric_limits<long>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<long>::min() - rhs)) {
+      throw std::overflow_error("target alpha initialization overflow");
+    }
+    return lhs + rhs;
+  }
+
+  void validateTargetAlphaInitialization(
+      const std::vector<int> &reference_labels, double damping) const {
+    if (!std::isfinite(damping) || damping < 0.0) {
+      throw std::runtime_error(
+          "target alpha initialization damping must be finite and "
+          "nonnegative");
+    }
+    if (damping > 0.0 &&
+        reference_labels.size() != static_cast<size_t>(nnode_)) {
+      throw std::runtime_error(
+          "target alpha reference label count must match the global node "
+          "count");
+    }
+    for (const int label : reference_labels) {
+      if (label != 0 && label != 1) {
+        throw std::runtime_error(
+            "target alpha reference labels must be binary");
+      }
+    }
+  }
+
+  void applyTargetAlphaInitialization() {
+    target_alpha_initialization_pending_ = false;
+    ++target_alpha_initialization_count_;
+
+    std::vector<std::vector<unsigned char>> eligible(solvers_.size());
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      eligible[partition].assign(
+          static_cast<size_t>(min_cut_sub_graphs_[partition].graph.nnode), 0);
+    }
+    for (const auto &[global_index, constraints] : constraint_arc_map_) {
+      (void)global_index;
+      for (const auto &constraint : constraints) {
+        eligible[constraint.partition_index_source]
+                [constraint.local_index_source] = 1;
+        eligible[constraint.partition_index_target]
+                [constraint.local_index_target] = 1;
+      }
+    }
+
+    std::vector<std::vector<double>> proposals(solvers_.size());
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      const auto &mapping = min_cut_sub_graphs_[partition].local_to_global;
+      std::vector<int> target_labels;
+      std::vector<int> current_labels;
+      target_labels.reserve(mapping.size());
+      current_labels.reserve(mapping.size());
+      for (size_t local = 0; local < mapping.size(); ++local) {
+        target_labels.push_back(options_.target_alpha_reference_labels[
+            static_cast<size_t>(mapping[local])]);
+        current_labels.push_back(
+            solvers_[partition]->getMinCutSolution(static_cast<int>(local)));
+      }
+      proposals[partition] = targetAlphaUnaryProposal(
+          solvers_[partition]->getCutValueForLabels(target_labels),
+          solvers_[partition]->getMinCutValue(), target_labels, current_labels,
+          eligible[partition], options_.target_alpha_initialization_damping);
+    }
+
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      (void)global_index;
+      std::set<int> partitions;
+      for (const auto &constraint : constraints) {
+        partitions.insert(constraint.partition_index_source);
+        partitions.insert(constraint.partition_index_target);
+      }
+      const double copy_count = static_cast<double>(partitions.size());
+      for (auto &constraint : constraints) {
+        const double source_proposal =
+            proposals[constraint.partition_index_source]
+                     [constraint.local_index_source];
+        const double target_proposal =
+            proposals[constraint.partition_index_target]
+                     [constraint.local_index_target];
+        const double unrounded_delta =
+            (target_proposal - source_proposal) / copy_count;
+        if (!std::isfinite(unrounded_delta) ||
+            unrounded_delta >
+                static_cast<double>(std::numeric_limits<long>::max()) ||
+            unrounded_delta <
+                static_cast<double>(std::numeric_limits<long>::min())) {
+          throw std::overflow_error(
+              "target alpha initialization delta overflow");
+        }
+        const long delta = static_cast<long>(std::llround(unrounded_delta));
+        if (delta == 0) {
+          continue;
+        }
+        constraint.alpha = checkedAddLong(constraint.alpha, delta);
+        const long abs_delta =
+            delta == std::numeric_limits<long>::min()
+                ? std::numeric_limits<long>::max()
+                : std::abs(delta);
+        target_alpha_initialization_total_abs_delta_ = checkedAddLong(
+            target_alpha_initialization_total_abs_delta_, abs_delta);
+        target_alpha_initialization_max_abs_delta_ =
+            std::max(target_alpha_initialization_max_abs_delta_, abs_delta);
+        ++target_alpha_initialization_nonzero_count_;
+      }
+    }
+  }
+
   static int checkedScaleInt(int value, long scale,
                              bool saturate_capacity_overflow = false) {
     const long result = checkedScaleLong(value, scale);
@@ -1165,6 +1312,9 @@ private:
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
     }
+    validateTargetAlphaInitialization(
+        options_.target_alpha_reference_labels,
+        options_.target_alpha_initialization_damping);
     if (!options_.reference_cut_labels.empty()) {
       if (options_.reference_cut_check_interval <= 0) {
         throw std::runtime_error(
@@ -1667,7 +1817,11 @@ private:
       auto release_start = std::chrono::steady_clock::now();
       int release_done = 0;
       for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
-        min_cut_sub_graph.releaseConstructionMaps();
+        if (options_.target_alpha_initialization_damping == 0.0) {
+          min_cut_sub_graph.releaseConstructionMaps();
+        } else {
+          min_cut_sub_graph.releaseGlobalToLocalMap();
+        }
         ++release_done;
         dualdecomp_progress_report("dd_release_construction_maps",
                                    release_done, npartition_, release_start);
@@ -1816,6 +1970,11 @@ private:
       global_to_local_map.clear();
       global_to_local_map.shrink_to_fit();
     }
+
+    void releaseGlobalToLocalMap() {
+      global_to_local_map.clear();
+      global_to_local_map.shrink_to_fit();
+    }
   };
 
   std::vector<MinCutSubGraph> min_cut_sub_graphs_;
@@ -1843,6 +2002,11 @@ private:
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
   long objective_scale_promotion_count_;
+  long target_alpha_initialization_count_;
+  long target_alpha_initialization_nonzero_count_;
+  long target_alpha_initialization_total_abs_delta_;
+  long target_alpha_initialization_max_abs_delta_;
+  bool target_alpha_initialization_pending_;
   bool warned_regularization_budget_exceeded_;
   std::list<int> disagreeing_global_indices_;
 

@@ -26,6 +26,7 @@
 #include <decomp/dualdecomp.h>
 #include <decomp/partition_coordinator.h>
 #include <decomp/partition_worker.h>
+#include <decomp/target_alpha_initialization.h>
 #include <graph/dimacs.h>
 #include <primaldual/mcpd3.h>
 
@@ -46,6 +47,64 @@ void requireThrows(Function function, const std::string &message) {
     threw = true;
   }
   require(threw, message);
+}
+
+void targetAlphaUnaryProposalUsesObjectiveDeficit() {
+  const auto proposal = mcpd3::targetAlphaUnaryProposal(
+      /*target_value=*/9, /*current_value=*/5,
+      /*target_labels=*/std::vector<int>{1, 1, 0},
+      /*current_labels=*/std::vector<int>{0, 1, 0},
+      /*eligible=*/std::vector<unsigned char>{1, 1, 1},
+      /*damping=*/1.0);
+  require(proposal == std::vector<double>({-4.0, 0.0, 0.0}),
+          "target alpha proposal should close the observed objective deficit");
+
+  const auto split = mcpd3::targetAlphaUnaryProposal(
+      /*target_value=*/11, /*current_value=*/5,
+      /*target_labels=*/std::vector<int>{1, 0},
+      /*current_labels=*/std::vector<int>{0, 1},
+      /*eligible=*/std::vector<unsigned char>{1, 1},
+      /*damping=*/0.5);
+  require(split == std::vector<double>({-1.5, 1.5}),
+          "target alpha proposal should split a damped deficit over changes");
+}
+
+void targetAlphaUnaryProposalHandlesInactiveCases() {
+  require(mcpd3::targetAlphaUnaryProposal(
+              /*target_value=*/5, /*current_value=*/5,
+              /*target_labels=*/std::vector<int>{1},
+              /*current_labels=*/std::vector<int>{0},
+              /*eligible=*/std::vector<unsigned char>{1},
+              /*damping=*/1.0) == std::vector<double>({0.0}),
+          "a zero objective deficit should not change alpha");
+  require(mcpd3::targetAlphaUnaryProposal(
+              /*target_value=*/9, /*current_value=*/5,
+              /*target_labels=*/std::vector<int>{1, 0},
+              /*current_labels=*/std::vector<int>{0, 0},
+              /*eligible=*/std::vector<unsigned char>{0, 1},
+              /*damping=*/1.0) == std::vector<double>({0.0, 0.0}),
+          "interior-only target changes should not change boundary alpha");
+  require(mcpd3::targetAlphaUnaryProposal(
+              /*target_value=*/9, /*current_value=*/5,
+              /*target_labels=*/std::vector<int>{1},
+              /*current_labels=*/std::vector<int>{0},
+              /*eligible=*/std::vector<unsigned char>{1},
+              /*damping=*/0.0) == std::vector<double>({0.0}),
+          "zero damping should disable target alpha initialization");
+  requireThrows(
+      [] {
+        (void)mcpd3::targetAlphaUnaryProposal(
+            9, 5, std::vector<int>{1}, std::vector<int>{},
+            std::vector<unsigned char>{1}, 1.0);
+      },
+      "target alpha proposal should reject mismatched label counts");
+  requireThrows(
+      [] {
+        (void)mcpd3::targetAlphaUnaryProposal(
+            9, 5, std::vector<int>{1}, std::vector<int>{0},
+            std::vector<unsigned char>{1}, -0.1);
+      },
+      "target alpha proposal should reject negative damping");
 }
 
 void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
@@ -3907,6 +3966,8 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
 
 int main() {
   try {
+    targetAlphaUnaryProposalUsesObjectiveDeficit();
+    targetAlphaUnaryProposalHandlesInactiveCases();
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
     solverMemoryEstimateReportsBkAndVectorBytes();
     streamingWorkerMatchesInProcessAcrossEviction();
