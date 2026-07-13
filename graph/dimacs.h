@@ -31,6 +31,10 @@ namespace mcpd3 {
 
 namespace _dimacs_implementation {
 
+using CapacityArgument = std::conditional_t<
+    (capacity_storage_bits() == 0 || capacity_storage_bits() > 64),
+    const Capacity &, Capacity>;
+
 inline bool progress_enabled() {
   const char *value = std::getenv("MCPD3_PROGRESS");
   return value != nullptr && value[0] != '\0' && std::string(value) != "0";
@@ -92,6 +96,46 @@ inline bool parse_int_token(const char *&p, int &value) {
 
 inline bool parse_capacity_token(const char *&p, Capacity &value) {
   p = skip_space(p);
+#if defined(MCPD_CAPACITY_MODE_32) || defined(MCPD_CAPACITY_MODE_64)
+  const char *token_begin = p;
+  bool negative = false;
+  if (*p == '-' || *p == '+') {
+    negative = *p == '-';
+    ++p;
+  }
+  const char *digits_begin = p;
+  if (!std::isdigit(static_cast<unsigned char>(*p))) {
+    return false;
+  }
+
+#if defined(MCPD_CAPACITY_MODE_32)
+  using ParseUnsigned = std::uint64_t;
+#else
+  using ParseUnsigned = __uint128_t;
+#endif
+  const ParseUnsigned positive_limit = static_cast<ParseUnsigned>(
+      std::numeric_limits<Capacity>::max());
+  const ParseUnsigned limit = negative ? positive_limit + 1 : positive_limit;
+  ParseUnsigned magnitude = 0;
+  while (std::isdigit(static_cast<unsigned char>(*p))) {
+    magnitude = magnitude * 10 + static_cast<unsigned>(*p - '0');
+    ++p;
+  }
+  if (p - digits_begin > std::numeric_limits<Capacity>::digits10 + 1) {
+    return parse_capacity_chars(token_begin, p, value);
+  }
+  if (magnitude > limit) {
+    return false;
+  }
+  if (negative) {
+    value = magnitude == positive_limit + 1
+                ? std::numeric_limits<Capacity>::min()
+                : static_cast<Capacity>(-static_cast<Capacity>(magnitude));
+  } else {
+    value = static_cast<Capacity>(magnitude);
+  }
+  return true;
+#else
   const char *begin = p;
   if (*p == '-' || *p == '+') {
     ++p;
@@ -103,12 +147,8 @@ inline bool parse_capacity_token(const char *&p, Capacity &value) {
   if (p == digits) {
     return false;
   }
-  try {
-    value = parse_capacity(std::string(begin, p));
-  } catch (const std::exception &) {
-    return false;
-  }
-  return true;
+  return parse_capacity_chars(begin, p, value);
+#endif
 }
 
 inline bool parse_char_token(const char *&p, char &value) {
@@ -228,7 +268,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
   g.nnode = 0;
   std::unordered_map<int, std::unordered_map<int, Capacity>> arc_adjacency;
 
-  auto arc_op = [&](int s, int t, const Capacity &cap) {
+  auto arc_op = [&](int s, int t,
+                    _dimacs_implementation::CapacityArgument cap) {
     g.nnode = std::max(g.nnode, s + 1);
     g.nnode = std::max(g.nnode, t + 1);
     if (arc_adjacency[s].find(t) == arc_adjacency[s].end()) {
@@ -243,7 +284,8 @@ MinCutGraph read_dimacs(const std::string &filename) {
   };
 
   Objective imbalance = 0;
-  auto term_op = [&](bool is_source, int n, const Capacity &cap) {
+  auto term_op = [&](bool is_source, int n,
+                     _dimacs_implementation::CapacityArgument cap) {
     g.nnode = std::max(g.nnode, n + 1);
     g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {
@@ -302,7 +344,8 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   g.nnode = 0;
   g.narc = 0;
 
-  auto arc_op = [&](int s, int t, const Capacity &cap) {
+  auto arc_op = [&](int s, int t,
+                    _dimacs_implementation::CapacityArgument cap) {
     g.nnode = std::max(g.nnode, s + 1);
     g.nnode = std::max(g.nnode, t + 1);
     g.arc_capacities.push_back(cap);
@@ -313,7 +356,8 @@ MinCutGraph read_dimacs_directed_streaming(const std::string &filename) {
   };
 
   Objective imbalance = 0;
-  auto term_op = [&](bool is_source, int n, const Capacity &cap) {
+  auto term_op = [&](bool is_source, int n,
+                     _dimacs_implementation::CapacityArgument cap) {
     g.nnode = std::max(g.nnode, n + 1);
     g.terminal_capacities.resize(g.nnode, 0);
     if (is_source) {

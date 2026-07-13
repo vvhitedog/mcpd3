@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -139,19 +140,145 @@ inline Integer parse_bounded_integer(const std::string &text) {
   return parsed.template convert_to<Integer>();
 }
 
-inline Capacity parse_capacity(const std::string &text) {
-#if defined(MCPD_CAPACITY_MODE_GMP)
-  try {
-    return Capacity(text);
-  } catch (const std::exception &) {
-    throw std::invalid_argument("invalid decimal capacity: " + text);
+template <typename Integer>
+inline bool parse_bounded_integer_chars(const char *begin, const char *end,
+                                        Integer &value) {
+  if (begin == end) {
+    return false;
   }
+
+  bool negative = false;
+  if (*begin == '-' || *begin == '+') {
+    negative = *begin == '-';
+    ++begin;
+  }
+  if (begin == end) {
+    return false;
+  }
+
+  using Unsigned = std::make_unsigned_t<Integer>;
+  const Unsigned positive_limit =
+      static_cast<Unsigned>(std::numeric_limits<Integer>::max());
+  const Unsigned limit =
+      negative ? static_cast<Unsigned>(positive_limit + 1) : positive_limit;
+  Unsigned magnitude = 0;
+  for (const char *cursor = begin; cursor != end; ++cursor) {
+    if (*cursor < '0' || *cursor > '9') {
+      return false;
+    }
+    const Unsigned digit = static_cast<Unsigned>(*cursor - '0');
+    if (digit > limit || magnitude > (limit - digit) / 10) {
+      return false;
+    }
+    magnitude = static_cast<Unsigned>(magnitude * 10 + digit);
+  }
+
+  if (negative) {
+    if (magnitude == static_cast<Unsigned>(positive_limit + 1)) {
+      value = std::numeric_limits<Integer>::min();
+    } else {
+      value = static_cast<Integer>(-static_cast<Integer>(magnitude));
+    }
+  } else {
+    value = static_cast<Integer>(magnitude);
+  }
+  return true;
+}
+
+inline bool parse_capacity_chars(const char *begin, const char *end,
+                                 Capacity &value) {
+#if defined(MCPD_CAPACITY_MODE_GMP)
+  if (begin == end) {
+    return false;
+  }
+  const char *cursor = begin;
+  const char *parse_begin = begin;
+  if (*cursor == '-' || *cursor == '+') {
+    if (*cursor == '+') {
+      parse_begin = cursor + 1;
+    }
+    ++cursor;
+  }
+  if (cursor == end) {
+    return false;
+  }
+  for (; cursor != end; ++cursor) {
+    if (*cursor < '0' || *cursor > '9') {
+      return false;
+    }
+  }
+  try {
+    value = Capacity(std::string(parse_begin, end));
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+#elif defined(MCPD_CAPACITY_MODE_32) || defined(MCPD_CAPACITY_MODE_64)
+  if (begin == end) {
+    return false;
+  }
+  if (*begin == '+') {
+    ++begin;
+  }
+  if (begin == end) {
+    return false;
+  }
+  const auto result = std::from_chars(begin, end, value, 10);
+  return result.ec == std::errc{} && result.ptr == end;
 #else
-  return parse_bounded_integer<Capacity>(text);
+  return parse_bounded_integer_chars(begin, end, value);
 #endif
 }
 
-template <typename Integer>
+inline Capacity parse_capacity(const std::string &text) {
+  Capacity value = 0;
+  if (!parse_capacity_chars(text.data(), text.data() + text.size(), value)) {
+    throw std::invalid_argument("invalid or out-of-range decimal capacity: " +
+                                text);
+  }
+  return value;
+}
+
+template <typename Integer,
+          std::enable_if_t<std::is_integral_v<std::decay_t<Integer>>, int> = 0>
+inline Capacity capacity_from_integer(Integer value) {
+#if defined(MCPD_CAPACITY_MODE_GMP)
+  if constexpr (std::is_signed_v<Integer> && sizeof(Integer) <= sizeof(long)) {
+    return Capacity(static_cast<long>(value));
+  } else if constexpr (std::is_unsigned_v<Integer> &&
+                       sizeof(Integer) <= sizeof(unsigned long)) {
+    return Capacity(static_cast<unsigned long>(value));
+  } else {
+    return parse_capacity(integer_to_string(value));
+  }
+#else
+  if constexpr (std::is_signed_v<Integer>) {
+    if constexpr (std::numeric_limits<Integer>::digits <=
+                  std::numeric_limits<Capacity>::digits) {
+      return static_cast<Capacity>(value);
+    } else {
+      if (value < static_cast<Integer>(std::numeric_limits<Capacity>::min()) ||
+          value > static_cast<Integer>(std::numeric_limits<Capacity>::max())) {
+        throw std::overflow_error("integer does not fit capacity type");
+      }
+      return static_cast<Capacity>(value);
+    }
+  } else {
+    if constexpr (std::numeric_limits<Integer>::digits <=
+                  std::numeric_limits<Capacity>::digits) {
+      return static_cast<Capacity>(value);
+    } else {
+      if (value > static_cast<Integer>(std::numeric_limits<Capacity>::max())) {
+        throw std::overflow_error("integer does not fit capacity type");
+      }
+      return static_cast<Capacity>(value);
+    }
+  }
+#endif
+}
+
+template <typename Integer,
+          std::enable_if_t<!std::is_integral_v<std::decay_t<Integer>>, int> = 0>
 inline Capacity capacity_from_integer(const Integer &value) {
   return parse_capacity(integer_to_string(value));
 }

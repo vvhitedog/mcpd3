@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +29,85 @@ void precisionMetadataMatchesConfiguredType() {
               mcpd3::capacity_storage_bits() == 128 ||
               mcpd3::capacity_storage_bits() == 0,
           "capacity storage bits must identify a supported mode");
+}
+
+bool tryParseCapacity(const std::string &text, mcpd3::Capacity &value) {
+  return mcpd3::parse_capacity_chars(text.data(), text.data() + text.size(),
+                                     value);
+}
+
+void capacityCharacterParserHandlesSignsAndBounds() {
+  mcpd3::Capacity parsed = 0;
+  require(tryParseCapacity("0", parsed) && parsed == 0,
+          "capacity parser must accept zero");
+  require(tryParseCapacity("+17", parsed) && parsed == 17,
+          "capacity parser must accept an explicit positive sign");
+  require(tryParseCapacity("-17", parsed) && parsed == -17,
+          "capacity parser must accept negative values");
+
+  if (mcpd3::capacity_is_bounded()) {
+    const auto minimum = std::numeric_limits<mcpd3::Capacity>::min();
+    const auto maximum = std::numeric_limits<mcpd3::Capacity>::max();
+    require(tryParseCapacity(mcpd3::integer_to_string(minimum), parsed) &&
+                parsed == minimum,
+            "capacity parser must accept the configured minimum");
+    require(tryParseCapacity(mcpd3::integer_to_string(maximum), parsed) &&
+                parsed == maximum,
+            "capacity parser must accept the configured maximum");
+
+    const boost::multiprecision::cpp_int too_low =
+        boost::multiprecision::cpp_int(mcpd3::integer_to_string(minimum)) - 1;
+    const boost::multiprecision::cpp_int too_high =
+        boost::multiprecision::cpp_int(mcpd3::integer_to_string(maximum)) + 1;
+    require(!tryParseCapacity(too_low.convert_to<std::string>(), parsed),
+            "capacity parser must reject a value below the configured range");
+    require(!tryParseCapacity(too_high.convert_to<std::string>(), parsed),
+            "capacity parser must reject a value above the configured range");
+  }
+}
+
+void capacityCharacterParserRejectsMalformedValues() {
+  mcpd3::Capacity parsed = 0;
+  for (const std::string &text : {"", "+", "-", "1x", " 1", "1 "}) {
+    require(!tryParseCapacity(text, parsed),
+            "capacity parser must reject malformed input: '" + text + "'");
+  }
+}
+
+void nativeIntegerCapacityConversionChecksRange() {
+  require(mcpd3::capacity_from_integer(17L) == 17,
+          "signed native integer conversion must preserve its value");
+  require(mcpd3::capacity_from_integer(23UL) == 23,
+          "unsigned native integer conversion must preserve its value");
+
+#if defined(MCPD_CAPACITY_MODE_32)
+  bool high_threw = false;
+  bool low_threw = false;
+  try {
+    (void)mcpd3::capacity_from_integer(
+        static_cast<long>(std::numeric_limits<mcpd3::Capacity>::max()) + 1);
+  } catch (const std::overflow_error &) {
+    high_threw = true;
+  }
+  try {
+    (void)mcpd3::capacity_from_integer(
+        static_cast<long>(std::numeric_limits<mcpd3::Capacity>::min()) - 1);
+  } catch (const std::overflow_error &) {
+    low_threw = true;
+  }
+  require(high_threw && low_threw,
+          "native integer conversion must reject 32-bit overflow");
+#elif defined(MCPD_CAPACITY_MODE_64)
+  bool high_threw = false;
+  try {
+    (void)mcpd3::capacity_from_integer(
+        std::numeric_limits<unsigned long>::max());
+  } catch (const std::overflow_error &) {
+    high_threw = true;
+  }
+  require(high_threw,
+          "native integer conversion must reject unsigned 64-bit overflow");
+#endif
 }
 
 void maximalCapacityRoundTripsAndSolves() {
@@ -181,6 +261,9 @@ void maximalCapacitySurvivesCsrStorage() {
 int main() {
   try {
     precisionMetadataMatchesConfiguredType();
+    capacityCharacterParserHandlesSignsAndBounds();
+    capacityCharacterParserRejectsMalformedValues();
+    nativeIntegerCapacityConversionChecksRange();
     maximalCapacityRoundTripsAndSolves();
     configuredCapacitySurvivesGraphReallocation();
     maximalCapacitySurvivesMcpd3SolverAndWorkerStorage();
