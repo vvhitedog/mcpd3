@@ -1332,17 +1332,25 @@ private:
       const Capacity forward_capacity = original_arc_capacities_[2 * i + 0];
       const Capacity backward_capacity = original_arc_capacities_[2 * i + 1];
       if (!labels[s] && labels[t]) {
-        cut_value += forward_capacity;
+        cut_value = checked_add(
+            cut_value, widen_capacity(forward_capacity),
+            "primal cut objective overflow");
       } else if (labels[s] && !labels[t]) {
-        cut_value += backward_capacity;
+        cut_value = checked_add(
+            cut_value, widen_capacity(backward_capacity),
+            "primal cut objective overflow");
       }
     }
     for (int i = 0; i < nnode_; ++i) {
       const Capacity terminal_capacity = original_terminal_capacities_[i];
       if (!labels[i] && terminal_capacity < 0) {
-        cut_value += -terminal_capacity;
+        cut_value = checked_add(
+            cut_value, absolute_capacity(terminal_capacity),
+            "primal terminal objective overflow");
       } else if (labels[i] && terminal_capacity > 0) {
-        cut_value += terminal_capacity;
+        cut_value = checked_add(
+            cut_value, widen_capacity(terminal_capacity),
+            "primal terminal objective overflow");
       }
     }
     return cut_value;

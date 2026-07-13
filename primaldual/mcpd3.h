@@ -394,17 +394,20 @@ public:
 
   Objective getMaxFlowValue() const {
     Objective maxflow = 0;
-    std::vector<Capacity> node_balance(nnode_, 0);
+    std::vector<Objective> node_balance(nnode_, 0);
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
       const Capacity flow = v_flow_[i];
-      node_balance[s] += flow;
-      node_balance[t] -= flow;
+      node_balance[s] = checked_add(
+          node_balance[s], widen_capacity(flow), "maxflow balance overflow");
+      node_balance[t] = checked_subtract(
+          node_balance[t], widen_capacity(flow), "maxflow balance overflow");
     }
     for (int i = 0; i < nnode_; ++i) {
       if (node_balance[i] > 0) {
-        maxflow += widen_capacity(node_balance[i]);
+        maxflow = checked_add(maxflow, node_balance[i],
+                              "maxflow objective overflow");
       }
       // TODO: the imbalance needs to be accounted for
     }
@@ -590,8 +593,10 @@ public:
       v_flow_[i] = std::max(lower, std::min(upper, v_flow_[i]));
       const int source = arcs_[2 * i];
       const int target = arcs_[2 * i + 1];
-      d_flow_[source] += v_flow_[i];
-      d_flow_[target] -= v_flow_[i];
+      d_flow_[source] = checked_add(
+          d_flow_[source], v_flow_[i], "warm-start node balance overflow");
+      d_flow_[target] = checked_subtract(
+          d_flow_[target], v_flow_[i], "warm-start node balance overflow");
     }
 
     maxflow_graph_.reset();
@@ -694,10 +699,14 @@ private:
     const auto &constraint = dual_decomposition_constraints_[constraint_index];
     Capacity lagrange_multiplier_term = 0;
     for (const auto &arc_reference : constraint.source_arc_references) {
-      lagrange_multiplier_term -= arc_reference->alpha;
+      lagrange_multiplier_term = checked_subtract(
+          lagrange_multiplier_term, arc_reference->alpha,
+          "lagrange multiplier term overflow");
     }
     for (const auto &arc_reference : constraint.target_arc_references) {
-      lagrange_multiplier_term += arc_reference->alpha;
+      lagrange_multiplier_term = checked_add(
+          lagrange_multiplier_term, arc_reference->alpha,
+          "lagrange multiplier term overflow");
     }
     return lagrange_multiplier_term;
   }
@@ -747,31 +756,38 @@ private:
       auto forward_capacity = arc_capacities_[2 * i + 0];
       auto backward_capacity = arc_capacities_[2 * i + 1];
       if (x_[s] == 0 && x_[t] == 1) {
-        mincut_value_ += forward_capacity;
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(forward_capacity),
+            "mincut objective overflow");
       } else if (x_[s] == 1 && x_[t] == 0) {
-        mincut_value_ += backward_capacity;
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(backward_capacity),
+            "mincut objective overflow");
       }
     }
     for (int i = 0; i < nnode_; ++i) {
       auto terminal_capacity = terminal_capacities_[i];
       if (x_[i] == 0 && terminal_capacity < 0) {
-        mincut_value_ += -terminal_capacity;
+        mincut_value_ = checked_add(
+            mincut_value_, absolute_capacity(terminal_capacity),
+            "mincut terminal objective overflow");
       } else if (x_[i] == 1 && terminal_capacity > 0) {
-        mincut_value_ += terminal_capacity;
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(terminal_capacity),
+            "mincut terminal objective overflow");
       }
     }
     // add dual decomposition node potential terms (when/if applicable)
     size_t i = 0;
     for (const auto &constraint : dual_decomposition_constraints_) {
-      Capacity lagrange_multiplier_term = 0;
-      for (const auto &arc_reference : constraint.source_arc_references) {
-        lagrange_multiplier_term -= arc_reference->alpha;
+      (void)constraint;
+      const Capacity lagrange_multiplier_term = lagrangeMultiplierTerm(i);
+      if (x_[dual_decomposition_local_indices_[i]]) {
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(lagrange_multiplier_term),
+            "mincut lagrange objective overflow");
       }
-      for (const auto &arc_reference : constraint.target_arc_references) {
-        lagrange_multiplier_term += arc_reference->alpha;
-      }
-      mincut_value_ +=
-          lagrange_multiplier_term * x_[dual_decomposition_local_indices_[i++]];
+      ++i;
     }
   }
 
@@ -788,14 +804,17 @@ private:
   arcGradients(const Capacity &forward_capacity,
                const Capacity &backward_capacity,
                const Capacity &flow) const {
-    Capacity pos = flow + forward_capacity;
-    Capacity neg = flow - backward_capacity;
+    Capacity pos = checked_add(flow, forward_capacity,
+                               "forward residual capacity overflow");
+    Capacity neg = checked_subtract(flow, backward_capacity,
+                                    "backward residual capacity overflow");
     return {pos, neg};
   }
 
   Capacity nodeGradient(const Capacity &terminal_capacity,
                         const Capacity &flow) const {
-    return flow + terminal_capacity;
+    return checked_add(flow, terminal_capacity,
+                       "terminal residual capacity overflow");
   }
 
   void initializeFlow() {
@@ -819,9 +838,11 @@ private:
         }
       }
       if (new_flow != 0) {
-        v_flow_[i] += new_flow;
-        d_flow_[s] += new_flow;
-        d_flow_[t] -= new_flow;
+        v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
+        d_flow_[s] = checked_add(d_flow_[s], new_flow,
+                                 "node flow balance overflow");
+        d_flow_[t] = checked_subtract(d_flow_[t], new_flow,
+                                      "node flow balance overflow");
       }
       std::tie(pos, neg) =
           arcGradients(forward_capacity, backward_capacity, v_flow_[i]);
@@ -836,7 +857,8 @@ private:
   void updateNodeTerminal(int i, Capacity pos, bool do_update) {
     if (do_update) {
       auto existing_pos = maxflow_graph_.get_trcap(i);
-      pos += existing_pos;
+      pos = checked_add(pos, existing_pos,
+                        "terminal residual capacity overflow");
       if (!is_first_iteration_) {
         if (existing_pos != pos) {
           maxflow_graph_.set_trcap(i, pos);
@@ -889,8 +911,10 @@ private:
          ++cache_index) {
       const int i = dual_decomposition_local_indices_[cache_index];
       auto pos = nodeGradient(terminal_capacities_[i], d_flow_[i]);
-      pos += cached_lagrange_multipliers_[cache_index];
-      pos += regularizationTerm(cache_index);
+      pos = checked_add(pos, cached_lagrange_multipliers_[cache_index],
+                        "terminal lagrange capacity overflow");
+      pos = checked_add(pos, regularizationTerm(cache_index),
+                        "terminal regularization capacity overflow");
       updateNodeTerminal(i, pos, false);
     }
   }
@@ -900,7 +924,8 @@ private:
     size_t cache_index = 0;
     for (const auto &index : dual_decomposition_local_indices_) {
       auto pos = cached_lagrange_multipliers_[cache_index];
-      pos += regularizationTerm(cache_index);
+      pos = checked_add(pos, regularizationTerm(cache_index),
+                        "terminal regularization capacity overflow");
       cache_index++;
       updateNodeTerminal(index, pos, true);
     }
@@ -1093,7 +1118,7 @@ private:
       throw std::overflow_error(
           "reference-guided cut is too large for closure capacities");
     }
-    const int implication_capacity = nnode_ + 1;
+    const Capacity implication_capacity = capacity_from_integer(nnode_ + 1);
     std::vector<Capacity> component_terminal(
         static_cast<size_t>(component_count), 0);
     std::vector<unsigned char> forced_source(
@@ -1102,8 +1127,11 @@ private:
         static_cast<size_t>(component_count), 0);
     for (int node = 0; node < nnode_; ++node) {
       const int id = component[static_cast<size_t>(node)];
-      component_terminal[static_cast<size_t>(id)] +=
-          reference_cut_labels_[static_cast<size_t>(node)] == 0 ? 1 : -1;
+      component_terminal[static_cast<size_t>(id)] = checked_add(
+          component_terminal[static_cast<size_t>(id)],
+          reference_cut_labels_[static_cast<size_t>(node)] == 0 ? Capacity{1}
+                                                                : Capacity{-1},
+          "reference closure terminal capacity overflow");
       const Capacity terminal = maxflow_graph_.get_trcap(node);
       if (terminal > 0) {
         forced_source[static_cast<size_t>(id)] = 1;
@@ -1118,10 +1146,14 @@ private:
             "residual component is forced to both terminals");
       }
       if (forced_source[static_cast<size_t>(id)]) {
-        component_terminal[static_cast<size_t>(id)] += implication_capacity;
+        component_terminal[static_cast<size_t>(id)] = checked_add(
+            component_terminal[static_cast<size_t>(id)], implication_capacity,
+            "reference closure terminal capacity overflow");
       }
       if (forced_sink[static_cast<size_t>(id)]) {
-        component_terminal[static_cast<size_t>(id)] -= implication_capacity;
+        component_terminal[static_cast<size_t>(id)] = checked_subtract(
+            component_terminal[static_cast<size_t>(id)], implication_capacity,
+            "reference closure terminal capacity overflow");
       }
     }
 
@@ -1184,8 +1216,10 @@ private:
     for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
       const int local_index = dual_decomposition_local_indices_[i];
       if (regularization_anchor_sink_[i] && x_[local_index]) {
-        last_regularization_contribution_ +=
-            widen_capacity(regularization_str_);
+        last_regularization_contribution_ = checked_add(
+            last_regularization_contribution_,
+            widen_capacity(regularization_str_),
+            "regularization contribution overflow");
         last_regularization_active_sink_count_++;
       }
     }
@@ -1214,8 +1248,16 @@ private:
       } else {
         cache_index++;
       }
-      mincut_value_ -= last_lagrange_multiplier_term * (x_[index]);
-      mincut_value_ += lagrange_multiplier_term * (x_i_new);
+      if (x_[index]) {
+        mincut_value_ = checked_subtract(
+            mincut_value_, widen_capacity(last_lagrange_multiplier_term),
+            "incremental mincut lagrange overflow");
+      }
+      if (x_i_new) {
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(lagrange_multiplier_term),
+            "incremental mincut lagrange overflow");
+      }
     }
 
     // update node and arc terms that may have changed
@@ -1232,10 +1274,14 @@ private:
       // process terminals
       auto terminal_capacity = terminal_capacities_[i];
       if (x_[i] == 0 && x_i_new == 1) {
-        mincut_value_ += terminal_capacity;
+        mincut_value_ = checked_add(
+            mincut_value_, widen_capacity(terminal_capacity),
+            "incremental mincut terminal overflow");
       }
       if (x_[i] == 1 && x_i_new == 0) {
-        mincut_value_ -= terminal_capacity;
+        mincut_value_ = checked_subtract(
+            mincut_value_, widen_capacity(terminal_capacity),
+            "incremental mincut terminal overflow");
       }
 
       // processes each possible arc
@@ -1256,16 +1302,24 @@ private:
         auto x_t_new =
             maxflow_graph_.what_segment(t) == MaxflowGraph::SINK ? 1 : 0;
         if ((x_[s] == 0 && x_[t] == 1) && !(x_s_new == 0 && x_t_new == 1)) {
-          mincut_value_ -= forward_capacity;
+          mincut_value_ = checked_subtract(
+              mincut_value_, widen_capacity(forward_capacity),
+              "incremental mincut arc overflow");
         }
         if ((x_[s] == 1 && x_[t] == 0) && !(x_s_new == 1 && x_t_new == 0)) {
-          mincut_value_ -= backward_capacity;
+          mincut_value_ = checked_subtract(
+              mincut_value_, widen_capacity(backward_capacity),
+              "incremental mincut arc overflow");
         }
         if (!(x_[s] == 0 && x_[t] == 1) && (x_s_new == 0 && x_t_new == 1)) {
-          mincut_value_ += forward_capacity;
+          mincut_value_ = checked_add(
+              mincut_value_, widen_capacity(forward_capacity),
+              "incremental mincut arc overflow");
         }
         if (!(x_[s] == 1 && x_[t] == 0) && (x_s_new == 1 && x_t_new == 0)) {
-          mincut_value_ += backward_capacity;
+          mincut_value_ = checked_add(
+              mincut_value_, widen_capacity(backward_capacity),
+              "incremental mincut arc overflow");
         }
       }
 
@@ -1283,10 +1337,13 @@ private:
       auto backward_capacity = arc_capacities_[2 * i + 1];
       auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      Capacity new_flow = maxflow_graph_.get_rcap(a) - pos;
-      v_flow_[i] += new_flow;
-      d_flow_[s] += new_flow;
-      d_flow_[t] -= new_flow;
+      Capacity new_flow = checked_subtract(
+          maxflow_graph_.get_rcap(a), pos, "arc flow delta overflow");
+      v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
+      d_flow_[s] = checked_add(d_flow_[s], new_flow,
+                               "node flow balance overflow");
+      d_flow_[t] = checked_subtract(d_flow_[t], new_flow,
+                                    "node flow balance overflow");
       a = maxflow_graph_.get_next_arc(a);
       a = maxflow_graph_.get_next_arc(a);
     }
@@ -1301,10 +1358,14 @@ private:
       auto backward_capacity = arc_capacities_[2 * i + 1];
       auto flow = v_flow_[i];
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
-      Capacity new_flow = maxflow_graph_.get_rcap(first_arc + 2 * i) - pos;
-      v_flow_[i] += new_flow;
-      d_flow_[s] += new_flow;
-      d_flow_[t] -= new_flow;
+      Capacity new_flow = checked_subtract(
+          maxflow_graph_.get_rcap(first_arc + 2 * i), pos,
+          "arc flow delta overflow");
+      v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
+      d_flow_[s] = checked_add(d_flow_[s], new_flow,
+                               "node flow balance overflow");
+      d_flow_[t] = checked_subtract(d_flow_[t], new_flow,
+                                    "node flow balance overflow");
     }
   }
 
@@ -1356,12 +1417,20 @@ private:
       Capacity lagrange_multiplier_term = 0;
       Capacity last_lagrange_multiplier_term = 0;
       for (const auto &arc_reference : constraint.source_arc_references) {
-        lagrange_multiplier_term -= arc_reference->alpha;
-        last_lagrange_multiplier_term -= arc_reference->last_alpha;
+        lagrange_multiplier_term = checked_subtract(
+            lagrange_multiplier_term, arc_reference->alpha,
+            "lagrange multiplier cache overflow");
+        last_lagrange_multiplier_term = checked_subtract(
+            last_lagrange_multiplier_term, arc_reference->last_alpha,
+            "lagrange multiplier cache overflow");
       }
       for (const auto &arc_reference : constraint.target_arc_references) {
-        lagrange_multiplier_term += arc_reference->alpha;
-        last_lagrange_multiplier_term += arc_reference->last_alpha;
+        lagrange_multiplier_term = checked_add(
+            lagrange_multiplier_term, arc_reference->alpha,
+            "lagrange multiplier cache overflow");
+        last_lagrange_multiplier_term = checked_add(
+            last_lagrange_multiplier_term, arc_reference->last_alpha,
+            "lagrange multiplier cache overflow");
       }
       cached_lagrange_multipliers_[cache_index] = lagrange_multiplier_term;
       cached_last_lagrange_multipliers_[cache_index] =

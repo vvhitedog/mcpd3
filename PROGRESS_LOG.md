@@ -30,3 +30,15 @@
 - Made CSR capacity accumulation and cut evaluation checked, and corrected the
   partition-label array to use the node index type instead of the capacity
   type.
+
+## 2026-07-13 13:00 PDT - Checked solver arithmetic audit
+
+- Replaced unchecked signed arithmetic in primal-dual flow bookkeeping,
+  residual construction, Lagrange aggregation, regularization accounting,
+  warm-start reconstruction, and primal/mincut objective evaluation.
+- Aggregate flow and cut totals now use the widened `Objective` domain while
+  capacity-domain overflow raises a deterministic exception.
+- Added a two-component extreme-capacity regression whose objective is twice
+  the largest configured capacity value.
+- Rebuilt every mcpd3 target and passed both CTest tests in all four precision
+  modes: 8/8 mode/test combinations.

@@ -102,6 +102,25 @@ void maximalCapacitySurvivesMcpd3SolverAndWorkerStorage() {
           "streaming package must preserve the configured extreme capacity");
 }
 
+void aggregateObjectiveExceedsCapacityStorage() {
+  const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
+  const std::vector<int> arcs{0, 1, 2, 3};
+  const std::vector<mcpd3::Capacity> arc_capacities{
+      capacity, 0, capacity, 0};
+  const std::vector<mcpd3::Capacity> terminal_capacities{
+      capacity, -capacity, capacity, -capacity};
+
+  mcpd3::PrimalDualMinCutSolver solver(
+      4, 2, std::vector<int>(arcs), arc_capacities, terminal_capacities);
+  solver.solve();
+  const mcpd3::Objective expected = mcpd3::checked_add(
+      mcpd3::widen_capacity(capacity), mcpd3::widen_capacity(capacity));
+  require(solver.getMinCutValue() == expected,
+          "aggregate objective must exceed capacity storage without loss");
+  require(solver.getMaxFlowValue() == expected,
+          "aggregate maxflow must use the widened objective domain");
+}
+
 void maximalCapacityParsesFromDimacs() {
   const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
   const auto path = std::filesystem::temp_directory_path() /
@@ -165,6 +184,7 @@ int main() {
     maximalCapacityRoundTripsAndSolves();
     configuredCapacitySurvivesGraphReallocation();
     maximalCapacitySurvivesMcpd3SolverAndWorkerStorage();
+    aggregateObjectiveExceedsCapacityStorage();
     maximalCapacityParsesFromDimacs();
     maximalCapacitySurvivesCsrStorage();
     std::cout << "capacity_precision_test: PASS\n";

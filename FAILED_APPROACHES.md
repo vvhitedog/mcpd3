@@ -18,3 +18,7 @@
 - Do not raw-mmap capacity-bearing CSR records in GMP mode. The shared array
   API must construct nontrivial values on heap; consequently GMP CSR is exact
   but not an out-of-core capacity store.
+- Widening public result typedefs alone is not sufficient. Intermediate
+  capacity additions remain signed-overflow hazards, and aggregate flow/cut
+  totals must be accumulated in `Objective`; use the checked integer helpers
+  at each capacity/objective ownership boundary.

@@ -910,8 +910,13 @@ private:
       if (offset == 0) {
         continue;
       }
-      constraint.alpha += offset;
-      constraint.last_alpha += offset;
+      const Capacity capacity_offset = capacity_from_integer(offset);
+      constraint.alpha = checked_add(
+          constraint.alpha, capacity_offset,
+          "randomized lagrange multiplier overflow");
+      constraint.last_alpha = checked_add(
+          constraint.last_alpha, capacity_offset,
+          "randomized lagrange multiplier overflow");
       constraint.needs_sync = true;
     }
   }
