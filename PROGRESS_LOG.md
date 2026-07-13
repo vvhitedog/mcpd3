@@ -42,3 +42,19 @@
   the largest configured capacity value.
 - Rebuilt every mcpd3 target and passed both CTest tests in all four precision
   modes: 8/8 mode/test combinations.
+
+## 2026-07-13 15:08 PDT - Capacity precision performance validation
+
+- Benchmarked pre-refactor 32-bit commit `43e0ada` against optimized precision
+  commit `e6030dd` in isolated Release builds.
+- Removed per-capacity Boost parsing from native DIMACS input and text-based
+  integer conversion from the Lagrange hot path while retaining range checks.
+- Current 32-bit total wall changed by -2.0% to +0.3% across PU 64x64,
+  Waterloo bunny, and Waterloo gargoyle; no material regression was observed.
+- Measured and documented 64-bit, 128-bit, and GMP runtime and peak-RSS costs
+  in `CAPACITY_PERFORMANCE.md`.
+- Verified identical objectives and iteration counts in all modes. Bunny
+  matches its published objective directly; gargoyle's normalized objective
+  plus its reported terminal-imbalance constant matches its published value.
+- Passed both CTest tests in all four precision modes: 8/8 mode/test
+  combinations.

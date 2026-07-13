@@ -93,6 +93,9 @@ capacity-bearing CSR arrays use constructed heap storage in GMP mode.
 File-backed and anonymous mmap storage remain available for the fixed-width
 modes. The GMP CSR path is exact but is not an out-of-core capacity store.
 
+See [CAPACITY_PERFORMANCE.md](CAPACITY_PERFORMANCE.md) for measured runtime and
+memory costs of each mode, including a pre/post-refactor 32-bit comparison.
+
 Run tests:
 
 ```bash

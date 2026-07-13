@@ -22,3 +22,13 @@
   capacity additions remain signed-overflow hazards, and aggregate flow/cut
   totals must be accumulated in `Objective`; use the checked integer helpers
   at each capacity/objective ownership boundary.
+- Do not parse each native DIMACS capacity through a temporary `std::string`
+  and `boost::multiprecision::cpp_int`. It made 32-bit DIMACS input roughly 2x
+  slower in the first performance pass. Use the checked single-pass native
+  token path and reserve arbitrary-precision parsing for wide/GMP values.
+- Do not convert native Lagrange updates to capacities through decimal text.
+  The conversion is in the DD hot path and caused a repeatable 32-bit runtime
+  penalty. Use direct checked numeric conversion.
+- Do not infer a small regression from fixed-order benchmark runs. Rotate all
+  precision modes across run positions and use alternating baseline/candidate
+  pairs when the difference is close to run noise.
