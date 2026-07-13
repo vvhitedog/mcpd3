@@ -3138,6 +3138,35 @@ void fullSolveRequestsRegularizationOnlyAtLowScales() {
           "target worker should receive scale 1 regularization");
 }
 
+void fullSolveNonDecimalScheduleReachesUnitStep() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 690;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 5;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}, {13, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 1}, {22, 1}, {23, 1}},
+      options);
+
+  const auto result = coordinator.solve();
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::ITERATION_COUNT_EXCEEDED,
+          "persistent disagreement should exhaust the schedule");
+  require(result.progress_records.size() == 4,
+          "a non-decimal schedule should include one unit-step scale");
+  require(result.progress_records[0].step_size == 690,
+          "first non-decimal step size mismatch");
+  require(result.progress_records[1].step_size == 69,
+          "second non-decimal step size mismatch");
+  require(result.progress_records[2].step_size == 6,
+          "third non-decimal step size mismatch");
+  require(result.progress_records[3].step_size == 1,
+          "non-decimal schedule must finish at unit step");
+}
+
 void fullSolveContinuesAcrossScales() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.initial_step_size = 1000;
@@ -3963,6 +3992,7 @@ int main() {
     fullSolveStopsOnGroupStopping();
     fullSolveCanExhaustScaleIterationsPastGroupStopping();
     fullSolveRequestsRegularizationOnlyAtLowScales();
+    fullSolveNonDecimalScheduleReachesUnitStep();
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
     primalDualFlowWarmStartMatchesColdPromotedSolve();

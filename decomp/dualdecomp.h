@@ -36,6 +36,7 @@
 #include <measure/timer.h>
 #include <decomp/constraint.h>
 #include <decomp/lower_bound_certificate.h>
+#include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
@@ -585,7 +586,6 @@ public:
   template <bool attempt_decoding, typename Decoder>
   void solve(Decoder decoder) {
     requireConstructedSolvers("solve");
-    const int scaling_factor = 10;
     long step_size = options_.initial_step_size;
     scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
@@ -616,11 +616,8 @@ public:
           break;
         }
       }
-      step_size /= 10;
+      step_size = nextOptimizationScheduleValue(step_size);
       ++iscale;
-      //auto rescale_problem_time =
-      //    time_lambda([&] { scaleProblem<scaling_factor>(); });
-      //printf("rescale problem time: %lums\n", rescale_problem_time.count());
     }
   }
 

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <decomp/lower_bound_certificate.h>
+#include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
 #include <multithread/threadpool.h>
 
@@ -461,8 +462,8 @@ public:
         }
         break;
       }
-      schedule_scale /= 10;
-      step_size /= 10;
+      schedule_scale = nextOptimizationScheduleValue(schedule_scale);
+      step_size = nextOptimizationScheduleValue(step_size);
       ++scale_index;
     }
 
