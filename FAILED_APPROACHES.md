@@ -63,3 +63,18 @@
 - Do not replace the widened production aliases with the replay aliases. The
   replay policy must remain opt-in, 32-bit-only, visibly warned, and covered by
   a normal-build regression test showing that checked overflow remains active.
+
+## 2026-07-14 - Regularization growth and promotion
+
+- Do not represent production scaled-epsilon regularization as a replaceable
+  binary anchor. A persistent disagreement can then repeat forever at a fixed
+  budget, so neither strict-budget failure nor objective promotion is forced.
+- Do not scale BK's opaque residual graph during objective promotion when an
+  unscaled regularizer is active. The residual includes flow induced by that
+  regularizer, so multiplying it implements `factor * (F + R)` rather than
+  `factor * F + R`. Scale explicit primary state and reconstruct the residual
+  graph from retained arc flow.
+- Do not use the generic `regularized objective - total budget` lower bound as
+  the final reported certificate after agreement. It is valid but needlessly
+  loose. Agreement plus a strict sub-quantum budget certifies the feasible
+  primary objective exactly.

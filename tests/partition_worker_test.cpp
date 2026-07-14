@@ -261,15 +261,38 @@ void streamingWorkerMatchesInProcessAcrossEviction() {
                           /*alpha=*/7,
                           /*last_alpha=*/0,
                           /*alpha_momentum=*/0});
-  requireSolveResultsMatch(streaming.solveRound(third),
-                           reference.solveRound(third),
+  const auto streaming_third = streaming.solveRound(third);
+  const auto reference_third = reference.solveRound(third);
+  requireSolveResultsMatch(streaming_third, reference_third,
                            "streaming reload with alpha update");
+  require(streaming_third.regularization_budget == 1,
+          "first regularized update should consume one budget unit");
   require(streaming.residentPartitionCountForTesting() == 1,
           "streaming reload should preserve the resident budget");
   require(streaming.warmStateWriteCountForTesting() == 2,
           "streaming reload should evict the previous resident warm state");
   require(streaming.warmStateRestoreCountForTesting() == 1,
           "streaming reload should restore persisted warm solver state");
+
+  second.round_id = 4;
+  (void)streaming.solveRound(second);
+  (void)reference.solveRound(second);
+
+  mcpd3::PartitionSolveRequest fourth = third;
+  fourth.round_id = 5;
+  fourth.alpha_updates[0].last_alpha = 7;
+  fourth.alpha_updates[0].alpha = 8;
+  const auto streaming_fourth = streaming.solveRound(fourth);
+  const auto reference_fourth = reference.solveRound(fourth);
+  requireSolveResultsMatch(streaming_fourth, reference_fourth,
+                           "streaming cumulative regularization reload");
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  require(streaming_fourth.regularization_budget == 1,
+          "legacy replay should preserve its binary anchor across reload");
+#else
+  require(streaming_fourth.regularization_budget == 2,
+          "evicted cumulative regularization weight should survive reload");
+#endif
 }
 
 void streamingWorkerScalesEvictedDiskPayload() {
@@ -1618,7 +1641,7 @@ void coordinatorRunRoundReportsCertifiedRegularizedLowerBound() {
 
   auto coordinator = makeScriptedCoordinator(
       std::deque<ScriptedRound>{{100, 0, 10, 7, 1, 1}},
-      std::deque<ScriptedRound>{{50, 0, 5, 2, 1, 1}}, options);
+      std::deque<ScriptedRound>{{50, 1, 5, 2, 1, 1}}, options);
 
   const auto stats = coordinator.runRound(
       /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
@@ -1637,8 +1660,35 @@ void coordinatorRunRoundReportsCertifiedRegularizedLowerBound() {
           "round should sum regularization budgets");
   require(stats.regularization_contribution == 9,
           "round should sum actual regularization contributions");
+  require(stats.disagreement_count == 1,
+          "generic regularized certificate test should remain infeasible");
+}
+
+void coordinatorRunRoundStrengthensCertificateAtAgreement() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.use_momentum = false;
+  options.enable_group_stopping = false;
+  options.objective_scale = 100;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{100, 0, 10, 7, 1, 1}},
+      std::deque<ScriptedRound>{{50, 0, 5, 2, 1, 1}}, options);
+
+  const auto stats = coordinator.runRound(
+      /*round_id=*/1, /*scale=*/10, /*step_size=*/10,
+      /*regularization_strength=*/10);
+
   require(stats.disagreement_count == 0,
-          "scripted labels should agree for regularized certificate test");
+          "agreement certificate test should be globally feasible");
+  require(stats.regularization_budget == 15 &&
+              stats.regularization_budget < options.objective_scale,
+          "agreement certificate test requires strict secondary budget");
+  require(stats.certified_lower_bound == stats.original_objective,
+          "agreement under a strict lexicographic budget should certify the "
+          "primary objective");
+  require(stats.lower_bound == stats.original_objective,
+          "selected lower bound should use the strengthened agreement "
+          "certificate");
 }
 
 void coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged() {
@@ -1772,7 +1822,7 @@ void scaledEpsilonRegularizationUsesPreviousSinkAnchors() {
           "tie-broken source solution should not count active regularization");
 }
 
-void scaledEpsilonRegularizationPersistsUntilAlphaChanges() {
+void scaledEpsilonRegularizationPersistsAfterSourceTieBreak() {
   std::list<mcpd3::DualDecompositionConstraintArc> constraints;
   constraints.emplace_back(/*alpha=*/-100, /*last_alpha=*/-90,
                            /*alpha_momentum=*/0,
@@ -1806,10 +1856,64 @@ void scaledEpsilonRegularizationPersistsUntilAlphaChanges() {
   ref->last_alpha = ref->alpha;
   ref->alpha = -90;
   solver.solve();
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
   require(solver.getLastRegularizationBudget() == 0,
-          "changed alpha with previous source label should clear epsilon");
+          "legacy replay should clear its binary anchor after a source update");
   require(solver.getMinCutSolution(/*index=*/0) == 1,
-          "clearing epsilon should expose the strict sink label");
+          "legacy replay should restore its historical unregularized label");
+#else
+  require(solver.getLastRegularizationBudget() == 10,
+          "cumulative epsilon must persist after a source tie-break");
+  require(solver.getMinCutSolution(/*index=*/0) == 0,
+          "persistent cumulative epsilon should retain the source tie-break");
+#endif
+}
+
+void scaledEpsilonRegularizationAccumulatesAcrossPersistentSinkUpdates() {
+  std::list<mcpd3::DualDecompositionConstraintArc> constraints;
+  constraints.emplace_back(/*alpha=*/-989, /*last_alpha=*/-1000,
+                           /*alpha_momentum=*/0,
+                           /*partition_index_source=*/0,
+                           /*partition_index_target=*/1,
+                           /*local_index_source=*/0,
+                           /*local_index_target=*/-1);
+  auto ref = --constraints.end();
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{-1000});
+  solver.addSourceDualDecompositionConstraint(ref);
+  solver.setMinCutSolution(std::vector<int>{1});
+  solver.setRegularizationStrength(10);
+
+  solver.solve();
+  require(solver.getMinCutSolution(/*index=*/0) == 1,
+          "first cumulative epsilon update should preserve a strict sink");
+  require(solver.getLastRegularizationBudget() == 10,
+          "first sink update should consume one epsilon unit");
+
+  ref->last_alpha = ref->alpha;
+  ref->alpha = -978;
+  solver.solve();
+  require(solver.getMinCutSolution(/*index=*/0) == 1,
+          "second cumulative epsilon update should preserve a strict sink");
+  require(solver.getLastRegularizationBudget() == 20,
+          "persistent sink disagreement should accumulate epsilon budget");
+
+  ref->last_alpha = ref->alpha;
+  solver.solve();
+  require(solver.getLastRegularizationBudget() == 20,
+          "unchanged alpha must not consume additional epsilon budget");
+
+  solver.setRegularizationStrength(1);
+  ref->last_alpha = ref->alpha;
+  ref->alpha = -967;
+  solver.solve();
+  require(solver.getMinCutSolution(/*index=*/0) == 1,
+          "unit-scale cumulative update should preserve a strict sink");
+  require(solver.getLastRegularizationBudget() == 21,
+          "unit-scale epsilon must add to the prior high-scale budget");
+  require(solver.getLastRegularizationContribution() == 21,
+          "active sink should pay the complete cumulative regularizer");
 }
 
 void lowScaleScaledEpsilonRegularizationHandlesBoundaryTie() {
@@ -2050,37 +2154,37 @@ void fullSolveReportsLowScaleRegularizedAgreementAsOptimal() {
           "solve should not run an unregularized confirmation round");
   require(result.final_objective_raw == 25,
           "regularized agreement should preserve the final objective");
-  require(result.final_certified_lower_bound_raw == 22,
-          "regularized agreement should preserve the final certified lower bound");
+  require(result.final_certified_lower_bound_raw == 25,
+          "regularized agreement should certify the feasible primary objective");
   require(result.final_regularized_objective_raw == 28,
           "regularized agreement should preserve the final regularized objective");
-  require(result.best_lower_bound_raw == 22,
-          "regularized agreement should store the certified lower bound");
-  require(result.best_certified_lower_bound_raw == 22,
+  require(result.best_lower_bound_raw == 25,
+          "regularized agreement should store the exact certified lower bound");
+  require(result.best_certified_lower_bound_raw == 25,
           "regularized agreement should store the explicit certified lower bound");
   require(result.best_regularized_objective_raw == 28,
           "regularized agreement should preserve the regularized objective");
   require(result.final_objective > 0.002499 &&
               result.final_objective < 0.002501,
           "regularized final objective should use objective scale");
-  require(result.best_lower_bound > 0.002199 &&
-              result.best_lower_bound < 0.002201,
+  require(result.best_lower_bound > 0.002499 &&
+              result.best_lower_bound < 0.002501,
           "regularized certified lower bound should use objective scale");
-  require(result.best_certified_lower_bound > 0.002199 &&
-              result.best_certified_lower_bound < 0.002201,
+  require(result.best_certified_lower_bound > 0.002499 &&
+              result.best_certified_lower_bound < 0.002501,
           "explicit certified lower bound should use objective scale");
   require(result.best_regularized_objective > 0.002799 &&
               result.best_regularized_objective < 0.002801,
           "regularized objective diagnostic should use objective scale");
   require(result.progress_records.size() == 1,
           "regularized agreement should record one progress row");
-  require(result.progress_records[0].lower_bound == 22,
+  require(result.progress_records[0].lower_bound == 25,
           "regularized progress should report certified lower bound");
-  require(result.progress_records[0].best_lower_bound == 22,
+  require(result.progress_records[0].best_lower_bound == 25,
           "regularized progress should report best certified lower bound");
-  require(result.progress_records[0].certified_lower_bound == 22,
+  require(result.progress_records[0].certified_lower_bound == 25,
           "regularized progress should report certified lower bound explicitly");
-  require(result.progress_records[0].best_certified_lower_bound == 22,
+  require(result.progress_records[0].best_certified_lower_bound == 25,
           "regularized progress should report best certified lower bound explicitly");
   require(result.progress_records[0].regularized_objective == 28,
           "regularized progress should report original plus contribution");
@@ -2475,12 +2579,25 @@ void unitScaleResolvesOppositeDirectionCycle() {
   };
 
   auto scale_ten = make_coordinator();
+  mcpd3::Objective previous_regularization_budget = 0;
   for (int round = 1; round <= 4; ++round) {
     const auto stats = scale_ten.runRound(
         /*round_id=*/round, /*scale=*/10, /*step_size=*/10,
         /*regularization_strength=*/10);
     require(stats.disagreement_count == 1,
             "opposite-direction cycle should not agree at scale 10 alone");
+    if (round > 1) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+      require(stats.regularization_budget == 10,
+              "legacy replay should preserve its historical binary budget");
+#else
+      require(stats.regularization_budget ==
+                  previous_regularization_budget + 10,
+              "each persistent cycle round should consume another epsilon "
+              "budget unit");
+#endif
+    }
+    previous_regularization_budget = stats.regularization_budget;
   }
 
   auto unregularized_schedule = make_coordinator();
@@ -2604,15 +2721,15 @@ void fullSolvePromotesObjectiveScaleOnOverBudget() {
           "coordinator should promote objective scale once");
   require(result.scale == 100,
           "coordinator result should report the promoted objective scale");
-  require(result.best_lower_bound_raw == 999,
-          "over-budget regularized lower bound should not be accepted");
-  require(result.best_certified_lower_bound_raw == 999,
-          "explicit certified lower bound should subtract remaining budget");
+  require(result.best_lower_bound_raw == 1000,
+          "agreement after promotion should certify the primary objective");
+  require(result.best_certified_lower_bound_raw == 1000,
+          "explicit certified lower bound should use the agreement certificate");
   require(result.best_regularized_objective_raw == 1000,
           "regularized objective diagnostic should preserve final objective");
   require(result.final_objective == 10,
           "promoted final objective should use the promoted objective scale");
-  require(result.best_lower_bound > 9.989 && result.best_lower_bound < 9.991,
+  require(result.best_lower_bound > 9.999 && result.best_lower_bound < 10.001,
           "promoted raw lower bound should use the promoted objective scale");
   require(result.total_iterations == 3,
           "coordinator should retry from the promoted schedule");
@@ -2761,7 +2878,22 @@ void inProcessCoordinatorPromotesObjectiveScaleOnOverBudget() {
           "in-process coordinator should finish at promoted scale");
   require(result.best_lower_bound_raw == 100,
           "promoted in-process solve should preserve the exact bound: got " +
-              mcpd3::integer_to_string(result.best_lower_bound_raw));
+              mcpd3::integer_to_string(result.best_lower_bound_raw) +
+              " final_original=" +
+              mcpd3::integer_to_string(result.final_objective_raw) +
+              " final_certified=" +
+              mcpd3::integer_to_string(
+                  result.final_certified_lower_bound_raw) +
+              " final_regularized=" +
+              mcpd3::integer_to_string(result.final_regularized_objective_raw) +
+              " budget=" +
+              mcpd3::integer_to_string(result.final_regularization_budget) +
+              " contribution=" + mcpd3::integer_to_string(
+                  result.final_regularization_contribution));
+#if !defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  require(result.final_regularization_budget == 10,
+          "objective promotion must leave cumulative regularization unscaled");
+#endif
   require(result.final_regularization_budget < result.scale,
           "promoted in-process solve should finish under budget");
   require(result.final_disagreement_count == 0,
@@ -4142,9 +4274,13 @@ int main() {
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
     coordinatorRunRoundReportsCertifiedRegularizedLowerBound();
+    coordinatorRunRoundStrengthensCertificateAtAgreement();
     coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged();
     scaledEpsilonRegularizationUsesPreviousSinkAnchors();
-    scaledEpsilonRegularizationPersistsUntilAlphaChanges();
+    scaledEpsilonRegularizationPersistsAfterSourceTieBreak();
+#if !defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+    scaledEpsilonRegularizationAccumulatesAcrossPersistentSinkUpdates();
+#endif
     lowScaleScaledEpsilonRegularizationHandlesBoundaryTie();
     fullSolveStopsOptimalOnUnregularizedAgreement();
     fullSolveReportsProgressThroughConfiguredCallback();

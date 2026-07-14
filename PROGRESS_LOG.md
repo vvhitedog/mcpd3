@@ -116,3 +116,28 @@
 - Current phase code linked against this replay policy exactly reproduces the
   historical per-cut DD trajectories at 128x128 and 256x256. This is a
   diagnostic compatibility mode, not a production arithmetic policy.
+
+## 2026-07-14 11:57 PDT - Cumulative scaled-epsilon regularization
+
+- Replaced production binary sink anchors with persistent per-local-boundary
+  weights. Every changed-alpha solve whose previous local label is sink adds
+  the current epsilon to that weight; weights never decrease during a solve.
+- Total regularization budget is now the sum of all persistent weights. Thus a
+  continuing binary boundary disagreement consumes at least one epsilon unit
+  per active regularized round and must eventually agree or reach the strict
+  budget limit, which triggers objective-scale promotion or an over-budget
+  result.
+- Objective promotion now implements `factor * F + R`: primary capacities,
+  alphas, and explicit arc flow scale, cumulative regularization remains
+  unscaled, and the BK residual is reconstructed from the retained warm flow.
+- Added the exact agreement certificate: when local labels agree and total
+  regularization is strictly below one primary quantum, the feasible primary
+  objective is itself the certified lower bound. During disagreement the
+  conservative `regularized objective - total budget` certificate remains.
+- Streaming warm state version 4 persists full cumulative weights and reads
+  version 3 binary anchors compatibly. Tests cover repeated accumulation,
+  source-label persistence, cycle-by-cycle budget growth, eviction/reload,
+  strict promotion, and agreement certification.
+- Passed complete CTest suites in 32-, 64-, 128-bit, GMP, and opt-in legacy
+  replay builds. Legacy replay intentionally retains its historical binary
+  anchor semantics.

@@ -774,7 +774,7 @@ public:
       const Objective regularized_objective =
           regularizedObjectiveRaw(original_objective,
                                   last_regularization_contribution_);
-      const Objective lower_bound = certifiedOriginalLowerBoundRaw(
+      Objective lower_bound = certifiedOriginalLowerBoundRaw(
           original_objective, last_regularization_contribution_,
           last_regularization_budget_);
       last_original_objective_raw_ = original_objective;
@@ -816,6 +816,11 @@ public:
       lagrange_update_time_ += lagrange_update_time.count();
       last_disagreement_count_ = update_stats.disagreement_count;
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
+      if (update_stats.disagreement_count == 0 &&
+          last_regularization_budget_ < Objective(options_.objective_scale)) {
+        lower_bound = original_objective;
+        last_certified_lower_bound_raw_ = lower_bound;
+      }
 
       const int regularization_strength =
           regularizationStrengthForStepSize(step_size);
@@ -1119,10 +1124,8 @@ public:
     if (has_max_lower_bound_raw_) {
       max_lower_bound_raw_ = checked_scale(max_lower_bound_raw_, scale);
     }
-    if (has_max_regularized_objective_raw_) {
-      max_regularized_objective_raw_ =
-          checked_scale(max_regularized_objective_raw_, scale);
-    }
+    max_regularized_objective_raw_ = 0;
+    has_max_regularized_objective_raw_ = false;
     if (has_best_upper_bound_) {
       best_upper_bound_ = checked_scale(best_upper_bound_, scale);
     }
@@ -1305,7 +1308,8 @@ private:
 
   bool isRegularizationBudgetExceeded(
       const Objective &budget, const Capacity &regularization_strength) const {
-    return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+    (void)regularization_strength;
+    return budget >= regularizationBudgetLimit();
   }
 
   bool shouldSuppressEarlyScaleExit(

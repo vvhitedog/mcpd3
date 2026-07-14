@@ -345,6 +345,14 @@ private:
         trace.partition_results, &trace.stats,
         !isRegularizationBudgetExceeded(trace.stats.regularization_budget,
                                         regularization_strength));
+    if (trace.stats.disagreement_count == 0 &&
+        trace.stats.regularization_budget < Objective(options_.objective_scale)) {
+      // Agreement makes the local solution globally feasible. With a total
+      // secondary budget below one primary-objective quantum, no lower primary
+      // objective can be hidden by regularization.
+      trace.stats.certified_lower_bound = trace.stats.original_objective;
+      trace.stats.lower_bound = trace.stats.original_objective;
+    }
     timing_stats_.update_constraints_from_labels_us +=
         elapsedUs(update_start);
     ++timing_stats_.round_count;
@@ -1204,7 +1212,8 @@ private:
 
   bool isRegularizationBudgetExceeded(
       const Objective &budget, const Capacity &regularization_strength) const {
-    return regularization_strength > 0 && budget >= regularizationBudgetLimit();
+    (void)regularization_strength;
+    return budget >= regularizationBudgetLimit();
   }
 
   bool shouldSuppressEarlyScaleExit(
@@ -1252,8 +1261,9 @@ private:
         checked_scale(result->final_objective_raw, factor);
     result->final_certified_lower_bound_raw =
         checked_scale(result->final_certified_lower_bound_raw, factor);
-    result->final_regularized_objective_raw =
-        checked_scale(result->final_regularized_objective_raw, factor);
+    result->final_regularized_objective_raw = regularizedObjectiveRaw(
+        result->final_objective_raw,
+        result->final_regularization_contribution);
     if (result->has_best_lower_bound) {
       result->best_lower_bound_raw =
           checked_scale(result->best_lower_bound_raw, factor);
@@ -1262,14 +1272,13 @@ private:
       result->best_certified_lower_bound_raw =
           checked_scale(result->best_certified_lower_bound_raw, factor);
     }
-    if (result->has_best_regularized_objective) {
-      result->best_regularized_objective_raw =
-          checked_scale(result->best_regularized_objective_raw, factor);
-    }
-    result->final_regularization_budget =
-        checked_scale(result->final_regularization_budget, factor);
-    result->final_regularization_contribution =
-        checked_scale(result->final_regularization_contribution, factor);
+    // Historical maxima of F + R cannot be rescaled without their associated
+    // R contribution. The promoted rounds establish a new diagnostic maximum.
+    result->best_regularized_objective_raw = 0;
+    result->has_best_regularized_objective = false;
+    // Regularization is the unscaled secondary objective in scale * F + R.
+    // Its persistent budget and current contribution do not change when F is
+    // promoted.
     for (auto &package : packages_) {
       scalePackage(&package, factor);
     }

@@ -71,7 +71,7 @@ public:
     Objective last_regularization_contribution = 0;
     long last_regularization_anchor_sink_count = 0;
     long last_regularization_active_sink_count = 0;
-    std::vector<unsigned char> regularization_anchor_sink;
+    std::vector<Objective> regularization_weights;
     MaxflowGraph::ReusableState maxflow_graph_state;
   };
 
@@ -246,29 +246,21 @@ public:
       auto &flow = v_flow_[i];
       flow = checked_scale_capacity(flow, scale, saturate_capacity_overflow);
     }
-    MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
-    for (int i = 0; i < narc_; ++i) {
-      Capacity flow;
-      flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(
-          a, checked_scale_capacity(flow, scale, saturate_capacity_overflow));
-      a = maxflow_graph_.get_next_arc(a);
-      flow = maxflow_graph_.get_rcap(a);
-      maxflow_graph_.set_rcap(
-          a, checked_scale_capacity(flow, scale, saturate_capacity_overflow));
-      a = maxflow_graph_.get_next_arc(a);
-    }
-    for (int i = 0; i < nnode_; ++i) {
-      TerminalResidual flow;
-      flow = maxflow_graph_.get_trcap(i);
-      maxflow_graph_.set_trcap(
-          i, checked_scale(flow, scale, "terminal residual scale overflow"));
-    }
+    // The BK residual also contains flow induced by regularization. Scaling it
+    // would therefore implement scale * (F + R), not scale * F + R. Preserve
+    // the explicit arc flow above, then rebuild an exact residual network from
+    // that warm flow on the next solve while leaving R unchanged.
+    maxflow_graph_.reset();
+    initializeMaxflowGraph();
+    maxflow_changed_list_.Reset();
+    incremental_mincut_nodes_.clear();
+    incremental_arcs_.clear();
     mincut_value_ =
         checked_scale(mincut_value_, scale, "objective scale promotion overflow");
     // NOTE: after changing scale, the capacities from previous and this scale
     // are at completely different values, hence incremental update of
     // mincut_value_ will not work properly
+    is_first_iteration_ = true;
     is_first_iteration_of_new_scale_ = true;
   }
 
@@ -516,7 +508,10 @@ public:
     if (!has_solution_) {
       throw std::runtime_error("cannot capture flow warm start before solve");
     }
-    if (regularization_str_ != 0) {
+    if (regularization_str_ != 0 ||
+        std::any_of(regularization_weights_.begin(),
+                    regularization_weights_.end(),
+                    [](const Objective &weight) { return weight != 0; })) {
       throw std::runtime_error(
           "cannot capture flow warm start from a regularized solve");
     }
@@ -692,7 +687,7 @@ public:
         last_regularization_anchor_sink_count_;
     state.last_regularization_active_sink_count =
         last_regularization_active_sink_count_;
-    state.regularization_anchor_sink = regularization_anchor_sink_;
+    state.regularization_weights = regularization_weights_;
     state.maxflow_graph_state = maxflow_graph_.captureReusableState();
     return state;
   }
@@ -721,7 +716,7 @@ public:
         state.last_regularization_anchor_sink_count;
     last_regularization_active_sink_count_ =
         state.last_regularization_active_sink_count;
-    regularization_anchor_sink_ = state.regularization_anchor_sink;
+    regularization_weights_ = state.regularization_weights;
     incremental_mincut_nodes_.clear();
     incremental_arcs_.clear();
     maxflow_changed_list_.Reset();
@@ -739,10 +734,10 @@ private:
     last_regularization_contribution_ = 0;
     last_regularization_anchor_sink_count_ = 0;
     last_regularization_active_sink_count_ = 0;
-    if (regularization_anchor_sink_.size() !=
+    if (regularization_weights_.size() !=
         dual_decomposition_local_indices_.size()) {
-      regularization_anchor_sink_.assign(
-          dual_decomposition_local_indices_.size(), 0);
+      regularization_weights_.assign(dual_decomposition_local_indices_.size(),
+                                     Objective{0});
     }
   }
 
@@ -763,19 +758,31 @@ private:
   }
 
   TerminalResidual regularizationTerm(size_t constraint_index) const {
-    if (regularization_str_ <= 0 || regularization_anchor_sink_.empty() ||
-        !regularization_anchor_sink_[constraint_index]) {
+    if (regularization_weights_.empty()) {
       return 0;
     }
-    return terminal_residual_from_capacity(regularization_str_);
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+    return terminal_residual_from_capacity(
+        capacity_from_integer(regularization_weights_[constraint_index]));
+#else
+    return static_cast<TerminalResidual>(
+        regularization_weights_[constraint_index]);
+#endif
   }
 
   Objective updateRegularizationAnchorsFromCurrentSolution() {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
     if (regularization_str_ <= 0) {
-      std::fill(regularization_anchor_sink_.begin(),
-                regularization_anchor_sink_.end(), 0);
-      return 0;
+      std::fill(regularization_weights_.begin(), regularization_weights_.end(),
+                Objective{0});
+    } else {
+      for (Objective &weight : regularization_weights_) {
+        if (weight != 0) {
+          weight = widen_capacity(regularization_str_);
+        }
+      }
     }
+#endif
     if (has_solution_) {
       for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
         if (cached_lagrange_multipliers_[i] ==
@@ -783,15 +790,24 @@ private:
           continue;
         }
         const int local_index = dual_decomposition_local_indices_[i];
-        regularization_anchor_sink_[i] = x_[local_index] ? 1 : 0;
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+        regularization_weights_[i] =
+            x_[local_index] ? widen_capacity(regularization_str_)
+                            : Objective{0};
+#else
+        if (regularization_str_ > 0 && x_[local_index]) {
+          regularization_weights_[i] = checked_add(
+              regularization_weights_[i], widen_capacity(regularization_str_),
+              "cumulative scaled epsilon regularization overflow");
+        }
+#endif
       }
     }
     Objective budget = 0;
     for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
-      if (regularization_anchor_sink_[i]) {
-        budget = checked_add(
-            budget, widen_capacity(regularization_str_),
-            "scaled epsilon regularization capacity overflow");
+      if (regularization_weights_[i] > 0) {
+        budget = checked_add(budget, regularization_weights_[i],
+                             "scaled epsilon regularization budget overflow");
         last_regularization_anchor_sink_count_++;
       }
     }
@@ -1262,16 +1278,14 @@ private:
   void updateRegularizationContribution() {
     last_regularization_contribution_ = 0;
     last_regularization_active_sink_count_ = 0;
-    if (regularization_str_ == 0 ||
-        regularization_anchor_sink_.empty()) {
+    if (regularization_weights_.empty()) {
       return;
     }
     for (size_t i = 0; i < dual_decomposition_local_indices_.size(); ++i) {
       const int local_index = dual_decomposition_local_indices_[i];
-      if (regularization_anchor_sink_[i] && x_[local_index]) {
+      if (regularization_weights_[i] > 0 && x_[local_index]) {
         last_regularization_contribution_ = checked_add(
-            last_regularization_contribution_,
-            widen_capacity(regularization_str_),
+            last_regularization_contribution_, regularization_weights_[i],
             "regularization contribution overflow");
         last_regularization_active_sink_count_++;
       }
@@ -1559,7 +1573,7 @@ private:
   Objective last_regularization_contribution_ = 0;
   long last_regularization_anchor_sink_count_ = 0;
   long last_regularization_active_sink_count_ = 0;
-  std::vector<unsigned char> regularization_anchor_sink_;
+  std::vector<Objective> regularization_weights_;
 };
 
 } // namespace mcpd3

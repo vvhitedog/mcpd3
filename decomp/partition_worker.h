@@ -896,7 +896,7 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435357;
-    const std::uint32_t version = 3;
+    const std::uint32_t version = 4;
     writeScalar(out, magic, "warm state magic");
     writeScalar(out, version, "warm state version");
     writeIntegerVector(out, state.v_flow, "v flow");
@@ -924,8 +924,8 @@ private:
                 "last regularization anchor sink count");
     writeScalar(out, state.last_regularization_active_sink_count,
                 "last regularization active sink count");
-    writeVector(out, state.regularization_anchor_sink,
-                "regularization anchor sink");
+    writeIntegerVector(out, state.regularization_weights,
+                       "regularization weights");
     const auto &graph_state = state.maxflow_graph_state;
     writeScalar(out, graph_state.node_num, "warm graph node count");
     writeScalar(out, graph_state.arc_num, "warm graph arc count");
@@ -960,7 +960,7 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "warm state magic");
     const auto version = readScalar<std::uint32_t>(in, "warm state version");
-    if (magic != 0x4d435357 || version != 3) {
+    if (magic != 0x4d435357 || (version != 3 && version != 4)) {
       throw std::runtime_error("invalid streaming warm-state file " +
                                path.string());
     }
@@ -994,8 +994,18 @@ private:
         readScalar<long>(in, "last regularization anchor sink count");
     state.last_regularization_active_sink_count =
         readScalar<long>(in, "last regularization active sink count");
-    state.regularization_anchor_sink =
-        readVector<unsigned char>(in, "regularization anchor sink");
+    if (version == 3) {
+      const auto anchors =
+          readVector<unsigned char>(in, "regularization anchor sink");
+      state.regularization_weights.reserve(anchors.size());
+      for (const unsigned char anchor : anchors) {
+        state.regularization_weights.push_back(
+            anchor ? widen_capacity(state.regularization_str) : Objective{0});
+      }
+    } else {
+      state.regularization_weights = readIntegerVector<Objective>(
+          in, "regularization weights", parse_objective);
+    }
     auto &graph_state = state.maxflow_graph_state;
     graph_state.node_num = readScalar<int>(in, "warm graph node count");
     graph_state.arc_num = readScalar<int>(in, "warm graph arc count");
