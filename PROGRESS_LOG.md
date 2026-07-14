@@ -159,3 +159,56 @@
   budget while remaining strictly below the objective quantum.
 - Passed complete CTest suites in 32-, 64-, 128-bit, GMP, and legacy replay
   builds.
+
+## 2026-07-14 15:05 PDT - Experimental undirected PDHG prototype
+
+- Created isolated branch `exp/pdhg-undirected-mincut` in worktree
+  `/home/matt/software/experiments/mcpd3-pdhg-mincut` from productized mcpd3
+  commit `65159c8`. No mcpd3 product branch, mcpd4 branch, or phase-unwrapping
+  worktree was changed.
+- Added `PdhgUndirectedMinCutSolver` as an optional adapter over the undirected
+  subset of `MinCutGraph`. It validates equal forward/reverse capacities,
+  expands signed terminal capacities to fixed virtual terminals, and retains
+  exact integer capacities for sweep-cut evaluation.
+- Implemented contiguous PDHG edge/vertex loops, configurable scalar and
+  reciprocal-balanced steps, theta, current/ergodic candidates, incremental
+  sweep rounding, conservatively rounded dual bounds, exact/approximate/time/
+  iteration/stagnation statuses, and optional per-check telemetry.
+- TDD covers a single edge, path, parallel edges, disjoint paths,
+  zero-capacity edges, disconnected terminals, multiple optima, 80 randomized
+  small graphs, malformed/directed rejection, fixed-terminal norm handling,
+  all termination statuses, option validation, and reciprocal step balance.
+  Every case checks `safe lower <= BK optimum <= sweep upper`; every reported
+  exact certificate matches BK.
+- Added `mcpd3_pdhg_benchmark --solver existing|pdhg|both`. Comparison output
+  distinguishes equal objective from equal partition and reports exact-cut
+  discovery separately from certification.
+- Corrected the initial norm estimate after a regression test showed that a
+  fixed virtual terminal's degree must not enter the free-primal operator
+  bound. On bunny this changed `d_max` from the invalid `167944` to `7` and
+  the automatic step from `0.0017082` to `0.264589`.
+- Current-iterate mode is the default. Ergodic averages did not reduce the
+  16k grid's 400 iterations and increased wall from 0.307 to 0.418 seconds.
+  On that fixture, theta 1 and step scale 0.99 were best among the requested
+  small ablations.
+- Release benchmark summary:
+
+| Instance | Nodes / edges | BK total | PDHG first exact solve clock | PDHG total at certificate | Setting |
+|:---|---:|---:|---:|---:|:---|
+| Small grid | 256 / 480 | 0.136 ms | 3.44 ms | 4.00 ms | default, check 10 |
+| Medium grid | 16,384 / 32,512 | 7.47 ms | 295.97 ms | 296.67 ms | default, check 100 |
+| Bunny small | 805,800 / 2,391,242 | 191.95 ms | 27.68 s | 32.72 s | balance 1000, check 100 |
+
+- PDHG returns a different partition with the same certified objective on all
+  three fixtures, confirming why objective equality rather than partition
+  identity is the correct comparison. The large case demonstrates that the
+  correct cut can precede certification, but only by about five seconds here.
+  Its solve clocks make PDHG roughly 194x slower than BK. The prototype is not
+  competitive with local BK on these instances.
+- Validation passed the complete 10/10 CTest suite in the 32-bit Release
+  build, the solver test in 64-bit, 128-bit, and GMP Release builds, and all
+  eight PDHG-focused tests under AddressSanitizer plus
+  UndefinedBehaviorSanitizer. GCC coverage executes 94.8% of the solver's
+  source lines; the remaining lines are defensive failures, optional
+  diagnostics, or optional ergodic candidate selection, while all public
+  termination and selector branches are tested.

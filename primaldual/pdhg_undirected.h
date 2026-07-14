@@ -25,6 +25,7 @@ struct PdhgOptions {
   long double sigma = 0.0L;
   long double theta = 1.0L;
   long double step_size_scale = 0.99L;
+  long double step_balance = 1.0L;
   long double capacity_quantum = 1.0L;
   long double absolute_gap_tolerance = 1e-6L;
   long double relative_gap_tolerance = 1e-6L;
@@ -32,8 +33,8 @@ struct PdhgOptions {
   std::size_t stagnation_checks = 0;
   long double stagnation_tolerance = 0.0L;
   long double lower_bound_safety_factor = 64.0L;
-  bool use_ergodic_primal = true;
-  bool use_ergodic_dual = true;
+  bool use_ergodic_primal = false;
+  bool use_ergodic_dual = false;
   bool record_history = false;
   bool verbose = false;
 };
@@ -63,6 +64,8 @@ struct PdhgResult {
   std::size_t iterations = 0;
   std::size_t best_cut_first_iteration = 0;
   long double elapsed_seconds = 0.0L;
+  long double effective_tau = 0.0L;
+  long double effective_sigma = 0.0L;
   bool certified_exact = false;
   PdhgTerminationReason termination_reason =
       PdhgTerminationReason::IterationLimit;
@@ -77,6 +80,7 @@ public:
 
   int node_count() const { return node_count_; }
   std::size_t edge_count() const { return edge_sources_.size(); }
+  int maximum_degree() const { return maximum_degree_; }
 
 private:
   int node_count_ = 0;

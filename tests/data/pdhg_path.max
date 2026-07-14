@@ -1,0 +1,8 @@
+c undirected path with implicit source and sink terminals
+p max 4 4
+n 1 s
+n 4 t
+a 1 2 10
+a 2 3 5
+a 3 2 5
+a 3 4 10

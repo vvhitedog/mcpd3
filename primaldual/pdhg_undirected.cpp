@@ -23,6 +23,9 @@ long double elapsedSeconds(Clock::time_point start) {
 }
 
 long double integerToLongDouble(const Objective &value) {
+#if defined(MCPD_CAPACITY_MODE_32)
+  return static_cast<long double>(value);
+#else
   const std::string text = integer_to_string(value);
   std::size_t consumed = 0;
   const long double converted = std::stold(text, &consumed);
@@ -30,24 +33,29 @@ long double integerToLongDouble(const Objective &value) {
     throw std::overflow_error("PDHG objective cannot be represented as long double");
   }
   return converted;
+#endif
 }
 
 long double nonnegativeIntegerToLowerLongDouble(const Objective &value) {
   long double converted = integerToLongDouble(value);
+#if !defined(MCPD_CAPACITY_MODE_32)
   const Decimal exact(integer_to_string(value));
   if (Decimal(converted) > exact) {
     converted = std::nextafter(converted, 0.0L);
   }
+#endif
   return converted;
 }
 
 long double nonnegativeIntegerToUpperLongDouble(const Objective &value) {
   long double converted = integerToLongDouble(value);
+#if !defined(MCPD_CAPACITY_MODE_32)
   const Decimal exact(integer_to_string(value));
   if (Decimal(converted) < exact) {
     converted = std::nextafter(converted,
                                std::numeric_limits<long double>::infinity());
   }
+#endif
   return converted;
 }
 
@@ -68,11 +76,23 @@ struct DualEvaluation {
 };
 
 void validateOptions(const PdhgOptions &options) {
+  if (!std::isfinite(options.tau) || !std::isfinite(options.sigma) ||
+      !std::isfinite(options.theta) ||
+      !std::isfinite(options.step_size_scale) ||
+      !std::isfinite(options.step_balance) ||
+      !std::isfinite(options.capacity_quantum) ||
+      !std::isfinite(options.absolute_gap_tolerance) ||
+      !std::isfinite(options.relative_gap_tolerance) ||
+      !std::isfinite(options.time_limit_seconds) ||
+      !std::isfinite(options.stagnation_tolerance) ||
+      !std::isfinite(options.lower_bound_safety_factor)) {
+    throw std::invalid_argument("PDHG options must be finite");
+  }
   if (options.check_interval == 0) {
     throw std::invalid_argument("PDHG check interval must be positive");
   }
   if (options.tau < 0.0L || options.sigma < 0.0L ||
-      options.step_size_scale <= 0.0L) {
+      options.step_size_scale <= 0.0L || options.step_balance <= 0.0L) {
     throw std::invalid_argument("PDHG step sizes must be nonnegative and the scale positive");
   }
   if (options.theta < 0.0L || options.theta > 1.0L) {
@@ -174,7 +194,9 @@ PdhgUndirectedMinCutSolver::PdhgUndirectedMinCutSolver(
   }
 
   maximum_degree_ =
-      degree.empty() ? 0 : *std::max_element(degree.begin(), degree.end());
+      node_count_ == 0
+          ? 0
+          : *std::max_element(degree.begin(), degree.begin() + node_count_);
   adjacency_offsets_.assign(static_cast<std::size_t>(total_vertices + 1), 0);
   for (const int vertex : edge_sources_) {
     ++adjacency_offsets_[static_cast<std::size_t>(vertex + 1)];
@@ -205,9 +227,11 @@ PdhgResult PdhgUndirectedMinCutSolver::solve(
           ? options.step_size_scale
           : options.step_size_scale /
                 std::sqrt(2.0L * static_cast<long double>(maximum_degree_));
-  const long double tau = options.tau > 0.0L ? options.tau : automatic_step;
+  const long double tau =
+      options.tau > 0.0L ? options.tau : automatic_step / options.step_balance;
   const long double sigma =
-      options.sigma > 0.0L ? options.sigma : automatic_step;
+      options.sigma > 0.0L ? options.sigma
+                           : automatic_step * options.step_balance;
 
   std::vector<long double> x(total_vertices, 0.5L);
   std::vector<long double> x_new(total_vertices, 0.5L);
@@ -337,6 +361,8 @@ PdhgResult PdhgUndirectedMinCutSolver::solve(
   };
 
   PdhgResult result;
+  result.effective_tau = tau;
+  result.effective_sigma = sigma;
   bool has_upper_bound = false;
   bool has_lower_bound = false;
   std::size_t stagnant_checks = 0;

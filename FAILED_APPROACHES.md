@@ -78,3 +78,19 @@
   the final reported certificate after agreement. It is valid but needlessly
   loose. Agreement plus a strict sub-quantum budget certifies the feasible
   primary objective exactly.
+
+## 2026-07-14 - Undirected PDHG prototype
+
+- Do not include fixed virtual source/sink degrees in the PDHG automatic step
+  bound. The primal operator contains only free-vertex columns. Including the
+  bunny source's 167,944 terminal edges reduced the step by roughly 155x and
+  invalidated the first real-graph timing pass. A regression test now fixes
+  the maximum degree to free vertices only.
+- Do not enable ergodic primal and dual averages by default on the CPU
+  prototype. They add full vertex/edge memory writes every iteration; on the
+  16k grid they did not change the 400-iteration certificate and increased
+  wall by 36%.
+- Do not expect the symmetric unit-scale step to transfer to uniformly large
+  capacities. On bunny, reciprocal balance 1000 was far better than balance 1
+  or 30000 while preserving `tau*sigma`. Even tuned PDHG remained roughly
+  190x slower than BK for exact certification.

@@ -108,6 +108,11 @@ if (METIS_ENABLED AND GKLIB_LIBRARY)
   target_link_libraries(mcpd3_native_monolith_benchmark PUBLIC ${GKLIB_LIBRARY} m)
 endif ()
 
+add_executable(mcpd3_pdhg_benchmark benchmark/pdhg_undirected.cpp
+  primaldual/pdhg_undirected.cpp ${MAXFLOW_SRC})
+target_link_libraries(mcpd3_pdhg_benchmark PUBLIC mcpd3_capacity_config
+  ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
+
 if (BUILD_TESTING)
   add_executable(capacity_precision_test tests/capacity_precision_test.cpp ${MAXFLOW_SRC})
   target_link_libraries(capacity_precision_test PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
@@ -122,4 +127,37 @@ if (BUILD_TESTING)
   target_link_libraries(pdhg_undirected_test PUBLIC mcpd3_capacity_config
     ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
   add_test(NAME pdhg_undirected_test COMMAND pdhg_undirected_test)
+  add_test(NAME pdhg_benchmark_existing_smoke COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --solver existing)
+  add_test(NAME pdhg_benchmark_pdhg_smoke COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --solver pdhg --pdhg-check-interval 1 --pdhg-max-iterations 10000)
+  add_test(NAME pdhg_benchmark_both_smoke COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --solver both --pdhg-check-interval 1 --pdhg-max-iterations 10000)
+  add_test(NAME pdhg_benchmark_options_smoke COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --solver pdhg
+    --pdhg-max-iterations 10 --pdhg-check-interval 1
+    --pdhg-tau 0.1 --pdhg-sigma 0.1 --pdhg-theta 0.5
+    --pdhg-step-size-scale 0.9 --pdhg-step-balance 2
+    --capacity-quantum 0 --pdhg-eps-abs 1000 --pdhg-eps-rel 0
+    --pdhg-time-limit-seconds 1
+    --pdhg-stagnation-checks 2 --pdhg-stagnation-tolerance 0
+    --pdhg-use-ergodic-primal true --pdhg-use-ergodic-dual true
+    --pdhg-lower-bound-safety-factor 128
+    --print-history true --verbose true)
+  add_test(NAME pdhg_benchmark_invalid_solver COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --solver invalid)
+  set_tests_properties(pdhg_benchmark_invalid_solver PROPERTIES WILL_FAIL TRUE)
+  add_test(NAME pdhg_benchmark_negative_size COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --pdhg-max-iterations -1)
+  set_tests_properties(pdhg_benchmark_negative_size PROPERTIES WILL_FAIL TRUE)
+  add_test(NAME pdhg_benchmark_invalid_boolean COMMAND mcpd3_pdhg_benchmark
+    --dimacs ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pdhg_path.max
+    --print-history maybe)
+  set_tests_properties(pdhg_benchmark_invalid_boolean PROPERTIES WILL_FAIL TRUE)
 endif ()

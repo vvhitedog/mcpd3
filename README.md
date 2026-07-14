@@ -57,6 +57,66 @@ dual-decomposition abstractions.
 - `tests/`: CTest-based coverage for partition workers, coordinator behavior,
   regularization, and objective-scale promotion.
 
+## Experimental Undirected PDHG
+
+The `exp/pdhg-undirected-mincut` branch contains a local CPU prototype of PDHG
+for the exact convex relaxation of undirected s-t min-cut. It is optional and
+does not replace the BK-backed `PrimalDualMinCutSolver`.
+
+`MinCutGraph` inputs must have equal forward and reverse capacity for every
+internal edge. Signed terminal capacities are expanded to fixed virtual source
+and sink edges. Directed/asymmetric inputs are rejected rather than
+symmetrized.
+
+Build and compare both solvers:
+
+```bash
+cmake -S . -B build-pdhg -DCMAKE_BUILD_TYPE=Release \
+  -DMCPD_BOOST_INCLUDE_DIR=/home/matt/.local/boost-dev/usr/include
+cmake --build build-pdhg -j
+
+./build-pdhg/mcpd3_pdhg_benchmark \
+  --dimacs graph.max \
+  --solver both \
+  --pdhg-check-interval 100 \
+  --pdhg-max-iterations 100000
+```
+
+`--solver existing`, `--solver pdhg`, and `--solver both` select the
+BK-backed solver, PDHG, or comparison mode. Important experimental controls
+include:
+
+```text
+--pdhg-tau X --pdhg-sigma X --pdhg-theta X
+--pdhg-step-size-scale X --pdhg-step-balance X
+--pdhg-use-ergodic-primal 0|1 --pdhg-use-ergodic-dual 0|1
+--pdhg-max-iterations N --pdhg-check-interval N
+--pdhg-time-limit-seconds X
+--pdhg-stagnation-checks N --pdhg-stagnation-tolerance X
+--capacity-quantum X --pdhg-eps-abs X --pdhg-eps-rel X
+--pdhg-lower-bound-safety-factor X
+--print-history 0|1
+```
+
+The default automatic steps are
+`tau=sigma=0.99/sqrt(2*maximum_free_vertex_degree)`. `step_balance=b` changes
+them to `tau/b` and `sigma*b`, preserving their product. This is useful when
+capacities are uniformly much larger than one. Explicit `tau` or `sigma`
+overrides the corresponding automatic value.
+
+Every reported cut uses exact configured integer capacities. The dual lower
+bound uses directed rounding plus a conservative numerical margin. Exactness
+is reported only when the certified gap is strictly below the configured
+capacity quantum. Iteration, time, and stagnation limits remain explicitly
+uncertified statuses.
+
+The current CPU results are experimental. A 16,384-node grid certifies in
+0.297 seconds total versus 0.0075 seconds for BK. An 805,800-node bunny
+instance with `--pdhg-step-balance 1000` finds the exact cut after 27.68
+seconds of solving and certifies after 32.68 seconds, versus 0.168 seconds of
+BK solve time. PDHG is therefore not currently competitive with BK as a local
+exact solver.
+
 ## Build And Test
 
 Configure and build:

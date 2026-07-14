@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -71,6 +72,8 @@ void checkAgainstExact(const std::string &name,
 
   require(result.source_side.size() == static_cast<size_t>(graph.nnode),
           name + ": result partition has the wrong size");
+  require(result.effective_tau > 0.0L && result.effective_sigma > 0.0L,
+          name + ": effective step sizes must be positive");
   require(result.safe_lower_bound <= exact_real + 1e-9L,
           name + ": safe lower bound exceeds the exact value");
   require(mcpd3::widen_capacity(mcpd3::Capacity{0}) <= exact,
@@ -166,6 +169,35 @@ void asymmetricAndMalformedGraphsAreRejected() {
     malformed_threw = true;
   }
   require(malformed_threw, "malformed storage must be rejected");
+
+  mcpd3::MinCutGraph bad_endpoint =
+      makeGraph(2, {{0, 1, 3}}, {4, -4});
+  bad_endpoint.arcs[1] = 2;
+  bool endpoint_threw = false;
+  try {
+    (void)mcpd3::PdhgUndirectedMinCutSolver(bad_endpoint);
+  } catch (const std::invalid_argument &) {
+    endpoint_threw = true;
+  }
+  require(endpoint_threw, "out-of-range endpoints must be rejected");
+
+  mcpd3::MinCutGraph negative = makeGraph(2, {{0, 1, 3}}, {4, -4});
+  negative.arc_capacities[0] = mcpd3::capacity_from_integer(-1);
+  negative.arc_capacities[1] = mcpd3::capacity_from_integer(-1);
+  bool negative_threw = false;
+  try {
+    (void)mcpd3::PdhgUndirectedMinCutSolver(negative);
+  } catch (const std::invalid_argument &) {
+    negative_threw = true;
+  }
+  require(negative_threw, "negative capacities must be rejected");
+}
+
+void fixedTerminalDegreeDoesNotShrinkTheAutomaticStep() {
+  const mcpd3::PdhgUndirectedMinCutSolver solver(
+      makeGraph(5, {}, {1, 1, 1, 1, 1}));
+  require(solver.maximum_degree() == 1,
+          "fixed virtual-source degree must not enter the primal norm bound");
 }
 
 void terminationReasonsRemainDistinct() {
@@ -229,12 +261,26 @@ void terminationReasonsRemainDistinct() {
   require(stagnant_result.termination_reason ==
               mcpd3::PdhgTerminationReason::Stagnation,
           "stagnation has the wrong termination reason");
+
+  mcpd3::PdhgOptions final_check = testOptions();
+  final_check.capacity_quantum = 0.0L;
+  final_check.absolute_gap_tolerance = 0.0L;
+  final_check.relative_gap_tolerance = 0.0L;
+  final_check.max_iterations = 3;
+  final_check.check_interval = 10;
+  const auto final_check_result =
+      mcpd3::PdhgUndirectedMinCutSolver(graph).solve(final_check);
+  require(final_check_result.iterations == 3,
+          "iteration limit must check and retain the final partial interval");
+  require(final_check_result.history.size() == 2 &&
+              final_check_result.history.back().iteration == 3,
+          "final non-aligned iteration must be recorded");
 }
 
 void invalidOptionsAreRejected() {
   const mcpd3::PdhgUndirectedMinCutSolver solver(
       makeGraph(2, {{0, 1, 1}}, {3, -3}));
-  for (int invalid_case = 0; invalid_case < 4; ++invalid_case) {
+  for (int invalid_case = 0; invalid_case < 6; ++invalid_case) {
     mcpd3::PdhgOptions options = testOptions();
     if (invalid_case == 0) {
       options.check_interval = 0;
@@ -242,8 +288,12 @@ void invalidOptionsAreRejected() {
       options.theta = 1.1L;
     } else if (invalid_case == 2) {
       options.tau = -1.0L;
-    } else {
+    } else if (invalid_case == 3) {
       options.capacity_quantum = -1.0L;
+    } else if (invalid_case == 4) {
+      options.step_balance = 0.0L;
+    } else {
+      options.theta = std::numeric_limits<long double>::quiet_NaN();
     }
     bool threw = false;
     try {
@@ -255,6 +305,49 @@ void invalidOptionsAreRejected() {
   }
 }
 
+void reciprocalStepBalancePreservesTheStepProduct() {
+  const mcpd3::PdhgUndirectedMinCutSolver solver(
+      makeGraph(2, {{0, 1, 1}}, {3, -3}));
+  mcpd3::PdhgOptions balanced = testOptions();
+  balanced.max_iterations = 0;
+  balanced.step_balance = 4.0L;
+  const auto result = solver.solve(balanced);
+  const long double automatic = 0.99L / std::sqrt(4.0L);
+  require(std::fabs(result.effective_tau - automatic / 4.0L) < 1e-15L,
+          "step balance must divide the automatic primal step");
+  require(std::fabs(result.effective_sigma - automatic * 4.0L) < 1e-15L,
+          "step balance must multiply the automatic dual step");
+
+  mcpd3::PdhgOptions explicit_steps = balanced;
+  explicit_steps.tau = 0.125L;
+  explicit_steps.sigma = 0.25L;
+  const auto explicit_result = solver.solve(explicit_steps);
+  require(explicit_result.effective_tau == explicit_steps.tau &&
+              explicit_result.effective_sigma == explicit_steps.sigma,
+          "explicit steps must override automatic balancing");
+}
+
+void terminationReasonNamesAreStable() {
+  require(std::string(mcpd3::pdhg_termination_reason_name(
+              mcpd3::PdhgTerminationReason::ExactCertificate)) ==
+              "exact_certificate",
+          "exact-certificate label changed");
+  require(std::string(mcpd3::pdhg_termination_reason_name(
+              mcpd3::PdhgTerminationReason::ApproximateGap)) ==
+              "approximate_gap",
+          "approximate-gap label changed");
+  require(std::string(mcpd3::pdhg_termination_reason_name(
+              mcpd3::PdhgTerminationReason::IterationLimit)) ==
+              "iteration_limit",
+          "iteration-limit label changed");
+  require(std::string(mcpd3::pdhg_termination_reason_name(
+              mcpd3::PdhgTerminationReason::TimeLimit)) == "time_limit",
+          "time-limit label changed");
+  require(std::string(mcpd3::pdhg_termination_reason_name(
+              mcpd3::PdhgTerminationReason::Stagnation)) == "stagnation",
+          "stagnation label changed");
+}
+
 } // namespace
 
 int main() {
@@ -262,8 +355,11 @@ int main() {
     requestedDeterministicGraphsRespectBounds();
     randomizedSmallGraphsRespectBounds();
     asymmetricAndMalformedGraphsAreRejected();
+    fixedTerminalDegreeDoesNotShrinkTheAutomaticStep();
     terminationReasonsRemainDistinct();
     invalidOptionsAreRejected();
+    reciprocalStepBalancePreservesTheStepProduct();
+    terminationReasonNamesAreStable();
   } catch (const std::exception &error) {
     std::cerr << "pdhg_undirected_test failed: " << error.what() << '\n';
     return 1;
