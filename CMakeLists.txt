@@ -116,4 +116,10 @@ if (BUILD_TESTING)
   add_executable(partition_worker_test tests/partition_worker_test.cpp ${MAXFLOW_SRC})
   target_link_libraries(partition_worker_test PUBLIC mcpd3_capacity_config ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
   add_test(NAME partition_worker_test COMMAND partition_worker_test)
+
+  add_executable(pdhg_undirected_test tests/pdhg_undirected_test.cpp
+    primaldual/pdhg_undirected.cpp ${MAXFLOW_SRC})
+  target_link_libraries(pdhg_undirected_test PUBLIC mcpd3_capacity_config
+    ${PROFILER_LINK_FLAG} ${CMAKE_THREAD_LIBS_INIT})
+  add_test(NAME pdhg_undirected_test COMMAND pdhg_undirected_test)
 endif ()
