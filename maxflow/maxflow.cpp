@@ -258,10 +258,14 @@ void Graph<captype, tcaptype, flowtype>::augment(
   if (bottleneck > -i->tr_cap)
     bottleneck = -i->tr_cap;
 
+  // Every augmenting path contains middle_arc, so the bottleneck cannot
+  // exceed its compact residual-capacity domain even when t-links are wider.
+  const captype arc_bottleneck = static_cast<captype>(bottleneck);
+
   /* 2. Augmenting */
   /* 2a - the source tree */
-  middle_arc->sister->r_cap += bottleneck;
-  middle_arc->r_cap -= bottleneck;
+  middle_arc->sister->r_cap += arc_bottleneck;
+  middle_arc->r_cap -= arc_bottleneck;
   if (get_changed_arcs) {
     changed_arcs_.insert(middle_arc);
   }
@@ -269,8 +273,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
     a = i->parent;
     if (a == TERMINAL)
       break;
-    a->r_cap += bottleneck;
-    a->sister->r_cap -= bottleneck;
+    a->r_cap += arc_bottleneck;
+    a->sister->r_cap -= arc_bottleneck;
     if (get_changed_arcs) {
       changed_arcs_.insert(a);
     }
@@ -287,8 +291,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
     a = i->parent;
     if (a == TERMINAL)
       break;
-    a->sister->r_cap += bottleneck;
-    a->r_cap -= bottleneck;
+    a->sister->r_cap += arc_bottleneck;
+    a->r_cap -= arc_bottleneck;
     if (get_changed_arcs) {
       changed_arcs_.insert(a);
     }

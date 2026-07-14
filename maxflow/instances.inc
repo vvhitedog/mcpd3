@@ -20,3 +20,7 @@ template class Graph<double,double,double>;
 #if !defined(MCPD_CAPACITY_MODE_32)
 template class Graph<mcpd3::Capacity, mcpd3::Capacity, mcpd3::Objective>;
 #endif
+
+#if !defined(MCPD_CAPACITY_MODE_GMP)
+template class Graph<mcpd3::Capacity, mcpd3::Objective, mcpd3::Objective>;
+#endif

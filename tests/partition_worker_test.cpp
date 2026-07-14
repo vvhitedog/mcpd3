@@ -105,15 +105,16 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
               estimate.bk_node_bytes + estimate.bk_arc_bytes,
           "BK total estimate should sum node and arc arrays");
   require(estimate.solver_vector_bytes ==
-              4 * sizeof(int) + 7 * sizeof(mcpd3::Capacity),
+              4 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
+                  2 * sizeof(mcpd3::Objective),
           "solver vector estimate should account for arc and node vectors");
   require(estimate.total_bytes ==
               estimate.bk_total_bytes + estimate.solver_vector_bytes,
           "solver total estimate should include BK and solver vectors");
 }
 
-mcpd3::PartitionPackage makePackage(const mcpd3::Capacity &alpha,
-                                    const mcpd3::Capacity &last_alpha) {
+mcpd3::PartitionPackage makePackage(const mcpd3::Lagrange &alpha,
+                                    const mcpd3::Lagrange &last_alpha) {
   mcpd3::PartitionPackage package;
   package.partition_id = 3;
   package.local_node_count = 2;
@@ -1092,7 +1093,7 @@ void dualDecompositionRandomizesExportedInitialAlphas() {
       /*arc_capacities=*/std::vector<int>{3, 5},
       /*terminal_capacities=*/std::vector<int>{2, -4}, options);
 
-  mcpd3::Capacity randomized_alpha = 0;
+  mcpd3::Lagrange randomized_alpha = 0;
   int endpoint_count = 0;
   for (const auto &package : dual_decomp.getPartitionPackages()) {
     for (const auto &endpoint : package.constraint_endpoints) {
@@ -3353,7 +3354,7 @@ void primalDualCapacityRefreshScalesFlowStateByQuantumRatio() {
     require(scaled.v_flow == std::vector<mcpd3::Capacity>{expected},
             "capacity refresh should scale signed arc flow toward zero");
     require(scaled.d_flow ==
-                std::vector<mcpd3::Capacity>{expected, -expected},
+                std::vector<mcpd3::Objective>{expected, -expected},
             "capacity refresh should recompute balance from scaled flow");
   }
 

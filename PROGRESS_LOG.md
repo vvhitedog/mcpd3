@@ -1,5 +1,29 @@
 # Progress Log
 
+## 2026-07-13 22:00 PDT - Compact capacities with widened solver state
+
+- Reproduced the accepted oracle-perturbed quantum-continuation experiments:
+  128x128 reached objective `38393` in 2594 DD rounds and about 1.66 s;
+  256x256 reached objective `155182` in 3973 DD rounds and about 3.3-3.6 s.
+- Bisected the first rejected revision to checked-arithmetic commit `44bbbac`.
+  UBSan on its parent found signed overflow while accumulating two valid arc
+  flows into one 32-bit node balance: `-249043770 + -1960811640`.
+- Kept source capacities, arc flows, and BK arc residuals in compact
+  `Capacity`, while widening node balances, terminal residuals, Lagrange
+  multipliers, and their persistent state to `Objective`.
+- Added regressions for aggregate node balance beyond `Capacity`, alpha beyond
+  `Capacity`, mixed-width BK augmentation, memory accounting, and mcpd4
+  stateless/delta transport of widened alpha values.
+- Bumped the streaming warm-state format to version 3 and mcpd4's transport
+  protocol to version 9.
+- Correct arithmetic changes the deterministic DD trajectory. The corrected
+  Release runs reached the same optima at 3140 DD rounds / 5.51 s (128x128)
+  and 4582 DD rounds / 22.40 s (256x256). The 128x128 corrected run also
+  completed under UBSan with no signed-overflow report.
+- Passed mcpd3's two tests in 32/64/128/GMP modes, mcpd4's five-test 32-bit
+  integration suite plus widened transport tests in every precision mode, and
+  all seven phase-unwrapping Release integration tests.
+
 ## 2026-07-13 15:47 PDT - Ratio-aware persistent flow refresh
 
 - Extended primal-dual and dual-decomposition capacity refresh APIs with an

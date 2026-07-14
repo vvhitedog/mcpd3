@@ -88,6 +88,12 @@ the GMP C and C++ development packages, commonly installed as `libgmp-dev` on
 Debian/Ubuntu. `BOOST_ROOT` and `GMP_ROOT` can point CMake at non-system
 installations.
 
+`Capacity` is the compact source-data and arc-residual type selected above.
+Accumulated objectives, per-node flow balances, terminal residuals, and DD
+Lagrange multipliers use the next wider `Objective` type. This keeps 32-bit
+arc storage compact while preventing valid sums and optimization state from
+being narrowed back into 32 bits.
+
 GMP capacities are nontrivial C++ objects, so BK node/arc arrays and
 capacity-bearing CSR arrays use constructed heap storage in GMP mode.
 File-backed and anonymous mmap storage remain available for the fixed-width

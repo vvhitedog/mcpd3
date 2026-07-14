@@ -532,8 +532,8 @@ private:
     int constraint_id = -1;
     ConstraintEndpoint source;
     ConstraintEndpoint target;
-    Capacity alpha = 0;
-    Capacity last_alpha = 0;
+    Lagrange alpha = 0;
+    Lagrange last_alpha = 0;
     float alpha_momentum = 0;
     bool needs_sync = false;
   };
@@ -544,8 +544,8 @@ private:
     bool has_target = false;
     ConstraintEndpoint source;
     ConstraintEndpoint target;
-    Capacity alpha = 0;
-    Capacity last_alpha = 0;
+    Lagrange alpha = 0;
+    Lagrange last_alpha = 0;
     float alpha_momentum = 0;
   };
 
@@ -910,12 +910,12 @@ private:
       if (offset == 0) {
         continue;
       }
-      const Capacity capacity_offset = capacity_from_integer(offset);
+      const Lagrange lagrange_offset = lagrange_from_integer(offset);
       constraint.alpha = checked_add(
-          constraint.alpha, capacity_offset,
+          constraint.alpha, lagrange_offset,
           "randomized lagrange multiplier overflow");
       constraint.last_alpha = checked_add(
-          constraint.last_alpha, capacity_offset,
+          constraint.last_alpha, lagrange_offset,
           "randomized lagrange multiplier overflow");
       constraint.needs_sync = true;
     }
@@ -1125,8 +1125,8 @@ private:
       if (!update_alpha) {
         continue;
       }
-      const Capacity old_alpha = constraint.alpha;
-      const Capacity old_last_alpha = constraint.last_alpha;
+      const Lagrange old_alpha = constraint.alpha;
+      const Lagrange old_last_alpha = constraint.last_alpha;
       const float old_alpha_momentum = constraint.alpha_momentum;
       constraint.last_alpha = constraint.alpha;
       if (diff == 0) {
@@ -1146,12 +1146,12 @@ private:
             stats->effective_step_size *
             static_cast<int>(momentum_scale * constraint.alpha_momentum);
         constraint.alpha = checked_add(
-            constraint.alpha, capacity_from_integer(alpha_update),
+            constraint.alpha, lagrange_from_integer(alpha_update),
             "lagrange multiplier overflow");
       } else {
         constraint.alpha = checked_add(
             constraint.alpha,
-            capacity_from_integer(stats->effective_step_size * diff),
+            lagrange_from_integer(stats->effective_step_size * diff),
             "lagrange multiplier overflow");
       }
       if (constraint.alpha != old_alpha ||
@@ -1237,10 +1237,10 @@ private:
           capacity, factor, options_.saturate_capacity_overflow);
     }
     for (auto &binding : package->constraint_endpoints) {
-      binding.alpha = checked_scale_capacity(
-          binding.alpha, factor, options_.saturate_capacity_overflow);
-      binding.last_alpha = checked_scale_capacity(
-          binding.last_alpha, factor, options_.saturate_capacity_overflow);
+      binding.alpha = checked_scale(
+          binding.alpha, factor, "lagrange scale promotion overflow");
+      binding.last_alpha = checked_scale(
+          binding.last_alpha, factor, "lagrange scale promotion overflow");
     }
   }
 
@@ -1274,11 +1274,10 @@ private:
       scalePackage(&package, factor);
     }
     for (auto &constraint : constraints_) {
-      constraint.alpha = checked_scale_capacity(
-          constraint.alpha, factor, options_.saturate_capacity_overflow);
-      constraint.last_alpha = checked_scale_capacity(
-          constraint.last_alpha, factor,
-          options_.saturate_capacity_overflow);
+      constraint.alpha = checked_scale(
+          constraint.alpha, factor, "lagrange scale promotion overflow");
+      constraint.last_alpha = checked_scale(
+          constraint.last_alpha, factor, "lagrange scale promotion overflow");
     }
     for (const auto worker_index : active_worker_indices_) {
       workers_[worker_index]->scaleObjective(

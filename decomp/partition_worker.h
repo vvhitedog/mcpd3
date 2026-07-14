@@ -41,15 +41,15 @@ struct ConstraintEndpointBinding {
   int global_node_id = -1;
   int local_index = -1;
   bool is_source = true;
-  Capacity alpha = 0;
-  Capacity last_alpha = 0;
+  Lagrange alpha = 0;
+  Lagrange last_alpha = 0;
   float alpha_momentum = 0;
 };
 
 struct AlphaUpdate {
   int constraint_id = -1;
-  Capacity alpha = 0;
-  Capacity last_alpha = 0;
+  Lagrange alpha = 0;
+  Lagrange last_alpha = 0;
   float alpha_momentum = 0;
 };
 
@@ -105,6 +105,11 @@ struct PartitionWorkerResourceEstimate {
 inline Objective checkedScaleWorkerObjective(const Objective &value,
                                               long scale) {
   return checked_scale(value, scale, "objective scale promotion overflow");
+}
+
+inline Lagrange checkedScaleWorkerLagrange(const Lagrange &value,
+                                           long scale) {
+  return checked_scale(value, scale, "lagrange scale promotion overflow");
 }
 
 inline Capacity checkedScaleWorkerCapacity(
@@ -274,10 +279,10 @@ public:
     for (auto &[partition_id, loaded] : partitions_) {
       (void)partition_id;
       for (auto &constraint_arc : loaded.constraint_arcs) {
-        constraint_arc.alpha = checkedScaleWorkerCapacity(
-            constraint_arc.alpha, factor, saturate_capacity_overflow);
-        constraint_arc.last_alpha = checkedScaleWorkerCapacity(
-            constraint_arc.last_alpha, factor, saturate_capacity_overflow);
+        constraint_arc.alpha =
+            checkedScaleWorkerLagrange(constraint_arc.alpha, factor);
+        constraint_arc.last_alpha =
+            checkedScaleWorkerLagrange(constraint_arc.last_alpha, factor);
       }
       loaded.solver->scaleProblem(factor, saturate_capacity_overflow);
     }
@@ -633,9 +638,9 @@ public:
     for (auto &[partition_id, stored] : partitions_) {
       (void)partition_id;
       for (auto &binding : stored.constraint_endpoints) {
-        binding.alpha = checkedScaleWorkerCapacity(binding.alpha, factor);
+        binding.alpha = checkedScaleWorkerLagrange(binding.alpha, factor);
         binding.last_alpha =
-            checkedScaleWorkerCapacity(binding.last_alpha, factor);
+            checkedScaleWorkerLagrange(binding.last_alpha, factor);
       }
       auto package = readPackagePayload(stored);
       for (auto &capacity : package.arc_capacities) {
@@ -891,7 +896,7 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435357;
-    const std::uint32_t version = 2;
+    const std::uint32_t version = 3;
     writeScalar(out, magic, "warm state magic");
     writeScalar(out, version, "warm state version");
     writeIntegerVector(out, state.v_flow, "v flow");
@@ -955,13 +960,13 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "warm state magic");
     const auto version = readScalar<std::uint32_t>(in, "warm state version");
-    if (magic != 0x4d435357 || version != 2) {
+    if (magic != 0x4d435357 || version != 3) {
       throw std::runtime_error("invalid streaming warm-state file " +
                                path.string());
     }
     PrimalDualMinCutSolver::WarmState state;
     state.v_flow = readIntegerVector<Capacity>(in, "v flow", parse_capacity);
-    state.d_flow = readIntegerVector<Capacity>(in, "d flow", parse_capacity);
+    state.d_flow = readIntegerVector<Objective>(in, "d flow", parse_objective);
     state.x = readVector<int>(in, "min cut labels");
     state.is_first_iteration =
         readScalar<std::uint8_t>(in, "is first iteration") != 0;
@@ -971,11 +976,11 @@ private:
     state.mincut_value =
         readInteger<Objective>(in, "mincut value", parse_objective);
     state.cached_lagrange_multipliers =
-        readIntegerVector<Capacity>(in, "cached lagrange multipliers",
-                                    parse_capacity);
+        readIntegerVector<Lagrange>(in, "cached lagrange multipliers",
+                                    parse_objective);
     state.cached_last_lagrange_multipliers =
-        readIntegerVector<Capacity>(in, "cached last lagrange multipliers",
-                                    parse_capacity);
+        readIntegerVector<Lagrange>(in, "cached last lagrange multipliers",
+                                    parse_objective);
     state.regularization_str =
         readInteger<Capacity>(in, "regularization strength", parse_capacity);
     state.last_regularization_budget =
@@ -998,8 +1003,8 @@ private:
     graph_state.maxflow_iteration =
         readScalar<int>(in, "warm graph maxflow iteration");
     graph_state.time = readScalar<long>(in, "warm graph time");
-    graph_state.node_tr_caps = readIntegerVector<Capacity>(
-        in, "warm graph node tr caps", parse_capacity);
+    graph_state.node_tr_caps = readIntegerVector<Objective>(
+        in, "warm graph node tr caps", parse_objective);
     graph_state.node_parent_arc_indices =
         readVector<int>(in, "warm graph node parent arc indices");
     graph_state.node_timestamps =

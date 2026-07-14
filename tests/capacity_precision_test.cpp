@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <stdexcept>
 #include <string>
 
@@ -201,6 +202,85 @@ void aggregateObjectiveExceedsCapacityStorage() {
           "aggregate maxflow must use the widened objective domain");
 }
 
+void aggregateNodeBalanceExceedsCapacityStorage() {
+  if (!mcpd3::capacity_is_bounded()) {
+    return;
+  }
+
+  const mcpd3::Capacity capacity =
+      std::numeric_limits<mcpd3::Capacity>::max();
+  const std::vector<int> arcs{0, 1, 0, 2};
+  const std::vector<mcpd3::Capacity> arc_capacities{
+      capacity, 0, capacity, 0};
+  const std::vector<mcpd3::Capacity> terminal_capacities{0, 0, 0};
+  mcpd3::PrimalDualMinCutSolver solver(
+      3, 2, std::vector<int>(arcs), arc_capacities, terminal_capacities);
+
+  mcpd3::PrimalDualMinCutSolver::FlowWarmStart state{
+      arcs,
+      arc_capacities,
+      terminal_capacities,
+      {capacity, capacity},
+      {0, 0, 0},
+      {0, 0, 0}};
+  solver.restoreFlowWarmStart(state);
+  solver.replaceProblemCapacities(arc_capacities, terminal_capacities);
+
+  const auto rebuilt = solver.captureFlowWarmStart();
+  const mcpd3::Objective expected = mcpd3::checked_add(
+      mcpd3::widen_capacity(capacity), mcpd3::widen_capacity(capacity));
+  require(rebuilt.d_flow[0] == expected &&
+              rebuilt.d_flow[1] == -mcpd3::widen_capacity(capacity) &&
+              rebuilt.d_flow[2] == -mcpd3::widen_capacity(capacity),
+          "aggregate node balance must use the widened objective domain");
+}
+
+void lagrangeMultiplierExceedsCapacityStorage() {
+  if (!mcpd3::capacity_is_bounded()) {
+    return;
+  }
+
+  const mcpd3::Objective alpha = mcpd3::checked_add(
+      mcpd3::widen_capacity(std::numeric_limits<mcpd3::Capacity>::max()),
+      mcpd3::Objective{1});
+  std::list<mcpd3::DualDecompositionConstraintArc> constraints;
+  constraints.emplace_back(
+      alpha, alpha, /*alpha_momentum=*/0,
+      /*partition_index_source=*/0, /*partition_index_target=*/1,
+      /*local_index_source=*/0, /*local_index_target=*/0);
+  const auto constraint = constraints.begin();
+  require(constraint->alpha == alpha && constraint->last_alpha == alpha,
+          "lagrange state must not be narrowed to source capacity storage");
+
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{},
+      std::vector<mcpd3::Capacity>{}, std::vector<mcpd3::Capacity>{0});
+  solver.addSourceDualDecompositionConstraint(constraint);
+  solver.solve();
+  require(solver.getMinCutSolution(0) == 1,
+          "widened lagrange terminal potential must reach the local cut");
+}
+
+void mixedWidthMaxflowKeepsCompactArcResiduals() {
+  const mcpd3::Capacity arc_capacity =
+      mcpd3::capacity_test_extreme_value();
+  const mcpd3::Objective terminal_capacity = mcpd3::checked_add(
+      mcpd3::widen_capacity(arc_capacity),
+      mcpd3::widen_capacity(arc_capacity));
+  using MixedGraph =
+      Graph<mcpd3::Capacity, mcpd3::Objective, mcpd3::Objective>;
+  MixedGraph graph(/*node_num_max=*/2, /*edge_num_max=*/1);
+  graph.add_node(2);
+  graph.add_edge(0, 1, arc_capacity, 0);
+  graph.add_tweights(0, terminal_capacity, 0);
+  graph.add_tweights(1, 0, terminal_capacity);
+
+  require(graph.maxflow() == mcpd3::widen_capacity(arc_capacity),
+          "wide terminal potentials must preserve compact arc maxflow");
+  require(graph.get_rcap(graph.get_first_arc()) == 0,
+          "mixed-width augmentation must update compact arc residuals");
+}
+
 void maximalCapacityParsesFromDimacs() {
   const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
   const auto path = std::filesystem::temp_directory_path() /
@@ -268,6 +348,9 @@ int main() {
     configuredCapacitySurvivesGraphReallocation();
     maximalCapacitySurvivesMcpd3SolverAndWorkerStorage();
     aggregateObjectiveExceedsCapacityStorage();
+    aggregateNodeBalanceExceedsCapacityStorage();
+    lagrangeMultiplierExceedsCapacityStorage();
+    mixedWidthMaxflowKeepsCompactArcResiduals();
     maximalCapacityParsesFromDimacs();
     maximalCapacitySurvivesCsrStorage();
     std::cout << "capacity_precision_test: PASS\n";

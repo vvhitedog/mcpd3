@@ -41,6 +41,9 @@ using Capacity = mpz_class;
 using Objective = mpz_class;
 #endif
 
+// Source capacities stay compact; solver potentials must hold their sums.
+using Lagrange = Objective;
+
 inline const char *capacity_mode_name() {
 #if defined(MCPD_CAPACITY_MODE_32)
   return "32";
@@ -304,6 +307,38 @@ inline Objective parse_objective(const std::string &text) {
 #else
   return parse_bounded_integer<Objective>(text);
 #endif
+}
+
+template <typename Integer,
+          std::enable_if_t<std::is_integral_v<std::decay_t<Integer>>, int> = 0>
+inline Lagrange lagrange_from_integer(Integer value) {
+#if defined(MCPD_CAPACITY_MODE_GMP)
+  if constexpr (std::is_signed_v<Integer> && sizeof(Integer) <= sizeof(long)) {
+    return Lagrange(static_cast<long>(value));
+  } else if constexpr (std::is_unsigned_v<Integer> &&
+                       sizeof(Integer) <= sizeof(unsigned long)) {
+    return Lagrange(static_cast<unsigned long>(value));
+  } else {
+    return parse_objective(integer_to_string(value));
+  }
+#else
+  if constexpr (std::is_signed_v<Integer>) {
+    if constexpr (std::numeric_limits<Integer>::digits <=
+                  std::numeric_limits<Lagrange>::digits) {
+      return static_cast<Lagrange>(value);
+    }
+  } else if constexpr (std::numeric_limits<Integer>::digits <=
+                       std::numeric_limits<Lagrange>::digits) {
+    return static_cast<Lagrange>(value);
+  }
+  return parse_objective(integer_to_string(value));
+#endif
+}
+
+template <typename Integer,
+          std::enable_if_t<!std::is_integral_v<std::decay_t<Integer>>, int> = 0>
+inline Lagrange lagrange_from_integer(const Integer &value) {
+  return parse_objective(integer_to_string(value));
 }
 
 inline Objective widen_capacity(const Capacity &value) {

@@ -12,6 +12,15 @@
 
 ## Capacity precision refactor
 
+- Do not use the historical 2594-round 128x128 or 3973-round 256x256 quantum
+  continuation runs as arithmetic-correct performance baselines. Their
+  32-bit `d_flow` accumulation invokes signed overflow, so the wrapped local
+  terminal state and derived DD lower bound are not valid C++ or valid solver
+  arithmetic even though these instances happened to finish at the known
+  primal objective.
+- Do not restore 32-bit node balances or Lagrange multipliers to reproduce the
+  old fast trajectory. Source capacities and per-arc residuals can remain
+  compact, but sums and terminal potentials must use `Objective`.
 - Do not raw-copy, `memset`, `realloc`, mmap, or binary-serialize BK nodes,
   arcs, or vectors containing GMP values. GMP objects require construction,
   destruction, and value-aware persistence. Streaming state uses decimal

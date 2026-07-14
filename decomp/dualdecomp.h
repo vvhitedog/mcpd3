@@ -1109,9 +1109,11 @@ public:
     thread_pool_.wait();
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
-        constraint.alpha = checked_scale_capacity(constraint.alpha, scale);
+        constraint.alpha = checked_scale(
+            constraint.alpha, scale, "lagrange scale promotion overflow");
         constraint.last_alpha =
-            checked_scale_capacity(constraint.last_alpha, scale);
+            checked_scale(constraint.last_alpha, scale,
+                          "lagrange scale promotion overflow");
       }
     }
     if (has_max_lower_bound_raw_) {
@@ -1207,12 +1209,12 @@ private:
                 stats.effective_step_size *
                 static_cast<int>(momentum_scale * constraint.alpha_momentum);
             constraint.alpha = checked_add(
-                constraint.alpha, capacity_from_integer(alpha_update),
+                constraint.alpha, lagrange_from_integer(alpha_update),
                 "lagrange multiplier overflow");
           } else {
             constraint.alpha = checked_add(
                 constraint.alpha,
-                capacity_from_integer(stats.effective_step_size * diff),
+                lagrange_from_integer(stats.effective_step_size * diff),
                 "lagrange multiplier overflow");
           }
         }
@@ -1672,12 +1674,12 @@ private:
     std::uniform_int_distribution<long> initial_alpha_distribution(
         -options_.initial_alpha_random_radius,
         options_.initial_alpha_random_radius);
-    auto initial_alpha = [&]() -> Capacity {
+    auto initial_alpha = [&]() -> Lagrange {
       if (!options_.randomize_initial_alphas ||
           options_.initial_alpha_random_radius == 0) {
         return 0;
       }
-      return capacity_from_integer(
+      return lagrange_from_integer(
           initial_alpha_distribution(initial_alpha_generator));
     };
     for (auto &[global_index, partitions] : constrained_nodes) {
@@ -1697,7 +1699,7 @@ private:
           int local_index_target =
               min_cut_sub_graphs_[partition_target].getNode(global_index);
           const int constraint_id = next_constraint_id++;
-          const Capacity alpha = initial_alpha();
+          const Lagrange alpha = initial_alpha();
           constraint_arcs.emplace_back(
               /*alpha=*/alpha,
               /*last_alpha=*/alpha,
