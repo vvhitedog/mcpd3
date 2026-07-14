@@ -1101,6 +1101,128 @@ void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
           "NONE scheme should disable low-scale local regularization");
 }
 
+void disagreementPlateauTrackerRequiresAFullFlatWindow() {
+  requireThrows(
+      [] { mcpd3::DisagreementPlateauRegularizationTracker invalid(0); },
+      "plateau tracker should reject nonpositive patience");
+  mcpd3::DisagreementPlateauRegularizationTracker tracker(/*patience=*/2);
+  requireThrows(
+      [&] { (void)tracker.observe(/*iteration=*/-1, /*disagreement_count=*/5); },
+      "plateau tracker should reject a negative iteration");
+  requireThrows(
+      [&] { (void)tracker.observe(/*iteration=*/0, /*disagreement_count=*/-1); },
+      "plateau tracker should reject a negative disagreement count");
+  require(!tracker.observe(/*iteration=*/0, /*disagreement_count=*/5),
+          "first disagreement observation should establish the baseline");
+  require(!tracker.observe(/*iteration=*/1, /*disagreement_count=*/5),
+          "one flat iteration should not exhaust patience two");
+  require(tracker.observe(/*iteration=*/2, /*disagreement_count=*/5),
+          "two flat iterations should activate plateau regularization");
+  require(tracker.active(),
+          "plateau tracker should remain active after activation");
+  require(!tracker.observe(/*iteration=*/3, /*disagreement_count=*/4),
+          "an active tracker should not report a second activation");
+}
+
+void disagreementPlateauTrackerResetsOnProgressAndScaleReset() {
+  mcpd3::DisagreementPlateauRegularizationTracker tracker(/*patience=*/2);
+  require(!tracker.observe(/*iteration=*/0, /*disagreement_count=*/5),
+          "first scale should establish its disagreement baseline");
+  require(!tracker.observe(/*iteration=*/1, /*disagreement_count=*/4),
+          "lower disagreement should reset plateau patience");
+  require(tracker.bestDisagreementCount() == 4,
+          "the tracker should retain the best disagreement count");
+  require(tracker.iterationsSinceImprovement(/*iteration=*/1) == 0,
+          "new disagreement progress should reset its patience age");
+  require(!tracker.observe(/*iteration=*/2, /*disagreement_count=*/4),
+          "one flat iteration after progress should not activate");
+  require(tracker.iterationsSinceImprovement(/*iteration=*/2) == 1,
+          "a flat iteration should advance the disagreement patience age");
+  require(tracker.observe(/*iteration=*/3, /*disagreement_count=*/4),
+          "a full flat window after progress should activate");
+
+  tracker.reset();
+  require(!tracker.active(),
+          "a new optimization scale should start with activation disabled");
+  require(!tracker.observe(/*iteration=*/0, /*disagreement_count=*/4),
+          "a reset scale should establish a new disagreement baseline");
+  require(!tracker.observe(/*iteration=*/1, /*disagreement_count=*/3),
+          "new-scale disagreement progress should reset patience again");
+  require(!tracker.observe(/*iteration=*/2, /*disagreement_count=*/3),
+          "new-scale tracker should require its complete flat window");
+  require(tracker.observe(/*iteration=*/3, /*disagreement_count=*/3),
+          "new-scale tracker should activate after its own flat window");
+}
+
+void disagreementPlateauOptionsValidateAndUseUnitStrength() {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10000;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::
+          DISAGREEMENT_PLATEAU_EPSILON;
+  options.disagreement_patience = 0;
+  requireThrows(
+      [&] {
+        mcpd3::DualDecomposition invalid(
+            /*npartition=*/2, /*nnode=*/2, /*narc=*/1,
+            /*arcs=*/std::vector<int>{0, 1},
+            /*arc_capacities=*/std::vector<int>{3, 5},
+            /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+      },
+      "plateau mode should reject nonpositive disagreement patience");
+
+  options.disagreement_patience = 2;
+  mcpd3::DualDecomposition plateau(
+      /*npartition=*/2, /*nnode=*/2, /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  require(plateau.regularizationStrengthForStepSize(10000) == 0,
+          "plateau mode should start unregularized at high scales");
+  require(plateau.plateauRegularizationStrength() == 1,
+          "plateau mode should use cumulative unit regularization at every "
+          "scale");
+}
+
+void disagreementPlateauModeActivatesOnARealDdPlateau() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 100;
+  options.initial_step_size = 100;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 5;
+  options.patience = 2;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::
+          DISAGREEMENT_PLATEAU_EPSILON;
+  options.disagreement_patience = 1;
+
+  mcpd3::DualDecomposition plateau(
+      /*npartition=*/2, /*nnode=*/2, /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{0, 0},
+      /*terminal_capacities=*/std::vector<int>{-100, -10}, options);
+  plateau.solve();
+
+  require(plateau.getDisagreementPlateauActivationCount() == 1,
+          "a persistent real DD disagreement should activate plateau "
+          "regularization exactly once in one scale");
+  require(plateau.getLastRegularizationBudget() > 0,
+          "the solve after plateau activation should consume cumulative unit "
+          "regularization budget");
+  require(plateau.getLastRegularizationBudget() < plateau.getScale(),
+          "the plateau fixture must retain a strictly sub-quantum budget");
+}
+
 void dualDecompositionRandomizesExportedInitialAlphas() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
 
@@ -4270,6 +4392,10 @@ int main() {
     partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
+    disagreementPlateauTrackerRequiresAFullFlatWindow();
+    disagreementPlateauTrackerResetsOnProgressAndScaleReset();
+    disagreementPlateauOptionsValidateAndUseUnitStrength();
+    disagreementPlateauModeActivatesOnARealDdPlateau();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();

@@ -141,3 +141,21 @@
 - Passed complete CTest suites in 32-, 64-, 128-bit, GMP, and opt-in legacy
   replay builds. Legacy replay intentionally retains its historical binary
   anchor semantics.
+
+## 2026-07-14 13:12 PDT - Disagreement-plateau regularization
+
+- Added opt-in `DISAGREEMENT_PLATEAU_EPSILON` scheduling for native DD. Each
+  scale starts with no new epsilon accumulation, waits for a separately
+  configured number of iterations without a lower disagreement count, then
+  enables cumulative regularization at fixed strength 1.
+- Activating regularization resets lower-bound patience. If agreement is not
+  reached during that normal patience window, the solver advances to the next
+  scale and starts a fresh disagreement window. Existing cumulative weights
+  remain part of the warm solver state and strict-budget promotion remains the
+  exactness safeguard.
+- Added branch tests for invalid observations/options, full plateau windows,
+  disagreement improvement, scale reset, one-time activation, fixed unit
+  strength, and a real two-partition plateau that consumes regularization
+  budget while remaining strictly below the objective quantum.
+- Passed complete CTest suites in 32-, 64-, 128-bit, GMP, and legacy replay
+  builds.
