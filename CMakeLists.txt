@@ -45,8 +45,24 @@ find_package (Threads REQUIRED)
 option(GPERF_PROFILER_BUILD "Build with gperftools CPU profiling enabled." OFF )
 option(TRAP_SIGNED_INTEGER_OVERFLOW "Trap signed and unsigned integer overflow using the `ftrapv` flag." OFF )
 option(METIS_ENABLED "Use the metis library for graph partitioning (highly recommended.)" OFF )
+option(MCPD_LEGACY_32BIT_DD_REPLAY
+  "Replay historical narrow 32-bit DD arithmetic with defined wrapping. Benchmark compatibility only."
+  OFF)
 include(cmake/McpdCapacity.cmake)
 mcpd_configure_capacity(mcpd3_capacity_config ${CMAKE_CURRENT_SOURCE_DIR})
+
+if (MCPD_LEGACY_32BIT_DD_REPLAY)
+  if (NOT MCPD_CAPACITY_MODE STREQUAL "32")
+    message(FATAL_ERROR
+      "MCPD_LEGACY_32BIT_DD_REPLAY requires MCPD_CAPACITY_MODE=32")
+  endif ()
+  message(WARNING
+    "MCPD_LEGACY_32BIT_DD_REPLAY deterministically reproduces historical "
+    "wrapped DD arithmetic. It is for benchmark replay only and does not "
+    "provide production-valid solver arithmetic.")
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD_LEGACY_32BIT_DD_REPLAY=1)
+endif ()
 
 # Set flags based on options
 if (GPERF_PROFILER_BUILD) 

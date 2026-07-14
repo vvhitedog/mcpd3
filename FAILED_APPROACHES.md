@@ -51,3 +51,15 @@
 - Do not infer a small regression from fixed-order benchmark runs. Rotate all
   precision modes across run positions and use alternating baseline/candidate
   pairs when the difference is close to run noise.
+
+## 2026-07-13 - Historical benchmark replay boundary
+
+- Do not enable `MCPD_LEGACY_32BIT_DD_REPLAY` in normal solver builds. It
+  exists only to reproduce and audit pre-check benchmark trajectories.
+- Do not treat a replayed DD lower bound or final conditioned DOWN objective as
+  an arithmetic-valid certificate. Explicit wrapping makes execution defined
+  and repeatable, but it does not make the wrapped integer state mathematically
+  valid.
+- Do not replace the widened production aliases with the replay aliases. The
+  replay policy must remain opt-in, 32-bit-only, visibly warned, and covered by
+  a normal-build regression test showing that checked overflow remains active.

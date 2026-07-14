@@ -966,7 +966,8 @@ private:
     }
     PrimalDualMinCutSolver::WarmState state;
     state.v_flow = readIntegerVector<Capacity>(in, "v flow", parse_capacity);
-    state.d_flow = readIntegerVector<Objective>(in, "d flow", parse_objective);
+    state.d_flow =
+        readIntegerVector<NodeFlow>(in, "d flow", parse_node_flow);
     state.x = readVector<int>(in, "min cut labels");
     state.is_first_iteration =
         readScalar<std::uint8_t>(in, "is first iteration") != 0;
@@ -977,10 +978,10 @@ private:
         readInteger<Objective>(in, "mincut value", parse_objective);
     state.cached_lagrange_multipliers =
         readIntegerVector<Lagrange>(in, "cached lagrange multipliers",
-                                    parse_objective);
+                                    parse_lagrange);
     state.cached_last_lagrange_multipliers =
         readIntegerVector<Lagrange>(in, "cached last lagrange multipliers",
-                                    parse_objective);
+                                    parse_lagrange);
     state.regularization_str =
         readInteger<Capacity>(in, "regularization strength", parse_capacity);
     state.last_regularization_budget =
@@ -1003,8 +1004,8 @@ private:
     graph_state.maxflow_iteration =
         readScalar<int>(in, "warm graph maxflow iteration");
     graph_state.time = readScalar<long>(in, "warm graph time");
-    graph_state.node_tr_caps = readIntegerVector<Objective>(
-        in, "warm graph node tr caps", parse_objective);
+    graph_state.node_tr_caps = readIntegerVector<TerminalResidual>(
+        in, "warm graph node tr caps", parse_terminal_residual);
     graph_state.node_parent_arc_indices =
         readVector<int>(in, "warm graph node parent arc indices");
     graph_state.node_timestamps =

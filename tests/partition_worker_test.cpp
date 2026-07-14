@@ -71,7 +71,9 @@ void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
   } catch (const std::overflow_error &) {
     add_threw = true;
   }
-  require(add_threw == mcpd3::integer_is_bounded<mcpd3::Objective>(),
+  require(add_threw ==
+              (mcpd3::integer_is_bounded<mcpd3::Objective>() &&
+               !mcpd3::legacy_32bit_dd_replay_enabled()),
           "regularized objective overflow behavior should match precision");
 
   bool subtract_threw = false;
@@ -82,13 +84,15 @@ void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
   } catch (const std::overflow_error &) {
     subtract_threw = true;
   }
-  require(subtract_threw == mcpd3::integer_is_bounded<mcpd3::Objective>(),
+  require(subtract_threw ==
+              (mcpd3::integer_is_bounded<mcpd3::Objective>() &&
+               !mcpd3::legacy_32bit_dd_replay_enabled()),
           "certificate underflow behavior should match precision");
 }
 
 void solverMemoryEstimateReportsBkAndVectorBytes() {
   using GraphType =
-      Graph<mcpd3::Capacity, mcpd3::Capacity, mcpd3::Objective>;
+      Graph<mcpd3::Capacity, mcpd3::TerminalResidual, mcpd3::Objective>;
   require(GraphType::estimated_node_array_bytes(1) ==
               GraphType::estimated_node_array_bytes(16),
           "BK node estimate should include constructor minimum capacity");
@@ -106,7 +110,7 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
           "BK total estimate should sum node and arc arrays");
   require(estimate.solver_vector_bytes ==
               4 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
-                  2 * sizeof(mcpd3::Objective),
+                  2 * sizeof(mcpd3::NodeFlow),
           "solver vector estimate should account for arc and node vectors");
   require(estimate.total_bytes ==
               estimate.bk_total_bytes + estimate.solver_vector_bytes,
@@ -3354,7 +3358,7 @@ void primalDualCapacityRefreshScalesFlowStateByQuantumRatio() {
     require(scaled.v_flow == std::vector<mcpd3::Capacity>{expected},
             "capacity refresh should scale signed arc flow toward zero");
     require(scaled.d_flow ==
-                std::vector<mcpd3::Objective>{expected, -expected},
+                std::vector<mcpd3::NodeFlow>{expected, -expected},
             "capacity refresh should recompute balance from scaled flow");
   }
 

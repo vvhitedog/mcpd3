@@ -32,6 +32,29 @@ void precisionMetadataMatchesConfiguredType() {
           "capacity storage bits must identify a supported mode");
 }
 
+void legacyReplayPolicyMatchesHistoricalWidthAndWrap() {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  require(mcpd3::legacy_32bit_dd_replay_enabled(),
+          "legacy replay metadata must report the configured policy");
+  require(sizeof(mcpd3::Lagrange) == sizeof(mcpd3::Capacity),
+          "legacy lagrange state must use capacity width");
+  require(sizeof(mcpd3::NodeFlow) == sizeof(mcpd3::Capacity),
+          "legacy node-flow state must use capacity width");
+  require(sizeof(mcpd3::TerminalResidual) == sizeof(mcpd3::Capacity),
+          "legacy terminal residuals must use capacity width");
+
+  const auto minimum = std::numeric_limits<mcpd3::Capacity>::min();
+  const auto maximum = std::numeric_limits<mcpd3::Capacity>::max();
+  require(mcpd3::checked_add(maximum, mcpd3::Capacity{1}) == minimum,
+          "legacy addition must wrap maximum to minimum");
+  require(mcpd3::checked_subtract(minimum, mcpd3::Capacity{1}) == maximum,
+          "legacy subtraction must wrap minimum to maximum");
+#else
+  require(!mcpd3::legacy_32bit_dd_replay_enabled(),
+          "checked builds must not report legacy replay");
+#endif
+}
+
 bool tryParseCapacity(const std::string &text, mcpd3::Capacity &value) {
   return mcpd3::parse_capacity_chars(text.data(), text.data() + text.size(),
                                      value);
@@ -227,18 +250,32 @@ void aggregateNodeBalanceExceedsCapacityStorage() {
   solver.replaceProblemCapacities(arc_capacities, terminal_capacities);
 
   const auto rebuilt = solver.captureFlowWarmStart();
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  const mcpd3::Capacity expected =
+      mcpd3::checked_add(capacity, capacity);
+  require(rebuilt.d_flow[0] == expected && rebuilt.d_flow[1] == -capacity &&
+              rebuilt.d_flow[2] == -capacity,
+          "legacy aggregate node balance must wrap deterministically");
+#else
   const mcpd3::Objective expected = mcpd3::checked_add(
       mcpd3::widen_capacity(capacity), mcpd3::widen_capacity(capacity));
   require(rebuilt.d_flow[0] == expected &&
               rebuilt.d_flow[1] == -mcpd3::widen_capacity(capacity) &&
               rebuilt.d_flow[2] == -mcpd3::widen_capacity(capacity),
           "aggregate node balance must use the widened objective domain");
+#endif
 }
 
 void lagrangeMultiplierExceedsCapacityStorage() {
   if (!mcpd3::capacity_is_bounded()) {
     return;
   }
+
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  require(sizeof(mcpd3::Lagrange) == sizeof(mcpd3::Capacity),
+          "legacy lagrange state must retain historical capacity width");
+  return;
+#else
 
   const mcpd3::Objective alpha = mcpd3::checked_add(
       mcpd3::widen_capacity(std::numeric_limits<mcpd3::Capacity>::max()),
@@ -259,6 +296,7 @@ void lagrangeMultiplierExceedsCapacityStorage() {
   solver.solve();
   require(solver.getMinCutSolution(0) == 1,
           "widened lagrange terminal potential must reach the local cut");
+#endif
 }
 
 void mixedWidthMaxflowKeepsCompactArcResiduals() {
@@ -341,6 +379,7 @@ void maximalCapacitySurvivesCsrStorage() {
 int main() {
   try {
     precisionMetadataMatchesConfiguredType();
+    legacyReplayPolicyMatchesHistoricalWidthAndWrap();
     capacityCharacterParserHandlesSignsAndBounds();
     capacityCharacterParserRejectsMalformedValues();
     nativeIntegerCapacityConversionChecksRange();

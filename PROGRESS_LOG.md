@@ -97,3 +97,22 @@
   plus its reported terminal-imbalance constant matches its published value.
 - Passed both CTest tests in all four precision modes: 8/8 mode/test
   combinations.
+
+## 2026-07-13 23:23 PDT - Deterministic historical DD replay
+
+- Added opt-in `MCPD_LEGACY_32BIT_DD_REPLAY` for benchmark compatibility. It
+  is restricted to 32-bit capacity builds and leaves the checked/widened
+  production policy unchanged by default.
+- Recreated the historical narrow Lagrange, node-balance, and BK terminal
+  residual domains with explicit unsigned-bit wrapping. The replay therefore
+  has deterministic two's-complement behavior without invoking signed-overflow
+  undefined behavior.
+- Added branch tests for replay type widths, maximum-to-minimum and
+  minimum-to-maximum wrapping, wrapped aggregate node balance, normal checked
+  overflow, memory estimates, and warm-state serialization types.
+- Both normal and replay test builds pass. The replay tests also pass under
+  UBSan with `-fno-sanitize-recover=undefined`; 64-bit replay configuration is
+  rejected at configure time.
+- Current phase code linked against this replay policy exactly reproduces the
+  historical per-cut DD trajectories at 128x128 and 256x256. This is a
+  diagnostic compatibility mode, not a production arithmetic policy.

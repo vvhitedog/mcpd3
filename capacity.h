@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -41,8 +42,29 @@ using Capacity = mpz_class;
 using Objective = mpz_class;
 #endif
 
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+#if !defined(MCPD_CAPACITY_MODE_32)
+#error "MCPD_LEGACY_32BIT_DD_REPLAY requires 32-bit capacities"
+#endif
+// Compatibility policy for deterministic replay of pre-check benchmark runs.
+// Production builds keep these states widened and checked.
+using Lagrange = Capacity;
+using NodeFlow = Capacity;
+using TerminalResidual = Capacity;
+#else
 // Source capacities stay compact; solver potentials must hold their sums.
 using Lagrange = Objective;
+using NodeFlow = Objective;
+using TerminalResidual = Objective;
+#endif
+
+inline constexpr bool legacy_32bit_dd_replay_enabled() {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return true;
+#else
+  return false;
+#endif
+}
 
 inline const char *capacity_mode_name() {
 #if defined(MCPD_CAPACITY_MODE_32)
@@ -312,6 +334,9 @@ inline Objective parse_objective(const std::string &text) {
 template <typename Integer,
           std::enable_if_t<std::is_integral_v<std::decay_t<Integer>>, int> = 0>
 inline Lagrange lagrange_from_integer(Integer value) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return capacity_from_integer(value);
+#else
 #if defined(MCPD_CAPACITY_MODE_GMP)
   if constexpr (std::is_signed_v<Integer> && sizeof(Integer) <= sizeof(long)) {
     return Lagrange(static_cast<long>(value));
@@ -333,12 +358,17 @@ inline Lagrange lagrange_from_integer(Integer value) {
   }
   return parse_objective(integer_to_string(value));
 #endif
+#endif
 }
 
 template <typename Integer,
           std::enable_if_t<!std::is_integral_v<std::decay_t<Integer>>, int> = 0>
 inline Lagrange lagrange_from_integer(const Integer &value) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return parse_capacity(integer_to_string(value));
+#else
   return parse_objective(integer_to_string(value));
+#endif
 }
 
 inline Objective widen_capacity(const Capacity &value) {
@@ -361,8 +391,46 @@ inline constexpr bool integer_is_bounded() {
 }
 
 template <typename Integer>
+inline Integer wrapping_add(const Integer &lhs, const Integer &rhs) {
+  static_assert(std::is_integral_v<Integer>,
+                "legacy wrapping requires a native integer type");
+  using Unsigned = std::make_unsigned_t<Integer>;
+  const Unsigned bits =
+      static_cast<Unsigned>(lhs) + static_cast<Unsigned>(rhs);
+  if constexpr (std::is_unsigned_v<Integer>) {
+    return bits;
+  } else {
+    Integer result;
+    static_assert(sizeof(result) == sizeof(bits), "integer width mismatch");
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+  }
+}
+
+template <typename Integer>
+inline Integer wrapping_subtract(const Integer &lhs, const Integer &rhs) {
+  static_assert(std::is_integral_v<Integer>,
+                "legacy wrapping requires a native integer type");
+  using Unsigned = std::make_unsigned_t<Integer>;
+  const Unsigned bits =
+      static_cast<Unsigned>(lhs) - static_cast<Unsigned>(rhs);
+  if constexpr (std::is_unsigned_v<Integer>) {
+    return bits;
+  } else {
+    Integer result;
+    static_assert(sizeof(result) == sizeof(bits), "integer width mismatch");
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+  }
+}
+
+template <typename Integer>
 inline Integer checked_add(const Integer &lhs, const Integer &rhs,
                            const char *message = "integer addition overflow") {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  (void)message;
+  return wrapping_add(lhs, rhs);
+#else
   if constexpr (!integer_is_bounded<Integer>()) {
     return lhs + rhs;
   } else {
@@ -372,12 +440,17 @@ inline Integer checked_add(const Integer &lhs, const Integer &rhs,
     }
     return lhs + rhs;
   }
+#endif
 }
 
 template <typename Integer>
 inline Integer checked_subtract(
     const Integer &lhs, const Integer &rhs,
     const char *message = "integer subtraction overflow") {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  (void)message;
+  return wrapping_subtract(lhs, rhs);
+#else
   if constexpr (!integer_is_bounded<Integer>()) {
     return lhs - rhs;
   } else {
@@ -387,6 +460,44 @@ inline Integer checked_subtract(
     }
     return lhs - rhs;
   }
+#endif
+}
+
+inline NodeFlow node_flow_from_capacity(const Capacity &value) {
+  return static_cast<NodeFlow>(value);
+}
+
+inline TerminalResidual terminal_residual_from_capacity(
+    const Capacity &value) {
+  return static_cast<TerminalResidual>(value);
+}
+
+inline Objective widen_lagrange(const Lagrange &value) {
+  return static_cast<Objective>(value);
+}
+
+inline NodeFlow parse_node_flow(const std::string &text) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return parse_capacity(text);
+#else
+  return parse_objective(text);
+#endif
+}
+
+inline Lagrange parse_lagrange(const std::string &text) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return parse_capacity(text);
+#else
+  return parse_objective(text);
+#endif
+}
+
+inline TerminalResidual parse_terminal_residual(const std::string &text) {
+#if defined(MCPD_LEGACY_32BIT_DD_REPLAY)
+  return parse_capacity(text);
+#else
+  return parse_objective(text);
+#endif
 }
 
 template <typename Integer>

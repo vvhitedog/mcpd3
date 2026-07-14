@@ -53,12 +53,12 @@ inline bool primaldual_timing_enabled() {
 class PrimalDualMinCutSolver {
 public:
   using MaxflowGraph =
-      Graph</*captype=*/Capacity, /*tcaptype=*/Objective,
+      Graph</*captype=*/Capacity, /*tcaptype=*/TerminalResidual,
             /*flowtype=*/Objective>;
 
   struct WarmState {
     std::vector<Capacity> v_flow;
-    std::vector<Objective> d_flow;
+    std::vector<NodeFlow> d_flow;
     std::vector<int> x;
     bool is_first_iteration = true;
     bool is_first_iteration_of_new_scale = true;
@@ -80,7 +80,7 @@ public:
     std::vector<Capacity> arc_capacities;
     std::vector<Capacity> terminal_capacities;
     std::vector<Capacity> v_flow;
-    std::vector<Objective> d_flow;
+    std::vector<NodeFlow> d_flow;
     std::vector<int> x;
   };
 
@@ -259,7 +259,7 @@ public:
       a = maxflow_graph_.get_next_arc(a);
     }
     for (int i = 0; i < nnode_; ++i) {
-      Objective flow;
+      TerminalResidual flow;
       flow = maxflow_graph_.get_trcap(i);
       maxflow_graph_.set_trcap(
           i, checked_scale(flow, scale, "terminal residual scale overflow"));
@@ -394,19 +394,22 @@ public:
 
   Objective getMaxFlowValue() const {
     Objective maxflow = 0;
-    std::vector<Objective> node_balance(nnode_, 0);
+    std::vector<NodeFlow> node_balance(nnode_, 0);
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
       const Capacity flow = v_flow_[i];
       node_balance[s] = checked_add(
-          node_balance[s], widen_capacity(flow), "maxflow balance overflow");
+          node_balance[s], node_flow_from_capacity(flow),
+          "maxflow balance overflow");
       node_balance[t] = checked_subtract(
-          node_balance[t], widen_capacity(flow), "maxflow balance overflow");
+          node_balance[t], node_flow_from_capacity(flow),
+          "maxflow balance overflow");
     }
     for (int i = 0; i < nnode_; ++i) {
       if (node_balance[i] > 0) {
-        maxflow = checked_add(maxflow, node_balance[i],
+        maxflow = checked_add(maxflow,
+                              static_cast<Objective>(node_balance[i]),
                               "maxflow objective overflow");
       }
       // TODO: the imbalance needs to be accounted for
@@ -475,7 +478,7 @@ public:
 
   static MemoryEstimate estimateMemoryBytes(int nnode, int narc) {
     using EstimateGraph =
-        Graph</*captype=*/Capacity, /*tcaptype=*/Objective,
+        Graph</*captype=*/Capacity, /*tcaptype=*/TerminalResidual,
               /*flowtype=*/Objective>;
     MemoryEstimate estimate;
     estimate.bk_node_bytes = EstimateGraph::estimated_node_array_bytes(nnode);
@@ -485,12 +488,12 @@ public:
     const auto arc_index_count = 2 * static_cast<std::size_t>(narc);
     const auto arc_capacity_count = 3 * static_cast<std::size_t>(narc);
     const auto node_capacity_count = static_cast<std::size_t>(nnode);
-    const auto node_objective_count = static_cast<std::size_t>(nnode);
+    const auto node_flow_count = static_cast<std::size_t>(nnode);
     const auto node_label_count = static_cast<std::size_t>(nnode);
     estimate.solver_vector_bytes =
         arc_index_count * sizeof(int) +
         (arc_capacity_count + node_capacity_count) * sizeof(Capacity) +
-        node_objective_count * sizeof(Objective) +
+        node_flow_count * sizeof(NodeFlow) +
         node_label_count * sizeof(int);
     estimate.total_bytes =
         estimate.bk_total_bytes + estimate.solver_vector_bytes;
@@ -637,10 +640,10 @@ public:
       const int source = arcs_[2 * i];
       const int target = arcs_[2 * i + 1];
       d_flow_[source] = checked_add(
-          d_flow_[source], widen_capacity(v_flow_[i]),
+          d_flow_[source], node_flow_from_capacity(v_flow_[i]),
           "warm-start node balance overflow");
       d_flow_[target] = checked_subtract(
-          d_flow_[target], widen_capacity(v_flow_[i]),
+          d_flow_[target], node_flow_from_capacity(v_flow_[i]),
           "warm-start node balance overflow");
     }
 
@@ -759,12 +762,12 @@ private:
     return lagrange_multiplier_term;
   }
 
-  Objective regularizationTerm(size_t constraint_index) const {
+  TerminalResidual regularizationTerm(size_t constraint_index) const {
     if (regularization_str_ <= 0 || regularization_anchor_sink_.empty() ||
         !regularization_anchor_sink_[constraint_index]) {
       return 0;
     }
-    return regularization_str_;
+    return terminal_residual_from_capacity(regularization_str_);
   }
 
   Objective updateRegularizationAnchorsFromCurrentSolution() {
@@ -832,7 +835,7 @@ private:
       const Lagrange lagrange_multiplier_term = lagrangeMultiplierTerm(i);
       if (x_[dual_decomposition_local_indices_[i]]) {
         mincut_value_ = checked_add(
-            mincut_value_, lagrange_multiplier_term,
+            mincut_value_, widen_lagrange(lagrange_multiplier_term),
             "mincut lagrange objective overflow");
       }
       ++i;
@@ -859,9 +862,9 @@ private:
     return {pos, neg};
   }
 
-  Objective nodeGradient(const Capacity &terminal_capacity,
-                         const Objective &flow) const {
-    return checked_add(flow, widen_capacity(terminal_capacity),
+  TerminalResidual nodeGradient(const Capacity &terminal_capacity,
+                                const NodeFlow &flow) const {
+    return checked_add(flow, terminal_residual_from_capacity(terminal_capacity),
                        "terminal residual capacity overflow");
   }
 
@@ -887,9 +890,9 @@ private:
       }
       if (new_flow != 0) {
         v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
-        d_flow_[s] = checked_add(d_flow_[s], widen_capacity(new_flow),
+        d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                  "node flow balance overflow");
-        d_flow_[t] = checked_subtract(d_flow_[t], widen_capacity(new_flow),
+        d_flow_[t] = checked_subtract(d_flow_[t], node_flow_from_capacity(new_flow),
                                       "node flow balance overflow");
       }
       std::tie(pos, neg) =
@@ -902,7 +905,7 @@ private:
     }
   }
 
-  void updateNodeTerminal(int i, Objective pos, bool do_update) {
+  void updateNodeTerminal(int i, TerminalResidual pos, bool do_update) {
     if (do_update) {
       auto existing_pos = maxflow_graph_.get_trcap(i);
       pos = checked_add(pos, existing_pos,
@@ -1300,12 +1303,12 @@ private:
       }
       if (x_[index]) {
         mincut_value_ = checked_subtract(
-            mincut_value_, last_lagrange_multiplier_term,
+            mincut_value_, widen_lagrange(last_lagrange_multiplier_term),
             "incremental mincut lagrange overflow");
       }
       if (x_i_new) {
         mincut_value_ = checked_add(
-            mincut_value_, lagrange_multiplier_term,
+            mincut_value_, widen_lagrange(lagrange_multiplier_term),
             "incremental mincut lagrange overflow");
       }
     }
@@ -1390,10 +1393,11 @@ private:
       Capacity new_flow = checked_subtract(
           maxflow_graph_.get_rcap(a), pos, "arc flow delta overflow");
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
-      d_flow_[s] = checked_add(d_flow_[s], widen_capacity(new_flow),
+      d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
-      d_flow_[t] = checked_subtract(d_flow_[t], widen_capacity(new_flow),
-                                    "node flow balance overflow");
+      d_flow_[t] = checked_subtract(
+          d_flow_[t], node_flow_from_capacity(new_flow),
+          "node flow balance overflow");
       a = maxflow_graph_.get_next_arc(a);
       a = maxflow_graph_.get_next_arc(a);
     }
@@ -1412,9 +1416,9 @@ private:
           maxflow_graph_.get_rcap(first_arc + 2 * i), pos,
           "arc flow delta overflow");
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
-      d_flow_[s] = checked_add(d_flow_[s], widen_capacity(new_flow),
+      d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
-      d_flow_[t] = checked_subtract(d_flow_[t], widen_capacity(new_flow),
+      d_flow_[t] = checked_subtract(d_flow_[t], node_flow_from_capacity(new_flow),
                                     "node flow balance overflow");
     }
   }
@@ -1513,7 +1517,7 @@ private:
    * data structures needed for solving primal dual problem
    */
   std::vector<Capacity> v_flow_; // flow on the arcs
-  std::vector<Objective> d_flow_; // flow balance on the nodes
+  std::vector<NodeFlow> d_flow_; // flow balance on the nodes
   std::vector<int> x_;      // mincut solution
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
