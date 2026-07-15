@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -4374,6 +4375,148 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
   }
 }
 
+void primalDualTracksOnlyNonzeroArcFlowUpdates() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{5, 5}, std::vector<int>{5, -5});
+
+  solver.solve();
+  require(solver.getArcFlowUpdateCounts().empty(),
+          "disabled arc-flow tracking must allocate no per-edge counters");
+
+  mcpd3::PrimalDualMinCutSolver tracked(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{5, 5}, std::vector<int>{5, -5});
+  tracked.setTrackArcFlowUpdates(true);
+  tracked.solve();
+  require(tracked.getArcFlowUpdateCounts() ==
+              std::vector<std::uint64_t>{1},
+          "the first nonzero edge-flow change must be counted once");
+
+  tracked.solve();
+  require(tracked.getArcFlowUpdateCounts() ==
+              std::vector<std::uint64_t>{1},
+          "an unchanged residual solve must not add a flow update");
+  tracked.resetArcFlowUpdateCounts();
+  require(tracked.getArcFlowUpdateCounts() ==
+              std::vector<std::uint64_t>{0},
+          "arc-flow heat reset must clear every edge count");
+}
+
+void dualDecompositionFlowHeatMapsBoundaryEdgesExactlyOnce() {
+  const char *old_partitioner = std::getenv("MCPD3_PARTITIONER");
+  const bool had_old_partitioner = old_partitioner != nullptr;
+  const std::string old_value = had_old_partitioner ? old_partitioner : "";
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+
+  mcpd3::DualDecompositionOptions options = warmStartDdOptions();
+  options.track_arc_flow_updates = true;
+  options.materialize_all_partition_nodes = true;
+  mcpd3::DualDecomposition decomposition(
+      /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
+      // The middle edge is deliberately reversed. It crosses the basic
+      // partition boundary after mcpd3 canonicalizes its endpoints.
+      std::vector<int>{0, 1, 2, 1, 2, 3},
+      std::vector<int>{5, 5, 5, 5, 5, 5},
+      std::vector<int>{5, 0, 0, -5}, options);
+  decomposition.solve();
+
+  const auto heat = decomposition.getArcFlowUpdateCounts();
+  require(heat.size() == 3,
+          "global heatmap must contain one entry per original edge");
+  require(heat[1] > 0,
+          "the reversed crossing edge must retain its flow activity");
+
+  size_t crossing_edge_copies = 0;
+  for (const auto &package : decomposition.getPartitionPackages()) {
+    const int local_arc_count = static_cast<int>(package.arcs.size() / 2);
+    for (int local_arc = 0; local_arc < local_arc_count; ++local_arc) {
+      const int local_u = package.arcs[2 * local_arc];
+      const int local_v = package.arcs[2 * local_arc + 1];
+      const int global_u = package.local_to_global[local_u];
+      const int global_v = package.local_to_global[local_v];
+      if ((global_u == 1 && global_v == 2) ||
+          (global_u == 2 && global_v == 1)) {
+        ++crossing_edge_copies;
+      }
+    }
+  }
+  require(crossing_edge_copies == 1,
+          "a boundary edge must be owned by exactly one local partition");
+
+  decomposition.resetArcFlowUpdateCounts();
+  require(decomposition.getArcFlowUpdateCounts() ==
+              std::vector<std::uint64_t>({0, 0, 0}),
+          "global heat reset must clear all owned local edge counters");
+
+  if (had_old_partitioner) {
+    ::setenv("MCPD3_PARTITIONER", old_value.c_str(), 1);
+  } else {
+    ::unsetenv("MCPD3_PARTITIONER");
+  }
+}
+
+#ifdef HAVE_METIS
+void metisWeightedPartitionCutsLowActivityEdges() {
+  const std::vector<int> cycle{0, 1, 1, 2, 2, 3, 3, 0};
+  const std::vector<std::uint64_t> weights{100, 1, 100, 1};
+  const auto labels =
+      mcpd3::metis_partition(/*npartition=*/2, /*narc=*/4, /*nnode=*/4,
+                             cycle, &weights);
+  std::uint64_t crossing_weight = 0;
+  for (size_t edge = 0; edge < weights.size(); ++edge) {
+    if (labels[cycle[2 * edge]] != labels[cycle[2 * edge + 1]]) {
+      crossing_weight += weights[edge];
+    }
+  }
+  require(crossing_weight == 2,
+          "weighted METIS must keep high-activity cycle edges internal");
+
+  requireThrows(
+      [&] {
+        const std::vector<std::uint64_t> wrong_size{1, 1};
+        (void)mcpd3::metis_partition(2, 4, 4, cycle, &wrong_size);
+      },
+      "weighted METIS must reject a mismatched edge-weight count");
+  requireThrows(
+      [&] {
+        const std::vector<std::uint64_t> zero_weight{100, 0, 100, 1};
+        (void)mcpd3::metis_partition(2, 4, 4, cycle, &zero_weight);
+      },
+      "weighted METIS must reject zero edge weights");
+  if (static_cast<std::uint64_t>(std::numeric_limits<idx_t>::max()) <
+      std::numeric_limits<std::uint64_t>::max()) {
+    requireThrows(
+        [&] {
+          const std::vector<std::uint64_t> oversized{
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<idx_t>::max()) +
+                  1,
+              1, 1, 1};
+          (void)mcpd3::metis_partition(2, 4, 4, cycle, &oversized);
+        },
+        "weighted METIS must reject weights outside its integer domain");
+  }
+
+  const char *old_partitioner = std::getenv("MCPD3_PARTITIONER");
+  const bool had_old_partitioner = old_partitioner != nullptr;
+  const std::string old_value = had_old_partitioner ? old_partitioner : "";
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+  requireThrows(
+      [&] {
+        (void)mcpd3::configured_graph_partition(
+            2, 4, 4, cycle, /*arc_capacities=*/nullptr, &weights);
+      },
+      "explicit edge weights must not be silently ignored by basic "
+      "partitioning");
+  if (had_old_partitioner) {
+    ::setenv("MCPD3_PARTITIONER", old_value.c_str(), 1);
+  } else {
+    ::unsetenv("MCPD3_PARTITIONER");
+  }
+}
+#endif
+
 } // namespace
 
 int main() {
@@ -4460,6 +4603,11 @@ int main() {
     dualDecompositionPropagatesReferenceCutLabels();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
     dualDecompositionCapacityRefreshPreservesPersistentState();
+    primalDualTracksOnlyNonzeroArcFlowUpdates();
+    dualDecompositionFlowHeatMapsBoundaryEdgesExactlyOnce();
+#ifdef HAVE_METIS
+    metisWeightedPartitionCutsLowActivityEdges();
+#endif
   } catch (const std::exception &e) {
     std::cerr << "partition_worker_test failed: " << e.what() << "\n";
     return EXIT_FAILURE;

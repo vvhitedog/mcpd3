@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -172,6 +173,8 @@ struct DualDecompositionOptions {
   CanonicalCutSelection canonical_cut_selection =
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
+  bool track_arc_flow_updates = false;
+  std::vector<std::uint64_t> partition_edge_weights;
   std::vector<int> reference_cut_labels;
   ReferenceCutSelection reference_cut_selection =
       ReferenceCutSelection::CLOSEST_EXACT;
@@ -335,6 +338,28 @@ public:
   }
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
+  }
+  const std::vector<int> &getPartitionLabels() const {
+    return partition_labels_;
+  }
+  std::vector<std::uint64_t> getArcFlowUpdateCounts() const {
+    requireConstructedSolvers("getArcFlowUpdateCounts");
+    std::vector<std::uint64_t> counts(static_cast<size_t>(narc_), 0);
+    for (int arc = 0; arc < narc_; ++arc) {
+      const auto &location = arc_locations_[static_cast<size_t>(arc)];
+      const auto &local_counts =
+          solvers_[static_cast<size_t>(location.partition)]
+              ->getArcFlowUpdateCounts();
+      counts[static_cast<size_t>(arc)] =
+          local_counts[static_cast<size_t>(location.local_arc)];
+    }
+    return counts;
+  }
+  void resetArcFlowUpdateCounts() {
+    requireConstructedSolvers("resetArcFlowUpdateCounts");
+    for (auto &solver : solvers_) {
+      solver->resetArcFlowUpdateCounts();
+    }
   }
   int getConfiguredNumOptimizationScales() const {
     return options_.num_optimization_scales;
@@ -1610,9 +1635,14 @@ private:
     /**
      * step 0: parition graph into npartition_ partitions
      */
-    std::vector<int> partitions_;
-    partitions_ = configured_graph_partition(npartition_, narc_, nnode_, arcs_,
-                                             &arc_capacities_);
+    const auto *partition_edge_weights =
+        options_.partition_edge_weights.empty()
+            ? nullptr
+            : &options_.partition_edge_weights;
+    partition_labels_ = configured_graph_partition(
+        npartition_, narc_, nnode_, arcs_, &arc_capacities_,
+        partition_edge_weights);
+    const auto &partitions_ = partition_labels_;
     validateAndReportPartition(partitions_);
     dualdecomp_progress_report("dd_partition_done", 1, 1, init_start);
     auto mapping_start = std::chrono::steady_clock::now();
@@ -1751,6 +1781,7 @@ private:
       if (options_.construct_solvers) {
         auto solver = std::make_unique<PrimalDualMinCutSolver>(
             std::move(min_cut_sub_graph.graph));
+        solver->setTrackArcFlowUpdates(options_.track_arc_flow_updates);
         solver->setCanonicalCutSelection(options_.canonical_cut_selection);
         if (!options_.reference_cut_labels.empty()) {
           std::vector<int> local_reference;
@@ -1872,8 +1903,11 @@ private:
                                    release_done, npartition_, release_start);
       }
     }
-    partitions_.clear();
-    partitions_.shrink_to_fit();
+    if (!options_.track_arc_flow_updates &&
+        options_.partition_edge_weights.empty()) {
+      partition_labels_.clear();
+      partition_labels_.shrink_to_fit();
+    }
     if (!options_.construct_solvers) {
       constraint_arc_map_.clear();
       constraint_arc_map_.shrink_to_fit();
@@ -1923,6 +1957,7 @@ private:
   std::vector<int> original_arcs_;
   std::vector<Capacity> original_arc_capacities_;
   std::vector<Capacity> original_terminal_capacities_;
+  std::vector<int> partition_labels_;
 
   struct ArcLocation {
     int partition = -1;

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -421,7 +422,15 @@ inline std::vector<int> local_search_graph_partition(
 #ifdef HAVE_METIS
 
 inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
-                                        const std::vector<int> &arc) {
+                                        const std::vector<int> &arc,
+                                        const std::vector<std::uint64_t>
+                                            *edge_weights = nullptr) {
+
+  if (edge_weights != nullptr &&
+      edge_weights->size() != static_cast<size_t>(narc)) {
+    throw std::invalid_argument(
+        "METIS edge weight count must match the graph edge count");
+  }
 
   const bool report_progress = partition_progress_enabled();
   const long progress_interval = 10000000;
@@ -451,13 +460,34 @@ inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
   partition_progress_report("metis_prefix_sum", nnode, nnode, prefix_start);
 
   std::vector<idx_t> adjv(static_cast<size_t>(xadj[nnode]));
+  std::vector<idx_t> adjw;
+  if (edge_weights != nullptr) {
+    adjw.resize(static_cast<size_t>(xadj[nnode]));
+  }
   std::vector<idx_t> cursor = xadj;
   auto fill_start = std::chrono::steady_clock::now();
   for (size_t aid = 0; aid < static_cast<size_t>(narc); ++aid) {
     const int32_t s = arc[2 * aid + 0];
     const int32_t t = arc[2 * aid + 1];
-    adjv[cursor[s]++] = t;
-    adjv[cursor[t]++] = s;
+    idx_t weight = 1;
+    if (edge_weights != nullptr) {
+      const std::uint64_t input_weight = (*edge_weights)[aid];
+      if (input_weight == 0 ||
+          input_weight >
+              static_cast<std::uint64_t>(std::numeric_limits<idx_t>::max())) {
+        throw std::out_of_range(
+            "METIS edge weights must be positive and fit idx_t");
+      }
+      weight = static_cast<idx_t>(input_weight);
+    }
+    const idx_t source_position = cursor[s]++;
+    const idx_t target_position = cursor[t]++;
+    adjv[source_position] = t;
+    adjv[target_position] = s;
+    if (edge_weights != nullptr) {
+      adjw[source_position] = weight;
+      adjw[target_position] = weight;
+    }
     if (report_progress && (aid + 1) % progress_interval == 0) {
       partition_progress_report("metis_adjacency_fill", aid + 1, narc,
                                 fill_start);
@@ -473,6 +503,7 @@ inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
   idx_t _npart = npartition;
   idx_t objval;
   int ret = METIS_ERROR;
+  idx_t *adjacency_weights = adjw.empty() ? nullptr : adjw.data();
   auto metis_start = std::chrono::steady_clock::now();
   if (report_progress) {
     std::fprintf(stderr,
@@ -485,7 +516,8 @@ inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
     std::atomic<bool> metis_done(false);
     std::thread metis_thread([&] {
       ret = METIS_PartGraphKway(&_nnode, &ncon, &xadj[0], &adjv[0], nullptr,
-                                nullptr, nullptr, &_npart, nullptr, nullptr,
+                                nullptr, adjacency_weights, &_npart, nullptr,
+                                nullptr,
                                 nullptr, &objval, &part[0]);
       metis_done.store(true, std::memory_order_release);
     });
@@ -506,7 +538,8 @@ inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
     metis_thread.join();
   } else {
     ret = METIS_PartGraphKway(&_nnode, &ncon, &xadj[0], &adjv[0], nullptr,
-                              nullptr, nullptr, &_npart, nullptr, nullptr,
+                              nullptr, adjacency_weights, &_npart, nullptr,
+                              nullptr,
                               nullptr, &objval, &part[0]);
   }
   partition_progress_report("metis_call_done", 1, 1, metis_start);
@@ -532,13 +565,22 @@ inline std::vector<int> metis_partition(int npartition,
 
 inline std::vector<int> configured_graph_partition(
     int npartition, int narc, int nnode, const std::vector<int> &arc,
-    const std::vector<Capacity> *arc_capacities = nullptr) {
+    const std::vector<Capacity> *arc_capacities = nullptr,
+    const std::vector<std::uint64_t> *edge_weights = nullptr) {
   const char *mode_env = std::getenv("MCPD3_PARTITIONER");
   const std::string mode = mode_env == nullptr ? "metis" : mode_env;
   if (mode == "basic" || mode == "contiguous") {
+    if (edge_weights != nullptr) {
+      throw std::invalid_argument(
+          "explicit partition edge weights require the METIS partitioner");
+    }
     return basic_graph_partition(npartition, narc, nnode, arc);
   }
   if (mode == "local" || mode == "local_search") {
+    if (edge_weights != nullptr) {
+      throw std::invalid_argument(
+          "explicit partition edge weights require the METIS partitioner");
+    }
     return local_search_graph_partition(npartition, narc, nnode, arc,
                                         arc_capacities);
   }
@@ -550,8 +592,12 @@ inline std::vector<int> configured_graph_partition(
                  mode.c_str());
     std::fflush(stderr);
   }
-  return metis_partition(npartition, narc, nnode, arc);
+  return metis_partition(npartition, narc, nnode, arc, edge_weights);
 #else
+  if (edge_weights != nullptr) {
+    throw std::invalid_argument(
+        "explicit partition edge weights require a METIS-enabled build");
+  }
   if (mode != "basic" && mode != "contiguous") {
     std::fprintf(stderr,
                  "mcpd3_progress stage=partitioner_warning unknown=%s "

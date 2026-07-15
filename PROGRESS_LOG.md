@@ -159,3 +159,19 @@
   budget while remaining strictly below the objective quantum.
 - Passed complete CTest suites in 32-, 64-, 128-bit, GMP, and legacy replay
   builds.
+
+## 2026-07-15 15:08 PDT - Opt-in edge-flow heat and weighted METIS
+
+- Added opt-in per-original-edge counters to `PrimalDualMinCutSolver`. A count
+  increments when a completed local maxflow changes the edge's stored net flow
+  by a nonzero amount. Disabled tracking allocates no per-edge storage.
+- Added global reconstruction through `DualDecomposition::arc_locations_` and
+  retained partition labels only for tracking or explicitly weighted runs.
+  Each crossing edge is read from its sole owning partition; cloned boundary
+  nodes and terminal capacities cannot duplicate its count.
+- Added validated positive METIS edge weights. Explicit weights are rejected
+  by non-METIS partitioners and builds instead of being silently ignored.
+- Tests cover tracking disabled/enabled/reset behavior, a reversed crossing
+  edge represented exactly once, weighted partition selection, wrong-sized,
+  zero, and out-of-range weights, and non-METIS rejection.
+- Passed both Release 64-bit suites: 2/2 with METIS and 2/2 without METIS.

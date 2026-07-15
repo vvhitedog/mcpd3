@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <limits>
@@ -90,7 +91,8 @@ public:
       : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0), maxflow_graph_(nnode_, narc_),
+        d_flow_(nnode_, 0), x_(nnode_, 0),
+        maxflow_graph_(nnode_, narc_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
         has_solution_(false),
         canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
@@ -119,6 +121,28 @@ public:
                                std::move(min_cut_graph.arcs),
                                std::move(min_cut_graph.arc_capacities),
                                std::move(min_cut_graph.terminal_capacities)) {}
+
+  void setTrackArcFlowUpdates(bool enabled) {
+    if (enabled == track_arc_flow_updates_) {
+      return;
+    }
+    track_arc_flow_updates_ = enabled;
+    if (enabled) {
+      arc_flow_update_counts_.assign(static_cast<size_t>(narc_), 0);
+    } else {
+      arc_flow_update_counts_.clear();
+      arc_flow_update_counts_.shrink_to_fit();
+    }
+  }
+
+  const std::vector<std::uint64_t> &getArcFlowUpdateCounts() const {
+    return arc_flow_update_counts_;
+  }
+
+  void resetArcFlowUpdateCounts() {
+    std::fill(arc_flow_update_counts_.begin(), arc_flow_update_counts_.end(),
+              std::uint64_t{0});
+  }
 
   void decodeNarrowBand(const std::list<int> seeds, int rad) {
     // TODO: this function needs to be cleaned up and rewritten to be much more
@@ -1406,6 +1430,7 @@ private:
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
       Capacity new_flow = checked_subtract(
           maxflow_graph_.get_rcap(a), pos, "arc flow delta overflow");
+      recordArcFlowUpdate(i, new_flow);
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
       d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
@@ -1429,6 +1454,7 @@ private:
       Capacity new_flow = checked_subtract(
           maxflow_graph_.get_rcap(first_arc + 2 * i), pos,
           "arc flow delta overflow");
+      recordArcFlowUpdate(i, new_flow);
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
       d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
@@ -1443,6 +1469,17 @@ private:
     } else {
       updateFlowIncremental();
     }
+  }
+
+  void recordArcFlowUpdate(int arc_index, const Capacity &flow_delta) {
+    if (!track_arc_flow_updates_ || flow_delta == 0) {
+      return;
+    }
+    auto &count = arc_flow_update_counts_[static_cast<size_t>(arc_index)];
+    if (count == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("arc flow update count overflow");
+    }
+    ++count;
   }
 
   void computeMaxflow() {
@@ -1531,6 +1568,8 @@ private:
    * data structures needed for solving primal dual problem
    */
   std::vector<Capacity> v_flow_; // flow on the arcs
+  std::vector<std::uint64_t> arc_flow_update_counts_;
+  bool track_arc_flow_updates_ = false;
   std::vector<NodeFlow> d_flow_; // flow balance on the nodes
   std::vector<int> x_;      // mincut solution
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
