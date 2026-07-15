@@ -175,3 +175,24 @@
   edge represented exactly once, weighted partition selection, wrong-sized,
   zero, and out-of-range weights, and non-METIS rejection.
 - Passed both Release 64-bit suites: 2/2 with METIS and 2/2 without METIS.
+
+## 2026-07-15 - mcpd3-nh halo worktree baseline
+
+- Created branch `exp/mcpd3-nh-halo` in the isolated worktree
+  `/home/matt/software/experiments/mcpd3-nh-halo` from productized mcpd3
+  commit `00ef729`.
+- Wrote `HALO_DECOMPOSITION.md` to pin h1 compatibility, finite BFS halo
+  membership, node-only consensus, exact edge/node multiplicity scaling, and
+  verification gates before implementation.
+- Configured a clean Release test build with the machine's validated local
+  Boost headers. The unmodified baseline passed 2/2 CTest tests.
+- Added a pure halo-layout planner under test-driven development. The tests
+  first failed because the planner header did not exist, then passed after the
+  implementation.
+- The planner preserves historical one-owner h1 placement, computes finite
+  multi-source BFS memberships for h2+, supports an explicit infinite-halo
+  sentinel, intersects endpoint memberships for edge copies, and computes a
+  checked LCM across every node and edge multiplicity.
+- Tests cover exact h1/h2/infinite memberships, mixed two-way/three-way
+  overlap requiring multiplier six, invalid depth/labels/endpoints, and LCM
+  overflow. The full Release suite remains 2/2.

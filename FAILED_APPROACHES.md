@@ -78,3 +78,15 @@
   the final reported certificate after agreement. It is valid but needlessly
   loose. Agreement plus a strict sub-quantum budget certifies the feasible
   primary objective exactly.
+
+## 2026-07-15 - Halo implementation constraints
+
+- Do not replace `halo_depth=1` with a fully induced one-hop graph. Current
+  mcpd3-n uses asymmetric one-owner edge placement; changing that baseline
+  would invalidate the required package, trajectory, and performance
+  equivalence before deeper halos are evaluated.
+- Do not round `capacity / multiplicity`. Compute one checked global LCM
+  multiplier and use exact integer factors, or reject the configuration.
+- Do not create edge-consensus variables. Duplicate node labels are sufficient
+  to make every copied min-cut edge term agree, and edge consensus does not map
+  cleanly to the current local primal-dual solver.

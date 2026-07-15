@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <decomp/dualdecomp.h>
+#include <decomp/halo_partition.h>
 #include <decomp/partition_coordinator.h>
 #include <decomp/partition_worker.h>
 #include <graph/dimacs.h>
@@ -47,6 +48,105 @@ void requireThrows(Function function, const std::string &message) {
     threw = true;
   }
   require(threw, message);
+}
+
+void haloDepthOneRetainsLegacyOwnerLayout() {
+  const auto layout = mcpd3::buildHaloPartitionLayout(
+      /*partition_count=*/2, /*node_count=*/6,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5},
+      /*partition_labels=*/std::vector<int>{0, 0, 0, 1, 1, 1},
+      /*halo_depth=*/1);
+
+  require(layout.objective_multiplier == 1,
+          "h1 compatibility layout must not rescale the objective");
+  require(layout.arc_partitions ==
+              std::vector<std::vector<int>>({{0}, {0}, {0}, {1}, {1}}),
+          "h1 compatibility layout must retain one-owner edge placement");
+  require(layout.node_partitions ==
+              std::vector<std::vector<int>>(
+                  {{0}, {0}, {0}, {0, 1}, {1}, {1}}),
+          "h1 compatibility layout must retain legacy boundary clones");
+}
+
+void finiteHaloLayoutUsesBfsMembershipAndExactMultiplicity() {
+  const auto layout = mcpd3::buildHaloPartitionLayout(
+      /*partition_count=*/2, /*node_count=*/6,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5},
+      /*partition_labels=*/std::vector<int>{0, 0, 0, 1, 1, 1},
+      /*halo_depth=*/2);
+
+  require(layout.objective_multiplier == 2,
+          "two overlapping h2 halos should require objective multiplier 2");
+  require(layout.node_partitions ==
+              std::vector<std::vector<int>>(
+                  {{0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {1}}),
+          "h2 node memberships must match two-step BFS from each core");
+  require(layout.arc_partitions ==
+              std::vector<std::vector<int>>(
+                  {{0}, {0, 1}, {0, 1}, {0, 1}, {1}}),
+          "an h2 edge must appear in every halo containing both endpoints");
+}
+
+void haloObjectiveMultiplierUsesNodeAndEdgeLcm() {
+  const auto layout = mcpd3::buildHaloPartitionLayout(
+      /*partition_count=*/3, /*node_count=*/6,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5},
+      /*partition_labels=*/std::vector<int>{0, 0, 1, 1, 2, 2},
+      /*halo_depth=*/2);
+
+  require(layout.objective_multiplier == 6,
+          "mixed two-way and three-way halo terms require LCM 6");
+  require(layout.node_partitions[2] == std::vector<int>({0, 1, 2}) &&
+              layout.arc_partitions[2] == std::vector<int>({0, 1, 2}),
+          "center node and edge should occur in all three h2 halos");
+  require(layout.node_partitions[0] == std::vector<int>({0, 1}) &&
+              layout.arc_partitions[0] == std::vector<int>({0, 1}),
+          "outer node and edge should occur in exactly two h2 halos");
+}
+
+void infiniteHaloContainsEveryNodeAndEdge() {
+  const auto layout = mcpd3::buildHaloPartitionLayout(
+      /*partition_count=*/2, /*node_count=*/4,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3},
+      /*partition_labels=*/std::vector<int>{0, 0, 1, 1},
+      mcpd3::kInfiniteHaloDepth);
+
+  require(layout.objective_multiplier == 2,
+          "two full-graph halos should require multiplier 2");
+  for (const auto &memberships : layout.node_partitions) {
+    require(memberships == std::vector<int>({0, 1}),
+            "infinite halo must contain every node in every partition");
+  }
+  for (const auto &memberships : layout.arc_partitions) {
+    require(memberships == std::vector<int>({0, 1}),
+            "infinite halo must contain every edge in every partition");
+  }
+}
+
+void haloLayoutRejectsInvalidInputs() {
+  requireThrows(
+      [] {
+        (void)mcpd3::buildHaloPartitionLayout(
+            2, 2, std::vector<int>{0, 1}, std::vector<int>{0, 1}, 0);
+      },
+      "zero halo depth should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::buildHaloPartitionLayout(
+            2, 2, std::vector<int>{0, 2}, std::vector<int>{0, 1}, 2);
+      },
+      "out-of-range halo arc endpoints should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::buildHaloPartitionLayout(
+            2, 2, std::vector<int>{0, 1}, std::vector<int>{0}, 2);
+      },
+      "wrong-sized halo partition labels should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::checkedHaloLcm(std::numeric_limits<long>::max(), 2);
+      },
+      "halo objective multiplier overflow should be rejected");
 }
 
 void lowerBoundCertificateSubtractsOnlyRegularizationSlack() {
@@ -4521,6 +4621,11 @@ void metisWeightedPartitionCutsLowActivityEdges() {
 
 int main() {
   try {
+    haloDepthOneRetainsLegacyOwnerLayout();
+    finiteHaloLayoutUsesBfsMembershipAndExactMultiplicity();
+    haloObjectiveMultiplierUsesNodeAndEdgeLcm();
+    infiniteHaloContainsEveryNodeAndEdge();
+    haloLayoutRejectsInvalidInputs();
     lowerBoundCertificateSubtractsOnlyRegularizationSlack();
     solverMemoryEstimateReportsBkAndVectorBytes();
     streamingWorkerMatchesInProcessAcrossEviction();
