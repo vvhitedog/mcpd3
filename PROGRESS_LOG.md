@@ -256,3 +256,11 @@
 - The regression compares the final raw and normalized certificates against a
   direct whole-graph mincut, proving that promotion preserves exact halo
   scaling rather than only exercising the control-flow branch.
+## 2026-07-15 18:16 PDT - Final halo validation matrix
+
+- Rebuilt the final tests in Release mode and passed 2/2 CTest targets in
+  capacity modes 32, 64, 128, and GMP, plus 32-bit historical replay and
+  64-bit METIS configurations. This covers checked fixed-width arithmetic,
+  arbitrary precision, the compatibility replay path, and both partitioners.
+- The phase adapter and `mcpd3-nh` benchmark selector pass all 30 tests against
+  this final core revision. `git diff --check` is clean in both worktrees.
