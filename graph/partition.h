@@ -420,8 +420,8 @@ inline std::vector<int> local_search_graph_partition(
 
 #ifdef HAVE_METIS
 
-std::vector<int> metis_partition(int npartition, int narc, int nnode,
-                                 const std::vector<int> &arc) {
+inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
+                                        const std::vector<int> &arc) {
 
   const bool report_progress = partition_progress_enabled();
   const long progress_interval = 10000000;
@@ -518,11 +518,11 @@ std::vector<int> metis_partition(int npartition, int narc, int nnode,
 
   std::vector<int> label(nnode, -1);
   std::copy(part.begin(), part.end(), label.begin());
-  return std::move(label);
+  return label;
 }
 
-std::vector<int> metis_partition(int npartition,
-                                 const mcpd3::MinCutGraph &graph) {
+inline std::vector<int> metis_partition(int npartition,
+                                        const mcpd3::MinCutGraph &graph) {
   const auto &narc = graph.narc;
   const auto &arc = graph.arcs;
   const auto &nnode = graph.nnode;
