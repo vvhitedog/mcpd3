@@ -1757,22 +1757,17 @@ private:
     auto arc_start = std::chrono::steady_clock::now();
     if (options_.halo_depth == 1) {
       arc_locations_.resize(static_cast<size_t>(narc_));
-    } else {
-      halo_arc_locations_.resize(static_cast<size_t>(narc_));
-      halo_arc_objective_factors_.resize(static_cast<size_t>(narc_));
-    }
-    for (int i = 0; i < narc_; ++i) {
-      int s = arcs_[2 * i + 0];
-      int t = arcs_[2 * i + 1];
-      Capacity forward_capacity = arc_capacities_[2 * i + 0];
-      Capacity backward_capacity = arc_capacities_[2 * i + 1];
-      bool swapped = false;
-      if (s > t) {
-        std::swap(s, t);
-        std::swap(forward_capacity, backward_capacity);
-        swapped = true;
-      }
-      if (options_.halo_depth == 1) {
+      for (int i = 0; i < narc_; ++i) {
+        int s = arcs_[2 * i + 0];
+        int t = arcs_[2 * i + 1];
+        Capacity forward_capacity = arc_capacities_[2 * i + 0];
+        Capacity backward_capacity = arc_capacities_[2 * i + 1];
+        bool swapped = false;
+        if (s > t) {
+          std::swap(s, t);
+          std::swap(forward_capacity, backward_capacity);
+          swapped = true;
+        }
         const int arc_partition = partitions_[s];
         auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
         arc_locations_[static_cast<size_t>(i)] = ArcLocation{
@@ -1786,28 +1781,42 @@ private:
           dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
                                      arc_start);
         }
-        continue;
       }
-      const auto &arc_partitions =
-          halo_layout.arc_partitions[static_cast<size_t>(i)];
-      const long objective_factor =
-          halo_objective_multiplier_ /
-          static_cast<long>(arc_partitions.size());
-      halo_arc_objective_factors_[static_cast<size_t>(i)] = objective_factor;
-      for (const int arc_partition : arc_partitions) {
-        auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
-        halo_arc_locations_[static_cast<size_t>(i)].push_back(ArcLocation{
-            arc_partition, min_cut_sub_graph.graph.narc, swapped});
-        min_cut_sub_graph.insertArc(
-            s, t,
-            checked_scale_capacity(forward_capacity, objective_factor,
-                                   options_.saturate_capacity_overflow),
-            checked_scale_capacity(backward_capacity, objective_factor,
-                                   options_.saturate_capacity_overflow));
-      }
-      if (report_progress && (i + 1) % progress_interval == 0) {
-        dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
-                                   arc_start);
+    } else {
+      halo_arc_locations_.resize(static_cast<size_t>(narc_));
+      halo_arc_objective_factors_.resize(static_cast<size_t>(narc_));
+      for (int i = 0; i < narc_; ++i) {
+        int s = arcs_[2 * i + 0];
+        int t = arcs_[2 * i + 1];
+        Capacity forward_capacity = arc_capacities_[2 * i + 0];
+        Capacity backward_capacity = arc_capacities_[2 * i + 1];
+        bool swapped = false;
+        if (s > t) {
+          std::swap(s, t);
+          std::swap(forward_capacity, backward_capacity);
+          swapped = true;
+        }
+        const auto &arc_partitions =
+            halo_layout.arc_partitions[static_cast<size_t>(i)];
+        const long objective_factor =
+            halo_objective_multiplier_ /
+            static_cast<long>(arc_partitions.size());
+        halo_arc_objective_factors_[static_cast<size_t>(i)] = objective_factor;
+        for (const int arc_partition : arc_partitions) {
+          auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+          halo_arc_locations_[static_cast<size_t>(i)].push_back(ArcLocation{
+              arc_partition, min_cut_sub_graph.graph.narc, swapped});
+          min_cut_sub_graph.insertArc(
+              s, t,
+              checked_scale_capacity(forward_capacity, objective_factor,
+                                     options_.saturate_capacity_overflow),
+              checked_scale_capacity(backward_capacity, objective_factor,
+                                     options_.saturate_capacity_overflow));
+        }
+        if (report_progress && (i + 1) % progress_interval == 0) {
+          dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
+                                     arc_start);
+        }
       }
     }
     dualdecomp_progress_report("dd_distribute_arcs", narc_, narc_, arc_start);

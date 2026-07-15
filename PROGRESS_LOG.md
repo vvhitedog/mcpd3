@@ -233,3 +233,15 @@
 - Documented the compatibility and experimental infinite modes in the README.
 - Rebuilt the Release tree and passed the complete 2/2 CTest suite;
   `git diff --check` passes.
+## 2026-07-15 17:10 PDT - Halo-depth-one performance equivalence
+
+- Hoisted the depth-one/deeper-halo arc-distribution branch outside the
+  original-edge loop. The depth-one path now executes the original compact
+  one-owner construction loop without a per-edge halo condition.
+- Compared `mcpd3-nh --halo-depth 1` against the pre-halo `mcpd3-n` binary on
+  the physical 64x64 wrapped-ramp fixture using two affined physical CPU cores.
+  Four interleaved 30-run blocks produced baseline medians of 32.66 and
+  32.96 ms and halo-depth-one medians of 32.56 and 32.86 ms.
+- Every run returned objective 63 with the identical seven-cut, 151-DD-round
+  trajectory. Callgrind measured 202.76 million instructions for the halo
+  binary versus 202.04 million for the baseline, a 0.36% difference.
