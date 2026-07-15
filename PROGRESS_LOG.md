@@ -245,3 +245,14 @@
 - Every run returned objective 63 with the identical seven-cut, 151-DD-round
   trajectory. Callgrind measured 202.76 million instructions for the halo
   binary versus 202.04 million for the baseline, a 0.36% difference.
+## 2026-07-15 17:24 PDT - Deeper-halo regularization promotion coverage
+
+- Added a deterministic h2 path fixture whose two local subproblems initially
+  prefer opposite labels on four duplicated nodes.
+- With primary objective scale 10 and halo multiplier `Q=2`, cumulative
+  scaled-epsilon regularization reaches budget 40 against the strict effective
+  limit 20. The solver promotes once, retains `Q`, reaches agreement at
+  effective scale 200, and finishes below budget.
+- The regression compares the final raw and normalized certificates against a
+  direct whole-graph mincut, proving that promotion preserves exact halo
+  scaling rather than only exercising the control-flow branch.

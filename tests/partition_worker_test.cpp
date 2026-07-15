@@ -913,6 +913,58 @@ void haloDepthTwoCertifiesTheUnscaledDirectObjective() {
           "h2 public certificate should normalize away the halo multiplier");
 }
 
+void haloDepthTwoPromotesWhenDuplicatedNodesExhaustTheBudget() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  const std::vector<int> arcs{0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+  const std::vector<int> capacities{10, 10, 10, 10, 10,
+                                    10, 10, 10, 10, 10};
+  const std::vector<int> terminals{100, 0, 0, 0, 0, -100};
+
+  mcpd3::PrimalDualMinCutSolver direct(
+      /*nnode=*/6, /*narc=*/5, std::vector<int>(arcs), capacities, terminals);
+  direct.solve();
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.halo_depth = 2;
+  options.objective_scale = 10;
+  options.initial_step_size = 10;
+  options.num_optimization_scales = 3;
+  options.max_iteration_count = 100;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.max_objective_scale_promotions = 2;
+
+  mcpd3::DualDecomposition halo(
+      /*npartition=*/2, /*nnode=*/6, /*narc=*/5,
+      arcs, capacities, terminals, options);
+  require(halo.getHaloObjectiveMultiplier() == 2,
+          "h2 promotion fixture must exercise a nonunit halo multiplier");
+
+  halo.solve();
+
+  require(halo.getObjectiveScalePromotionCount() == 1,
+          "h2 duplicated-node regularization should force one promotion");
+  require(halo.getScale() == 200,
+          "h2 promotion should retain Q=2 while increasing the primary "
+          "scale by one decade");
+  require(halo.getLastRegularizationBudget() < halo.getScale(),
+          "promoted h2 solve should finish under the strict scaled budget");
+  require(halo.getLastDisagreementCount() == 0,
+          "promoted h2 solve should preserve state and reach agreement");
+  require(halo.getBestCertifiedLowerBoundRaw() ==
+              direct.getMinCutValue() * halo.getHaloObjectiveMultiplier() *
+                  10,
+          "promoted h2 agreement must certify the exactly scaled direct "
+          "objective");
+  require(halo.getBestCertifiedLowerBound() ==
+              mcpd3::integer_to_double(direct.getMinCutValue()) / 10.0,
+          "public h2 objective must normalize both Q and primary scaling");
+}
+
 mcpd3::Objective evaluateCutObjective(
     const std::vector<int> &arcs,
     const std::vector<mcpd3::Capacity> &capacities,
@@ -5047,6 +5099,7 @@ int main() {
     haloDepthOneExportsIdenticalLegacyPackages();
     haloDepthTwoExportsScaledInducedSubproblems();
     haloDepthTwoCertifiesTheUnscaledDirectObjective();
+    haloDepthTwoPromotesWhenDuplicatedNodesExhaustTheBudget();
     haloLocalObjectivesSumToScaledGlobalObjectiveExhaustively();
     haloCapacityReplacementPreservesMultiplicityScaling();
     haloPackageCoordinatorNormalizesTheObjectiveMultiplier();
