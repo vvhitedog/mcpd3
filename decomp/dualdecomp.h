@@ -36,6 +36,7 @@
 
 #include <measure/timer.h>
 #include <decomp/constraint.h>
+#include <decomp/halo_partition.h>
 #include <decomp/lower_bound_certificate.h>
 #include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
@@ -174,6 +175,7 @@ struct DualDecompositionOptions {
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
   bool track_arc_flow_updates = false;
+  int halo_depth = 1;
   std::vector<std::uint64_t> partition_edge_weights;
   std::vector<int> reference_cut_labels;
   ReferenceCutSelection reference_cut_selection =
@@ -223,6 +225,7 @@ public:
         last_regularization_active_sink_count_(0),
         total_optimization_iterations_(0),
         objective_scale_promotion_count_(0),
+        halo_objective_multiplier_(1),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
     initializeDecomposition();
@@ -339,6 +342,9 @@ public:
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
   }
+  long getHaloObjectiveMultiplier() const {
+    return halo_objective_multiplier_;
+  }
   const std::vector<int> &getPartitionLabels() const {
     return partition_labels_;
   }
@@ -346,12 +352,28 @@ public:
     requireConstructedSolvers("getArcFlowUpdateCounts");
     std::vector<std::uint64_t> counts(static_cast<size_t>(narc_), 0);
     for (int arc = 0; arc < narc_; ++arc) {
-      const auto &location = arc_locations_[static_cast<size_t>(arc)];
-      const auto &local_counts =
-          solvers_[static_cast<size_t>(location.partition)]
-              ->getArcFlowUpdateCounts();
-      counts[static_cast<size_t>(arc)] =
-          local_counts[static_cast<size_t>(location.local_arc)];
+      if (options_.halo_depth == 1) {
+        const auto &location = arc_locations_[static_cast<size_t>(arc)];
+        const auto &local_counts =
+            solvers_[static_cast<size_t>(location.partition)]
+                ->getArcFlowUpdateCounts();
+        counts[static_cast<size_t>(arc)] =
+            local_counts[static_cast<size_t>(location.local_arc)];
+        continue;
+      }
+      for (const auto &location :
+           halo_arc_locations_[static_cast<size_t>(arc)]) {
+        const auto &local_counts =
+            solvers_[static_cast<size_t>(location.partition)]
+                ->getArcFlowUpdateCounts();
+        const std::uint64_t local_count =
+            local_counts[static_cast<size_t>(location.local_arc)];
+        auto &total = counts[static_cast<size_t>(arc)];
+        if (local_count > std::numeric_limits<std::uint64_t>::max() - total) {
+          throw std::overflow_error("halo arc flow-update count overflow");
+        }
+        total += local_count;
+      }
     }
     return counts;
   }
@@ -533,26 +555,62 @@ public:
           static_cast<size_t>(local_node_counts_[partition]), 0);
     }
     for (int arc = 0; arc < narc_; ++arc) {
-      const ArcLocation &location = arc_locations_[arc];
       const Capacity input_forward = arc_capacities[2 * arc];
       const Capacity input_backward = arc_capacities[2 * arc + 1];
-      auto &local = local_arc_capacities[location.partition];
-      local[2 * location.local_arc] =
-          location.swapped ? input_backward : input_forward;
-      local[2 * location.local_arc + 1] =
-          location.swapped ? input_forward : input_backward;
+      if (options_.halo_depth == 1) {
+        const ArcLocation &location = arc_locations_[arc];
+        auto &local = local_arc_capacities[location.partition];
+        local[2 * location.local_arc] =
+            location.swapped ? input_backward : input_forward;
+        local[2 * location.local_arc + 1] =
+            location.swapped ? input_forward : input_backward;
+        continue;
+      }
+      const long objective_factor =
+          halo_arc_objective_factors_[static_cast<size_t>(arc)];
+      for (const ArcLocation &location : halo_arc_locations_[arc]) {
+        const Capacity local_forward = checked_scale_capacity(
+            input_forward, objective_factor,
+            options_.saturate_capacity_overflow);
+        const Capacity local_backward = checked_scale_capacity(
+            input_backward, objective_factor,
+            options_.saturate_capacity_overflow);
+        auto &local = local_arc_capacities[location.partition];
+        local[2 * location.local_arc] =
+            location.swapped ? local_backward : local_forward;
+        local[2 * location.local_arc + 1] =
+            location.swapped ? local_forward : local_backward;
+      }
     }
     for (int node = 0; node < nnode_; ++node) {
-      const TerminalLocation &location = terminal_locations_[node];
-      if (location.partition < 0 || location.local_node < 0) {
+      if (options_.halo_depth == 1) {
+        const TerminalLocation &location = terminal_locations_[node];
+        if (location.partition < 0 || location.local_node < 0) {
+          if (terminal_capacities[node] != 0) {
+            throw std::runtime_error(
+                "replacement terminal activates an absent isolated node");
+          }
+          continue;
+        }
+        local_terminal_capacities[location.partition][location.local_node] =
+            terminal_capacities[node];
+        continue;
+      }
+      const auto &locations = halo_terminal_locations_[node];
+      if (locations.empty()) {
         if (terminal_capacities[node] != 0) {
           throw std::runtime_error(
               "replacement terminal activates an absent isolated node");
         }
         continue;
       }
-      local_terminal_capacities[location.partition][location.local_node] =
-          terminal_capacities[node];
+      const long objective_factor =
+          halo_terminal_objective_factors_[static_cast<size_t>(node)];
+      for (const TerminalLocation &location : locations) {
+        local_terminal_capacities[location.partition][location.local_node] =
+            checked_scale_capacity(terminal_capacities[node], objective_factor,
+                                   options_.saturate_capacity_overflow);
+      }
     }
 
     if (preserve_flow_state &&
@@ -590,8 +648,20 @@ public:
     }
 
     if (options_.track_primal_upper_bound) {
-      original_arc_capacities_ = arc_capacities;
-      original_terminal_capacities_ = terminal_capacities;
+      original_arc_capacities_.clear();
+      original_arc_capacities_.reserve(arc_capacities.size());
+      for (const Capacity &capacity : arc_capacities) {
+        original_arc_capacities_.push_back(checked_scale_capacity(
+            capacity, halo_objective_multiplier_,
+            options_.saturate_capacity_overflow));
+      }
+      original_terminal_capacities_.clear();
+      original_terminal_capacities_.reserve(terminal_capacities.size());
+      for (const Capacity &capacity : terminal_capacities) {
+        original_terminal_capacities_.push_back(checked_scale_capacity(
+            capacity, halo_objective_multiplier_,
+            options_.saturate_capacity_overflow));
+      }
     }
     solve_loop_time_ = 0;
     lagrange_update_time_ = 0;
@@ -1357,6 +1427,11 @@ private:
     if (options_.objective_scale <= 0) {
       throw std::runtime_error("objective scale must be positive");
     }
+    if (options_.halo_depth != kInfiniteHaloDepth &&
+        options_.halo_depth < 1) {
+      throw std::runtime_error(
+          "halo depth must be positive or kInfiniteHaloDepth");
+    }
     if (options_.initial_alpha_random_radius < 0) {
       throw std::runtime_error(
           "initial alpha random radius must be non-negative");
@@ -1644,6 +1719,31 @@ private:
         partition_edge_weights);
     const auto &partitions_ = partition_labels_;
     validateAndReportPartition(partitions_);
+    HaloPartitionLayout halo_layout;
+    if (options_.halo_depth != 1) {
+      halo_layout = buildHaloPartitionLayout(
+          npartition_, nnode_, arcs_, partition_labels_, options_.halo_depth);
+    }
+    halo_objective_multiplier_ = halo_layout.objective_multiplier;
+    if (halo_objective_multiplier_ > 1) {
+      options_.objective_scale = checkedScaleLong(
+          options_.objective_scale, halo_objective_multiplier_);
+      if (options_.regularization_budget_limit > 0) {
+        options_.regularization_budget_limit = checked_scale(
+            options_.regularization_budget_limit, halo_objective_multiplier_,
+            "halo regularization budget overflow");
+      }
+      for (Capacity &capacity : original_arc_capacities_) {
+        capacity = checked_scale_capacity(
+            capacity, halo_objective_multiplier_,
+            options_.saturate_capacity_overflow);
+      }
+      for (Capacity &capacity : original_terminal_capacities_) {
+        capacity = checked_scale_capacity(
+            capacity, halo_objective_multiplier_,
+            options_.saturate_capacity_overflow);
+      }
+    }
     dualdecomp_progress_report("dd_partition_done", 1, 1, init_start);
     auto mapping_start = std::chrono::steady_clock::now();
     int mapping_done = 0;
@@ -1653,11 +1753,14 @@ private:
       dualdecomp_progress_report("dd_initialize_mapping", mapping_done,
                                  npartition_, mapping_start);
     }
-    /**
-     * step 1: distribute all arcs into one and only one sub graph
-     */
+    /** step 1: distribute arcs into their local halo subgraphs. */
     auto arc_start = std::chrono::steady_clock::now();
-    arc_locations_.resize(static_cast<size_t>(narc_));
+    if (options_.halo_depth == 1) {
+      arc_locations_.resize(static_cast<size_t>(narc_));
+    } else {
+      halo_arc_locations_.resize(static_cast<size_t>(narc_));
+      halo_arc_objective_factors_.resize(static_cast<size_t>(narc_));
+    }
     for (int i = 0; i < narc_; ++i) {
       int s = arcs_[2 * i + 0];
       int t = arcs_[2 * i + 1];
@@ -1669,16 +1772,38 @@ private:
         std::swap(forward_capacity, backward_capacity);
         swapped = true;
       }
-      // the sub graph each arc belongs to is defined to be the partition of the
-      // source node
-      int arc_partition = partitions_[s];
-      auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
-      arc_locations_[static_cast<size_t>(i)] = ArcLocation{
-          arc_partition, min_cut_sub_graph.graph.narc, swapped};
-      min_cut_sub_graph.insertArc(s, t, forward_capacity, backward_capacity);
-      if (partitions_[t] != arc_partition) { // t is an auxillary node that
-                                             // needs to be constrained
-        constrained_nodes[t].insert(arc_partition);
+      if (options_.halo_depth == 1) {
+        const int arc_partition = partitions_[s];
+        auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+        arc_locations_[static_cast<size_t>(i)] = ArcLocation{
+            arc_partition, min_cut_sub_graph.graph.narc, swapped};
+        min_cut_sub_graph.insertArc(s, t, forward_capacity,
+                                    backward_capacity);
+        if (partitions_[t] != arc_partition) {
+          constrained_nodes[t].insert(arc_partition);
+        }
+        if (report_progress && (i + 1) % progress_interval == 0) {
+          dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
+                                     arc_start);
+        }
+        continue;
+      }
+      const auto &arc_partitions =
+          halo_layout.arc_partitions[static_cast<size_t>(i)];
+      const long objective_factor =
+          halo_objective_multiplier_ /
+          static_cast<long>(arc_partitions.size());
+      halo_arc_objective_factors_[static_cast<size_t>(i)] = objective_factor;
+      for (const int arc_partition : arc_partitions) {
+        auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+        halo_arc_locations_[static_cast<size_t>(i)].push_back(ArcLocation{
+            arc_partition, min_cut_sub_graph.graph.narc, swapped});
+        min_cut_sub_graph.insertArc(
+            s, t,
+            checked_scale_capacity(forward_capacity, objective_factor,
+                                   options_.saturate_capacity_overflow),
+            checked_scale_capacity(backward_capacity, objective_factor,
+                                   options_.saturate_capacity_overflow));
       }
       if (report_progress && (i + 1) % progress_interval == 0) {
         dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
@@ -1690,49 +1815,76 @@ private:
     arcs_.shrink_to_fit();
     arc_capacities_.clear();
     arc_capacities_.shrink_to_fit();
-    /**
-     * step 2: add source and sink capacities of nodes
-     */
+    /** step 2: distribute node unaries and materialize halo copies. */
     auto terminal_start = std::chrono::steady_clock::now();
-    terminal_locations_.resize(static_cast<size_t>(nnode_));
-    if (options_.materialize_all_partition_nodes) {
-      for (int node = 0; node < nnode_; ++node) {
-        min_cut_sub_graphs_[partitions_[node]].getOrInsertNode(node);
-      }
-    }
-    for (int i = 0; i < nnode_; ++i) {
-      if (terminal_capacities_[i] == 0) {
-        if (report_progress && (i + 1) % progress_interval == 0) {
-          dualdecomp_progress_report("dd_distribute_terminals", i + 1, nnode_,
-                                     terminal_start);
+    if (options_.halo_depth == 1) {
+      terminal_locations_.resize(static_cast<size_t>(nnode_));
+      if (options_.materialize_all_partition_nodes) {
+        for (int node = 0; node < nnode_; ++node) {
+          min_cut_sub_graphs_[partitions_[node]].getOrInsertNode(node);
         }
-        continue;
       }
-      min_cut_sub_graphs_[partitions_[i]].insertTerminal(
-          i, terminal_capacities_[i]);
-      if (report_progress && (i + 1) % progress_interval == 0) {
-        dualdecomp_progress_report("dd_distribute_terminals", i + 1, nnode_,
-                                   terminal_start);
+      for (int i = 0; i < nnode_; ++i) {
+        if (terminal_capacities_[i] != 0) {
+          min_cut_sub_graphs_[partitions_[i]].insertTerminal(
+              i, terminal_capacities_[i]);
+        }
+        if (report_progress && (i + 1) % progress_interval == 0) {
+          dualdecomp_progress_report("dd_distribute_terminals", i + 1,
+                                     nnode_, terminal_start);
+        }
+      }
+      for (auto &[global_index, memberships] : constrained_nodes) {
+        memberships.insert(partitions_[global_index]);
+        for (const int partition : memberships) {
+          min_cut_sub_graphs_[partition].getOrInsertNode(global_index);
+        }
+      }
+      for (int node = 0; node < nnode_; ++node) {
+        const int partition = partitions_[node];
+        const auto &global_to_local =
+            min_cut_sub_graphs_[partition].global_to_local_map;
+        if (node < static_cast<int>(global_to_local.size()) &&
+            global_to_local[node] >= 0) {
+          terminal_locations_[static_cast<size_t>(node)] =
+              TerminalLocation{partition, global_to_local[node]};
+        }
+      }
+    } else {
+      halo_terminal_locations_.resize(static_cast<size_t>(nnode_));
+      halo_terminal_objective_factors_.resize(static_cast<size_t>(nnode_));
+      for (int node = 0; node < nnode_; ++node) {
+        const auto &memberships =
+            halo_layout.node_partitions[static_cast<size_t>(node)];
+        const long objective_factor =
+            halo_objective_multiplier_ /
+            static_cast<long>(memberships.size());
+        halo_terminal_objective_factors_[static_cast<size_t>(node)] =
+            objective_factor;
+        if (memberships.size() > 1) {
+          constrained_nodes[node].insert(memberships.begin(),
+                                         memberships.end());
+        }
+        for (const int partition : memberships) {
+          const int local_node =
+              min_cut_sub_graphs_[partition].getOrInsertNode(node);
+          halo_terminal_locations_[static_cast<size_t>(node)].push_back(
+              TerminalLocation{partition, local_node});
+          if (terminal_capacities_[node] != 0) {
+            min_cut_sub_graphs_[partition].insertTerminal(
+                node, checked_scale_capacity(
+                          terminal_capacities_[node], objective_factor,
+                          options_.saturate_capacity_overflow));
+          }
+        }
+        if (report_progress && (node + 1) % progress_interval == 0) {
+          dualdecomp_progress_report("dd_distribute_terminals", node + 1,
+                                     nnode_, terminal_start);
+        }
       }
     }
     dualdecomp_progress_report("dd_distribute_terminals", nnode_, nnode_,
                                terminal_start);
-    for (auto &[global_index, partitions] : constrained_nodes) {
-      partitions.insert(partitions_[global_index]);
-      for (const int partition : partitions) {
-        min_cut_sub_graphs_[partition].getOrInsertNode(global_index);
-      }
-    }
-    for (int node = 0; node < nnode_; ++node) {
-      const int partition = partitions_[node];
-      const auto &global_to_local =
-          min_cut_sub_graphs_[partition].global_to_local_map;
-      if (node < static_cast<int>(global_to_local.size()) &&
-          global_to_local[node] >= 0) {
-        terminal_locations_[static_cast<size_t>(node)] =
-            TerminalLocation{partition, global_to_local[node]};
-      }
-    }
     auto finalize_start = std::chrono::steady_clock::now();
     int finalize_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
@@ -1760,6 +1912,7 @@ private:
         auto &package = partition_packages_[partition];
         package.partition_id = partition;
         package.local_node_count = min_cut_sub_graph.graph.nnode;
+        package.objective_multiplier = halo_objective_multiplier_;
         if (options_.construct_solvers) {
           package.arcs = min_cut_sub_graph.graph.arcs;
           package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
@@ -1970,6 +2123,10 @@ private:
   };
   std::vector<ArcLocation> arc_locations_;
   std::vector<TerminalLocation> terminal_locations_;
+  std::vector<std::vector<ArcLocation>> halo_arc_locations_;
+  std::vector<std::vector<TerminalLocation>> halo_terminal_locations_;
+  std::vector<long> halo_arc_objective_factors_;
+  std::vector<long> halo_terminal_objective_factors_;
   std::vector<int> local_arc_counts_;
   std::vector<int> local_node_counts_;
 
@@ -2082,6 +2239,7 @@ private:
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
   long objective_scale_promotion_count_;
+  long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;
   bool warned_regularization_budget_exceeded_;
   std::list<int> disagreeing_global_indices_;

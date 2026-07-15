@@ -203,6 +203,7 @@ public:
       : workers_(std::move(workers)), options_(options),
         thread_pool_(std::max<size_t>(1, workers_.size())),
         warned_regularization_budget_exceeded_(false) {
+    applyPackageObjectiveMultiplier(packages);
     validateOptions();
     if (workers_.empty()) {
       throw std::runtime_error("at least one partition worker is required");
@@ -508,6 +509,32 @@ public:
   }
 
 private:
+  void applyPackageObjectiveMultiplier(
+      const std::vector<PartitionPackage> &packages) {
+    long multiplier = 1;
+    bool initialized = false;
+    for (const auto &package : packages) {
+      if (package.objective_multiplier <= 0) {
+        throw std::runtime_error(
+            "partition objective multiplier must be positive");
+      }
+      if (!initialized) {
+        multiplier = package.objective_multiplier;
+        initialized = true;
+      } else if (package.objective_multiplier != multiplier) {
+        throw std::runtime_error(
+            "partition objective multipliers must match");
+      }
+    }
+    options_.objective_scale =
+        checkedScaleLong(options_.objective_scale, multiplier);
+    if (options_.regularization_budget_limit > 0) {
+      options_.regularization_budget_limit = checked_scale(
+          options_.regularization_budget_limit, multiplier,
+          "halo regularization budget overflow");
+    }
+  }
+
   void validateOptions() const {
     if (options_.objective_scale <= 0) {
       throw std::runtime_error("objective scale must be positive");

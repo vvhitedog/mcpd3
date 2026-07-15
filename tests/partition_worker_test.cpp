@@ -752,6 +752,8 @@ void requirePackagesEqual(const mcpd3::PartitionPackage &lhs,
           "package terminal capacities differ");
   require(lhs.local_to_global == rhs.local_to_global,
           "package local_to_global differs");
+  require(lhs.objective_multiplier == rhs.objective_multiplier,
+          "package objective multiplier differs");
   require(lhs.constraint_endpoints.size() ==
               rhs.constraint_endpoints.size(),
           "constraint endpoint count differs");
@@ -772,6 +774,412 @@ void requirePackagesEqual(const mcpd3::PartitionPackage &lhs,
     require(left.alpha_momentum == right.alpha_momentum,
             "constraint endpoint alpha momentum differs");
   }
+}
+
+void haloDepthOneExportsIdenticalLegacyPackages() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.construct_solvers = false;
+
+  const std::vector<int> arcs{0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+  const std::vector<int> capacities{2, 3, 4, 5, 6,
+                                    7, 8, 9, 10, 11};
+  const std::vector<int> terminals{0, 2, 0, -3, 0, 0};
+  mcpd3::DualDecomposition legacy(2, 6, 5, arcs, capacities, terminals,
+                                  options);
+
+  auto halo_options = options;
+  halo_options.halo_depth = 1;
+  mcpd3::DualDecomposition halo(2, 6, 5, arcs, capacities, terminals,
+                                halo_options);
+
+  const auto &legacy_packages = legacy.getPartitionPackages();
+  const auto &halo_packages = halo.getPartitionPackages();
+  require(halo.getHaloObjectiveMultiplier() == 1,
+          "h1 must retain a unit halo objective multiplier");
+  require(legacy_packages.size() == halo_packages.size(),
+          "h1 package count must match the legacy decomposition");
+  for (size_t partition = 0; partition < legacy_packages.size(); ++partition) {
+    requirePackagesEqual(legacy_packages[partition],
+                         halo_packages[partition]);
+  }
+}
+
+void haloDepthTwoExportsScaledInducedSubproblems() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.emit_partition_packages = true;
+  options.construct_solvers = false;
+  options.halo_depth = 2;
+
+  mcpd3::DualDecomposition halo(
+      /*npartition=*/2, /*nnode=*/6, /*narc=*/5,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5},
+      /*arc_capacities=*/std::vector<int>{1, 3, 1, 3, 1, 3, 1, 3, 1, 3},
+      /*terminal_capacities=*/std::vector<int>{6, 4, 0, 0, 0, -8}, options);
+
+  require(halo.getHaloObjectiveMultiplier() == 2,
+          "h2 path decomposition should expose multiplier two");
+  const auto &packages = halo.getPartitionPackages();
+  require(packages.size() == 2, "h2 path should export two packages");
+  require(packages[0].objective_multiplier == 2 &&
+              packages[1].objective_multiplier == 2,
+          "every h2 package should carry the common objective multiplier");
+  require(packages[0].local_to_global ==
+              std::vector<int>({0, 1, 2, 3, 4}),
+          "left h2 package should contain its two-step node halo");
+  require(packages[0].arcs ==
+              std::vector<int>({0, 1, 1, 2, 2, 3, 3, 4}),
+          "left h2 package should contain every induced halo edge");
+  require(packages[0].arc_capacities ==
+              std::vector<mcpd3::Capacity>({2, 6, 1, 3, 1, 3, 1, 3}),
+          "left h2 edge capacities should use Q divided by multiplicity");
+  require(packages[0].terminal_capacities ==
+              std::vector<mcpd3::Capacity>({12, 4, 0, 0, 0}),
+          "left h2 unaries should use Q divided by node multiplicity");
+
+  require(packages[1].local_to_global ==
+              std::vector<int>({1, 2, 3, 4, 5}),
+          "right h2 package should contain its two-step node halo");
+  require(packages[1].arcs ==
+              std::vector<int>({0, 1, 1, 2, 2, 3, 3, 4}),
+          "right h2 package should contain every induced halo edge");
+  require(packages[1].arc_capacities ==
+              std::vector<mcpd3::Capacity>({1, 3, 1, 3, 1, 3, 2, 6}),
+          "right h2 edge capacities should use Q divided by multiplicity");
+  require(packages[1].terminal_capacities ==
+              std::vector<mcpd3::Capacity>({4, 0, 0, 0, -16}),
+          "right h2 unaries should use Q divided by node multiplicity");
+
+  for (const auto &package : packages) {
+    require(package.constraint_endpoints.size() == 4,
+            "every duplicated h2 node should have a consensus endpoint");
+    std::vector<int> constrained_nodes;
+    for (const auto &endpoint : package.constraint_endpoints) {
+      constrained_nodes.push_back(endpoint.global_node_id);
+    }
+    std::sort(constrained_nodes.begin(), constrained_nodes.end());
+    require(constrained_nodes == std::vector<int>({1, 2, 3, 4}),
+            "h2 constraints should cover all and only duplicated nodes");
+  }
+}
+
+void haloDepthTwoCertifiesTheUnscaledDirectObjective() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  const std::vector<int> arcs{0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+  const std::vector<int> capacities{3, 3, 5, 5, 2,
+                                    2, 7, 7, 4, 4};
+  const std::vector<int> terminals{20, 0, 0, 0, 0, -20};
+
+  mcpd3::PrimalDualMinCutSolver direct(
+      /*nnode=*/6, /*narc=*/5, std::vector<int>(arcs), capacities, terminals);
+  direct.solve();
+  const mcpd3::Objective exact = direct.getMinCutValue();
+
+  mcpd3::DualDecompositionOptions options;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.halo_depth = 2;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 200;
+  options.patience = 200;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+
+  mcpd3::DualDecomposition halo(2, 6, 5, arcs, capacities, terminals,
+                                options);
+  halo.solve();
+
+  require(halo.getLastDisagreementCount() == 0,
+          "h2 path solve should reach primal agreement");
+  require(halo.getBestCertifiedLowerBoundRaw() ==
+              exact * halo.getHaloObjectiveMultiplier(),
+          "h2 raw certificate should equal Q times the direct objective");
+  require(halo.getBestCertifiedLowerBound() ==
+              mcpd3::integer_to_double(exact),
+          "h2 public certificate should normalize away the halo multiplier");
+}
+
+mcpd3::Objective evaluateCutObjective(
+    const std::vector<int> &arcs,
+    const std::vector<mcpd3::Capacity> &capacities,
+    const std::vector<mcpd3::Capacity> &terminals,
+    const std::vector<int> &labels) {
+  mcpd3::Objective objective = 0;
+  for (size_t arc = 0; arc < arcs.size() / 2; ++arc) {
+    const int source = arcs[2 * arc];
+    const int target = arcs[2 * arc + 1];
+    if (labels[source] == 0 && labels[target] == 1) {
+      objective = mcpd3::checked_add(
+          objective, mcpd3::widen_capacity(capacities[2 * arc]));
+    } else if (labels[source] == 1 && labels[target] == 0) {
+      objective = mcpd3::checked_add(
+          objective, mcpd3::widen_capacity(capacities[2 * arc + 1]));
+    }
+  }
+  for (size_t node = 0; node < terminals.size(); ++node) {
+    if (labels[node] == 0 && terminals[node] < 0) {
+      objective = mcpd3::checked_add(
+          objective, mcpd3::absolute_capacity(terminals[node]));
+    } else if (labels[node] == 1 && terminals[node] > 0) {
+      objective = mcpd3::checked_add(
+          objective, mcpd3::widen_capacity(terminals[node]));
+    }
+  }
+  return objective;
+}
+
+void haloLocalObjectivesSumToScaledGlobalObjectiveExhaustively() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  std::mt19937 generator(1873);
+  std::uniform_int_distribution<int> capacity_distribution(0, 7);
+  std::uniform_int_distribution<int> terminal_distribution(-5, 5);
+  const std::vector<int> depths{1, 2, 3, mcpd3::kInfiniteHaloDepth};
+
+  for (int graph_index = 0; graph_index < 8; ++graph_index) {
+    const int node_count = 6;
+    std::vector<int> arcs{0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+    if (graph_index % 2 == 0) {
+      arcs.insert(arcs.end(), {0, 3, 1, 4, 2, 5});
+    }
+    std::vector<mcpd3::Capacity> capacities(arcs.size());
+    for (auto &capacity : capacities) {
+      capacity = capacity_distribution(generator);
+    }
+    std::vector<mcpd3::Capacity> terminals(node_count);
+    for (auto &terminal : terminals) {
+      terminal = terminal_distribution(generator);
+    }
+
+    for (const int depth : depths) {
+      mcpd3::DualDecompositionOptions options;
+      options.track_primal_upper_bound = false;
+      options.verbose = false;
+      options.thread_count = 1;
+      options.emit_partition_packages = true;
+      options.construct_solvers = false;
+      options.halo_depth = depth;
+      mcpd3::DualDecomposition halo(
+          /*npartition=*/3, node_count,
+          static_cast<int>(arcs.size() / 2), arcs, capacities, terminals,
+          options);
+
+      for (int mask = 0; mask < (1 << node_count); ++mask) {
+        std::vector<int> global_labels(static_cast<size_t>(node_count));
+        for (int node = 0; node < node_count; ++node) {
+          global_labels[static_cast<size_t>(node)] = (mask >> node) & 1;
+        }
+        const mcpd3::Objective expected = mcpd3::checked_scale(
+            evaluateCutObjective(arcs, capacities, terminals, global_labels),
+            halo.getHaloObjectiveMultiplier());
+        mcpd3::Objective actual = 0;
+        for (const auto &package : halo.getPartitionPackages()) {
+          std::vector<int> local_labels(package.local_to_global.size());
+          for (size_t local = 0; local < local_labels.size(); ++local) {
+            local_labels[local] = global_labels[static_cast<size_t>(
+                package.local_to_global[local])];
+          }
+          actual = mcpd3::checked_add(
+              actual,
+              evaluateCutObjective(package.arcs, package.arc_capacities,
+                                   package.terminal_capacities, local_labels));
+        }
+        require(actual == expected,
+                "agreed halo local objectives must sum to Q times the global "
+                "objective");
+      }
+    }
+  }
+}
+
+void haloCapacityReplacementPreservesMultiplicityScaling() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  const std::vector<int> arcs{0, 1, 1, 2, 2, 3, 3, 4, 4, 5};
+  const std::vector<mcpd3::Capacity> initial_capacities{
+      1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  const std::vector<mcpd3::Capacity> initial_terminals{10, 0, 0, 0, 0, -10};
+  const std::vector<mcpd3::Capacity> replacement_capacities{
+      2, 4, 3, 5, 4, 6, 5, 7, 6, 8};
+  const std::vector<mcpd3::Capacity> replacement_terminals{
+      9, 3, 0, 0, -2, -11};
+
+  mcpd3::DualDecompositionOptions options;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.halo_depth = 2;
+  options.emit_partition_packages = true;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 300;
+  options.patience = 300;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+
+  mcpd3::DualDecomposition halo(2, 6, 5, arcs, initial_capacities,
+                                initial_terminals, options);
+  halo.replaceProblemCapacities(
+      replacement_capacities, replacement_terminals,
+      /*preserve_alpha_state=*/false, /*preserve_flow_state=*/false);
+
+  const auto &packages = halo.getPartitionPackages();
+  require(packages[0].arc_capacities ==
+              std::vector<mcpd3::Capacity>({4, 8, 3, 5, 4, 6, 5, 7}),
+          "left replacement arcs must preserve halo multiplicity factors");
+  require(packages[1].arc_capacities ==
+              std::vector<mcpd3::Capacity>({3, 5, 4, 6, 5, 7, 12, 16}),
+          "right replacement arcs must preserve halo multiplicity factors");
+  require(packages[0].terminal_capacities ==
+              std::vector<mcpd3::Capacity>({18, 3, 0, 0, -2}),
+          "left replacement unaries must preserve halo multiplicity factors");
+  require(packages[1].terminal_capacities ==
+              std::vector<mcpd3::Capacity>({3, 0, 0, -2, -22}),
+          "right replacement unaries must preserve halo multiplicity factors");
+
+  mcpd3::PrimalDualMinCutSolver direct(
+      6, 5, std::vector<int>(arcs), replacement_capacities,
+      replacement_terminals);
+  direct.solve();
+  halo.scaleProblem(3);
+  halo.solve();
+  require(halo.getLastDisagreementCount() == 0,
+          "replacement h2 solve should reach agreement");
+  require(halo.getBestCertifiedLowerBoundRaw() ==
+              direct.getMinCutValue() * halo.getHaloObjectiveMultiplier() * 3,
+          "promoted replacement h2 certificate should retain exact Q scaling");
+  require(halo.getBestCertifiedLowerBound() ==
+              mcpd3::integer_to_double(direct.getMinCutValue()),
+          "promotion should preserve the normalized replacement objective");
+}
+
+void haloPackageCoordinatorNormalizesTheObjectiveMultiplier() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  const std::vector<int> arcs{0, 1, 1, 2, 2, 3};
+  const std::vector<int> capacities{3, 3, 4, 4, 5, 5};
+  const std::vector<int> terminals{20, 0, 0, -20};
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.halo_depth = mcpd3::kInfiniteHaloDepth;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 10;
+  options.patience = 10;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+
+  mcpd3::DualDecomposition native(2, 4, 3, arcs, capacities, terminals,
+                                  options);
+  native.solve();
+
+  auto export_options = options;
+  export_options.construct_solvers = false;
+  mcpd3::DualDecomposition package_source(
+      2, 4, 3, arcs, capacities, terminals, export_options);
+  std::vector<mcpd3::PartitionPackage> packages =
+      package_source.getPartitionPackages();
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+
+  mcpd3::PartitionWorkerCoordinatorOptions coordinator_options;
+  coordinator_options.num_optimization_scales = 1;
+  coordinator_options.max_iteration_count = 10;
+  coordinator_options.initial_step_size = 1;
+  coordinator_options.max_step_size = 1;
+  coordinator_options.patience = 10;
+  coordinator_options.use_momentum = false;
+  coordinator_options.enable_group_stopping = false;
+  coordinator_options.regularization_scheme =
+      mcpd3::PartitionWorkerRegularizationScheme::NONE;
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      std::move(packages), std::move(workers), coordinator_options);
+  const auto result = coordinator.solve();
+
+  require(result.scale == 2,
+          "package coordinator scale should include the halo multiplier");
+  require(result.final_disagreement_count == 0,
+          "identical infinite-halo packages should agree immediately");
+  require(result.best_certified_lower_bound_raw ==
+              native.getBestCertifiedLowerBoundRaw(),
+          "package and native halo raw certificates should match");
+  require(result.best_certified_lower_bound ==
+              native.getBestCertifiedLowerBound(),
+          "package and native halo normalized certificates should match");
+
+  auto mismatched_packages = package_source.getPartitionPackages();
+  mismatched_packages[1].objective_multiplier = 3;
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> invalid_workers;
+  invalid_workers.push_back(
+      std::make_unique<mcpd3::InProcessPartitionWorker>());
+  invalid_workers.push_back(
+      std::make_unique<mcpd3::InProcessPartitionWorker>());
+  requireThrows(
+      [&] {
+        mcpd3::PartitionWorkerCoordinator invalid(
+            std::move(mismatched_packages), std::move(invalid_workers),
+            coordinator_options);
+      },
+      "coordinator should reject mismatched halo objective multipliers");
+
+  auto invalid_package = package_source.getPartitionPackages().front();
+  invalid_package.objective_multiplier = 0;
+  requireThrows(
+      [&] { mcpd3::validatePartitionPackage(invalid_package); },
+      "worker package validation should reject a zero objective multiplier");
+}
+
+void haloFlowHeatAggregatesEveryLocalEdgeCopy() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.halo_depth = mcpd3::kInfiniteHaloDepth;
+  options.track_arc_flow_updates = true;
+  options.initial_step_size = 1;
+  options.max_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 1;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+
+  mcpd3::DualDecomposition halo(
+      /*npartition=*/2, /*nnode=*/4, /*narc=*/3,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3},
+      /*arc_capacities=*/std::vector<int>{5, 5, 5, 5, 5, 5},
+      /*terminal_capacities=*/std::vector<int>{20, 0, 0, -20}, options);
+  halo.runOptimizationScale(1, 1, 2, false);
+
+  const auto counts = halo.getArcFlowUpdateCounts();
+  require(counts == std::vector<std::uint64_t>({2, 2, 2}),
+          "global halo flow heat should sum both full-graph edge copies");
+  halo.resetArcFlowUpdateCounts();
+  require(halo.getArcFlowUpdateCounts() ==
+              std::vector<std::uint64_t>({0, 0, 0}),
+          "halo flow-heat reset should clear every local edge copy");
 }
 
 void packageOnlyExportMatchesSolverBackedExport() {
@@ -4636,6 +5044,13 @@ int main() {
     exportedPartitionPackagesMaterializeBoundaryDuplicates();
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();
+    haloDepthOneExportsIdenticalLegacyPackages();
+    haloDepthTwoExportsScaledInducedSubproblems();
+    haloDepthTwoCertifiesTheUnscaledDirectObjective();
+    haloLocalObjectivesSumToScaledGlobalObjectiveExhaustively();
+    haloCapacityReplacementPreservesMultiplicityScaling();
+    haloPackageCoordinatorNormalizesTheObjectiveMultiplier();
+    haloFlowHeatAggregatesEveryLocalEdgeCopy();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
     directedStreamingDimacsMatchesGeneralReaderValue();

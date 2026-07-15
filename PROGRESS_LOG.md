@@ -196,3 +196,28 @@
 - Tests cover exact h1/h2/infinite memberships, mixed two-way/three-way
   overlap requiring multiplier six, invalid depth/labels/endpoints, and LCM
   overflow. The full Release suite remains 2/2.
+
+## 2026-07-15 - Exact halo subproblem integration
+
+- Added `DualDecompositionOptions::halo_depth`, defaulting to one, and exposed
+  the checked halo objective multiplier. The h1 construction retains the old
+  one-owner arc and terminal-location arrays; multi-location storage is only
+  allocated for h2+.
+- For h2+, local induced edges and copied unaries receive exact integer factors
+  `Q_h / r_e` and `Q_h / r_v`. All duplicated nodes receive the existing signed
+  pairwise consensus constraints. Original primal capacities, effective
+  objective scale, and explicit regularization budget limits include `Q_h`.
+- Generalized capacity replacement and flow-heat reconstruction to every
+  local copy. Replacement reapplies the fixed multiplicity factors; objective
+  promotion then scales the resulting local state through the existing path.
+- Added a package objective multiplier so in-process/streaming worker
+  coordinators normalize raw halo objectives correctly. Coordinators reject
+  mismatched multipliers, and package validation rejects nonpositive values.
+- Tests first failed on the absent halo options/package metadata. They now
+  cover byte-equivalent h1 exports, exact h2 package topology/capacities,
+  exhaustive objective equality on eight randomized directed graphs and all
+  64 cuts at h1/h2/h3/infinite, direct objective certification, capacity
+  replacement plus promotion, native/package coordinator equivalence, invalid
+  metadata, and duplicate-copy flow heat/reset.
+- The complete Release suite passes 2/2 after integration. `git diff --check`
+  passes.

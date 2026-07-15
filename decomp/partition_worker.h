@@ -74,6 +74,7 @@ struct PartitionPackage {
   std::vector<Capacity> terminal_capacities;
   std::vector<int> local_to_global;
   std::vector<ConstraintEndpointBinding> constraint_endpoints;
+  long objective_multiplier = 1;
 };
 
 struct PartitionSolveRequest {
@@ -124,6 +125,9 @@ inline void validatePartitionPackage(const PartitionPackage &package) {
   }
   if (package.local_node_count < 0) {
     throw std::runtime_error("local node count must be non-negative");
+  }
+  if (package.objective_multiplier <= 0) {
+    throw std::runtime_error("partition objective multiplier must be positive");
   }
   if (package.arcs.size() % 2 != 0) {
     throw std::runtime_error("partition arcs must contain endpoint pairs");
@@ -333,44 +337,7 @@ public:
 
 private:
   static void validatePackage(const PartitionPackage &package) {
-    if (package.partition_id < 0) {
-      throw std::runtime_error("partition id must be non-negative");
-    }
-    if (package.local_node_count < 0) {
-      throw std::runtime_error("local node count must be non-negative");
-    }
-    if (package.arcs.size() % 2 != 0) {
-      throw std::runtime_error("partition arcs must contain endpoint pairs");
-    }
-    if (package.arc_capacities.size() != package.arcs.size()) {
-      throw std::runtime_error("arc capacity count must match arc endpoints");
-    }
-    if (package.terminal_capacities.size() !=
-        static_cast<size_t>(package.local_node_count)) {
-      throw std::runtime_error(
-          "terminal capacity count must match local node count");
-    }
-    if (!package.local_to_global.empty() &&
-        package.local_to_global.size() !=
-            static_cast<size_t>(package.local_node_count)) {
-      throw std::runtime_error(
-          "local_to_global count must match local node count");
-    }
-    for (const auto &local_index : package.arcs) {
-      if (local_index < 0 || local_index >= package.local_node_count) {
-        throw std::runtime_error("arc endpoint is outside local node range");
-      }
-    }
-    for (const auto &binding : package.constraint_endpoints) {
-      if (binding.constraint_id < 0) {
-        throw std::runtime_error("constraint id must be non-negative");
-      }
-      if (binding.local_index < 0 ||
-          binding.local_index >= package.local_node_count) {
-        throw std::runtime_error(
-            "constraint endpoint is outside local node range");
-      }
-    }
+    validatePartitionPackage(package);
   }
 
   LoadedPartition &loadedPartitionForRequest(
