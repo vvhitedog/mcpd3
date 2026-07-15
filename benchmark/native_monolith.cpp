@@ -43,6 +43,7 @@ struct Config {
   int schedule_levels = 5;
   long schedule_start = 10000;
   long objective_scale = 1;
+  int halo_depth = 1;
   int patience = 10;
   std::size_t thread_count = 0;
   bool directed = false;
@@ -101,6 +102,17 @@ int parseInt(const std::string &value, const std::string &name) {
   return static_cast<int>(parsed);
 }
 
+int parseHaloDepth(const std::string &value, const std::string &name) {
+  if (value == "infinite") {
+    return mcpd3::kInfiniteHaloDepth;
+  }
+  const int depth = parseInt(value, name);
+  if (depth < 1) {
+    throw std::runtime_error(name + " must be positive or infinite");
+  }
+  return depth;
+}
+
 std::size_t parseSize(const std::string &value, const std::string &name) {
   const long parsed = parseLong(value, name);
   if (parsed < 0) {
@@ -141,6 +153,7 @@ void printUsage(const char *program) {
       << "       [--partitions N] [--max-iterations N]\n"
       << "       [--schedule-start N] [--schedule-levels N]\n"
       << "       [--objective-scale N] [--threads N] [--patience N]\n"
+      << "       [--halo-depth N|infinite]\n"
       << "       [--regularization scaled-epsilon|none]\n"
       << "       [--regularization-budget-limit N]\n"
       << "       [--disable-scale-promotion] [--max-scale-promotions N]\n"
@@ -181,6 +194,8 @@ Config parseArgs(int argc, char **argv) {
     } else if (arg == "--objective-scale" ||
                arg == "--capacity-multiplier") {
       config.objective_scale = parseLong(requireValue(arg), arg);
+    } else if (arg == "--halo-depth") {
+      config.halo_depth = parseHaloDepth(requireValue(arg), arg);
     } else if (arg == "--threads") {
       config.thread_count = parseSize(requireValue(arg), arg);
     } else if (arg == "--patience") {
@@ -311,6 +326,7 @@ mcpd3::DualDecompositionOptions makeOptions(const Config &config) {
   options.saturate_capacity_overflow = config.saturate_capacity_overflow;
   options.verbose = config.verbose;
   options.objective_scale = config.objective_scale;
+  options.halo_depth = config.halo_depth;
   options.thread_count = config.thread_count;
   options.regularization_scheme = config.regularization_scheme;
   options.regularization_budget_limit = config.regularization_budget_limit;
@@ -337,6 +353,11 @@ void printConfig(const Config &config) {
   std::cout << "schedule_levels " << config.schedule_levels << "\n";
   std::cout << "max_iterations " << config.max_iterations << "\n";
   std::cout << "objective_scale " << config.objective_scale << "\n";
+  std::cout << "halo_depth "
+            << (config.halo_depth == mcpd3::kInfiniteHaloDepth
+                    ? "infinite"
+                    : std::to_string(config.halo_depth))
+            << "\n";
   std::cout << "thread_count " << config.thread_count << "\n";
   std::cout << "directed " << config.directed << "\n";
   std::cout << "symmetric_streaming " << config.symmetric_streaming << "\n";
@@ -416,6 +437,8 @@ void printFinal(const Timing &timing, const Config &config,
                     : "unavailable")
             << "\n";
   std::cout << "objective_scale " << dual_decomp.getScale() << "\n";
+  std::cout << "halo_objective_multiplier "
+            << dual_decomp.getHaloObjectiveMultiplier() << "\n";
   std::cout << "objective_scale_promotions "
             << dual_decomp.getObjectiveScalePromotionCount() << "\n";
   std::cout << "total_iterations "

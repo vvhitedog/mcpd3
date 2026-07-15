@@ -221,3 +221,15 @@
   metadata, and duplicate-copy flow heat/reset.
 - The complete Release suite passes 2/2 after integration. `git diff --check`
   passes.
+
+## 2026-07-15 16:23 PDT - Native mcpd3-nh selector
+
+- Added `--halo-depth N|infinite` to both native dual-decomposition command
+  lines. The default remains one, so existing mcpd3-n invocations retain the
+  historical decomposition without an extra allocation or package copy.
+- Both tools report the requested depth and the resulting exact halo objective
+  multiplier. Invalid zero, negative, malformed, and overflowing finite depths
+  are rejected rather than silently selecting another formulation.
+- Documented the compatibility and experimental infinite modes in the README.
+- Rebuilt the Release tree and passed the complete 2/2 CTest suite;
+  `git diff --check` passes.

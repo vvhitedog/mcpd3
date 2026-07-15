@@ -168,6 +168,7 @@ Useful dual-decomposition options:
 --patience N
 --max-iterations N
 --threads N
+--halo-depth N|infinite
 --regularization scaled-epsilon|none
 --regularization-budget-limit N
 --disable-scale-promotion
@@ -216,6 +217,13 @@ only for diagnostics that intentionally compare against the worker export path.
 When comparing to mcpd4 defaults, pass
 `--exhaust-regularized-scale-iterations` so the low-scale schedule matches the
 worker-coordinator path.
+`--halo-depth 1` retains the native `mcpd3-n` decomposition. Values greater
+than one select `mcpd3-nh`: each core partition is extended by that many BFS
+steps, duplicated node labels receive consensus constraints, and duplicated
+objective terms are scaled by an exact integer halo multiplier. The benchmark
+reports that multiplier as `halo_objective_multiplier`. `infinite` is provided
+for correctness experiments and places the full graph in every partition; it
+is not intended for production runs.
 `--saturate-capacity-overflow` and `--truncate-capacity-overflow` are opt-in
 compatibility modes that clamp scaled capacities to the 32-bit range, including
 during later objective-scale promotions.

@@ -72,6 +72,21 @@ const char *regularization_scheme_name(
   return "unknown";
 }
 
+bool parse_halo_depth(const std::string &value, int *depth) {
+  if (value == "infinite") {
+    *depth = mcpd3::kInfiniteHaloDepth;
+    return true;
+  }
+  char *end = nullptr;
+  const long parsed = std::strtol(value.c_str(), &end, 10);
+  if (end == value.c_str() || *end != '\0' || parsed < 1 ||
+      parsed > std::numeric_limits<int>::max()) {
+    return false;
+  }
+  *depth = static_cast<int>(parsed);
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -96,6 +111,7 @@ int main(int argc, char *argv[]) {
                  "[--random-initial-alpha-radius N] "
                  "[--random-initial-alpha-seed N] "
                  "[--capacity-multiplier N] "
+                 "[--halo-depth N|infinite] "
                  "[--stream-directed-input] "
                  "[--disable-primal-upper-bound] [--quiet]\n";
     std::exit(EXIT_SUCCESS);
@@ -117,6 +133,13 @@ int main(int argc, char *argv[]) {
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--capacity-multiplier")) != "") {
       capacity_multiplier = std::atol(value.c_str());
+    } else if ((value = get_option_value(i, argc, argv, arg,
+                                         "--halo-depth")) != "") {
+      if (!parse_halo_depth(value, &options.halo_depth)) {
+        std::cerr << "halo depth must be positive or infinite: " << value
+                  << "\n";
+        return EXIT_FAILURE;
+      }
     } else if (arg == "--disable-primal-upper-bound") {
       options.track_primal_upper_bound = false;
     } else if (arg == "--quiet") {
@@ -249,6 +272,10 @@ int main(int argc, char *argv[]) {
             << " stream_directed_input=" << stream_directed_input
             << " stream_symmetric_input=" << stream_symmetric_input
             << " capacity_multiplier=" << capacity_multiplier
+            << " halo_depth="
+            << (options.halo_depth == mcpd3::kInfiniteHaloDepth
+                    ? "infinite"
+                    : std::to_string(options.halo_depth))
             << " regularization="
             << regularization_scheme_name(options.regularization_scheme)
             << " regularization_budget_limit="
@@ -361,5 +388,7 @@ int main(int argc, char *argv[]) {
             << dual_decomp->getLastRegularizationActiveSinkCount() << "\n";
   std::cout << " objective_scale_promotion_count : "
             << dual_decomp->getObjectiveScalePromotionCount() << "\n";
+  std::cout << " halo_objective_multiplier : "
+            << dual_decomp->getHaloObjectiveMultiplier() << "\n";
   return EXIT_SUCCESS;
 }
