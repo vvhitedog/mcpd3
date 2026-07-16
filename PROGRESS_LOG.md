@@ -282,3 +282,20 @@
   3.954/3.200/7.985 s. Head h1/h5 improved from 12.062/11.143 s to
   7.550/8.472 s. The remaining prominent allocation cost comes from BK's
   separate changed-flow-arc hash, not cut-value maintenance.
+
+## 2026-07-15 - Allocation-free changed-flow arc collection
+
+- Preserved BK's existing changed-arc hash overload for compatibility and
+  added a contiguous logical-edge collector for the primal-dual hot path.
+  One byte per logical edge stores a generation mark, deduplicating sister
+  arcs and repeated path updates without allocations. The generation wraps
+  through a full clear once per 255 incremental solves.
+- The full oracle test performs 360 solves, so it validates the generation
+  wrap as well as randomized label and flow changes. Release tests pass in
+  32, 64, 128, GMP, legacy replay, and METIS builds; phase tests pass 36/36.
+- Final three-run wall times, relative to the original hash-based baseline,
+  are Spiral h1 3.798 s (-40.0%), h2 2.906 s (-35.2%), and h5 7.074 s
+  (-34.3%); Head h1 7.237 s (-40.0%) and h5 7.687 s (-31.0%). Objectives,
+  cut counts, DD rounds, and promotions are unchanged.
+- A post-change call profile has zero lost samples. Changed-arc hash insertion
+  fell from 7.1% self time to zero; dense changed-arc recording is 2.0%.
