@@ -59,6 +59,7 @@ Vision (ICCV), 2005
 #define __GRAPH_H__
 
 #include "block.h"
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 #include <string.h>
@@ -147,6 +148,8 @@ private:
 
 public:
   flowtype maxflow(bool reuse_trees, std::unordered_set<arc *> &changed_arcs_,
+                   Block<node_id> *changed_list = NULL);
+  flowtype maxflow(bool reuse_trees, std::vector<int> &changed_arc_indices,
                    Block<node_id> *changed_list = NULL);
 
   ////////////////////////////
@@ -346,6 +349,8 @@ private:
       *node_max; // node_last = nodes+node_num, node_max = nodes+node_num_max;
   arc *arcs, *arc_last,
       *arc_max; // arc_last = arcs+2*edge_num, arc_max = arcs+2*edge_num_max;
+  std::vector<unsigned char> changed_arc_marks;
+  unsigned char changed_arc_generation = 0;
   bool nodes_mmap_backed;
   bool arcs_mmap_backed;
   int nodes_mmap_fd;
@@ -391,8 +396,15 @@ private:
 
   void maxflow_init();             // called if reuse_trees == false
   void maxflow_reuse_trees_init(); // called if reuse_trees == true
-  void augment(arc *middle_arc, std::unordered_set<arc *> &changed_arcs_,
-               bool get_changed_arcs);
+  flowtype maxflow_impl(bool reuse_trees,
+                        std::unordered_set<arc *> *changed_arcs,
+                        std::vector<int> *changed_arc_indices,
+                        Block<node_id> *changed_list);
+  void record_changed_arc(arc *changed_arc,
+                          std::unordered_set<arc *> *changed_arcs,
+                          std::vector<int> *changed_arc_indices);
+  void augment(arc *middle_arc, std::unordered_set<arc *> *changed_arcs,
+               std::vector<int> *changed_arc_indices, bool record_changes);
   void process_source_orphan(node *i);
   void process_sink_orphan(node *i);
 

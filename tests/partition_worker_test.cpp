@@ -112,7 +112,7 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
   require(estimate.solver_vector_bytes ==
               4 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
                   2 * sizeof(mcpd3::NodeFlow) +
-                  2 * sizeof(unsigned char),
+                  3 * sizeof(unsigned char),
           "solver vector estimate should account for arc and node vectors");
   require(estimate.total_bytes ==
               estimate.bk_total_bytes + estimate.solver_vector_bytes,

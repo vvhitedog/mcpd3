@@ -504,6 +504,7 @@ public:
         estimate.bk_node_bytes + estimate.bk_arc_bytes;
     const auto arc_index_count = 2 * static_cast<std::size_t>(narc);
     const auto arc_capacity_count = 3 * static_cast<std::size_t>(narc);
+    const auto arc_change_flag_count = static_cast<std::size_t>(narc);
     const auto node_capacity_count = static_cast<std::size_t>(nnode);
     const auto node_flow_count = static_cast<std::size_t>(nnode);
     const auto node_label_count = static_cast<std::size_t>(nnode);
@@ -513,7 +514,8 @@ public:
         (arc_capacity_count + node_capacity_count) * sizeof(Capacity) +
         node_flow_count * sizeof(NodeFlow) +
         node_label_count * sizeof(int) +
-        node_change_flag_count * sizeof(unsigned char);
+        (node_change_flag_count + arc_change_flag_count) *
+            sizeof(unsigned char);
     estimate.total_bytes =
         estimate.bk_total_bytes + estimate.solver_vector_bytes;
     return estimate;
@@ -1519,10 +1521,8 @@ private:
     if (is_first_iteration_) {
       maxflow_graph_.maxflow();
     } else {
-      incremental_arcs_.clear();
       incremental_mincut_nodes_.clear();
-      std::unordered_set<MaxflowGraph::arc_id> changed_arcs;
-      maxflow_graph_.maxflow(true, changed_arcs, &maxflow_changed_list_);
+      maxflow_graph_.maxflow(true, incremental_arcs_, &maxflow_changed_list_);
 
       // update incremental nodes
       MaxflowGraph::node_id *ptr;
@@ -1533,13 +1533,6 @@ private:
         incremental_mincut_nodes_.emplace_back(i);
       }
       maxflow_changed_list_.Reset();
-
-      // update incremental arcs
-      auto first_arc = maxflow_graph_.get_first_arc();
-      for (const auto &arc_id : changed_arcs) {
-        auto arc_index = std::distance(first_arc, arc_id) / 2;
-        incremental_arcs_.emplace_back(arc_index);
-      }
     }
   }
 
@@ -1624,7 +1617,7 @@ private:
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
   std::list<int> incremental_mincut_nodes_;
-  std::list<int> incremental_arcs_;
+  std::vector<int> incremental_arcs_;
   Objective mincut_value_;
 
   /**

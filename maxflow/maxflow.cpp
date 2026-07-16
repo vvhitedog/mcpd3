@@ -229,8 +229,8 @@ void Graph<captype, tcaptype, flowtype>::maxflow_reuse_trees_init() {
 
 template <typename captype, typename tcaptype, typename flowtype>
 void Graph<captype, tcaptype, flowtype>::augment(
-    arc *middle_arc, std::unordered_set<arc *> &changed_arcs_,
-    bool get_changed_arcs) {
+    arc *middle_arc, std::unordered_set<arc *> *changed_arcs,
+    std::vector<int> *changed_arc_indices, bool record_changes) {
   node *i;
   arc *a;
   tcaptype bottleneck;
@@ -266,8 +266,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
   /* 2a - the source tree */
   middle_arc->sister->r_cap += arc_bottleneck;
   middle_arc->r_cap -= arc_bottleneck;
-  if (get_changed_arcs) {
-    changed_arcs_.insert(middle_arc);
+  if (record_changes) {
+    record_changed_arc(middle_arc, changed_arcs, changed_arc_indices);
   }
   for (i = middle_arc->sister->head;; i = a->head) {
     a = i->parent;
@@ -275,8 +275,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
       break;
     a->r_cap += arc_bottleneck;
     a->sister->r_cap -= arc_bottleneck;
-    if (get_changed_arcs) {
-      changed_arcs_.insert(a);
+    if (record_changes) {
+      record_changed_arc(a, changed_arcs, changed_arc_indices);
     }
     if (!a->sister->r_cap) {
       set_orphan_front(i); // add i to the beginning of the adoption list
@@ -293,8 +293,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
       break;
     a->sister->r_cap += arc_bottleneck;
     a->r_cap -= arc_bottleneck;
-    if (get_changed_arcs) {
-      changed_arcs_.insert(a);
+    if (record_changes) {
+      record_changed_arc(a, changed_arcs, changed_arc_indices);
     }
     if (!a->r_cap) {
       set_orphan_front(i); // add i to the beginning of the adoption list
@@ -450,13 +450,56 @@ template <typename captype, typename tcaptype, typename flowtype>
 flowtype
 Graph<captype, tcaptype, flowtype>::maxflow(bool reuse_trees,
                                             Block<node_id> *_changed_list) {
-  std::unordered_set<arc *> empty_list;
-  return maxflow(reuse_trees, empty_list, _changed_list);
+  return maxflow_impl(reuse_trees, nullptr, nullptr, _changed_list);
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
 flowtype Graph<captype, tcaptype, flowtype>::maxflow(
     bool reuse_trees, std::unordered_set<arc *> &changed_arcs_,
+    Block<node_id> *_changed_list) {
+  return maxflow_impl(reuse_trees, &changed_arcs_, nullptr, _changed_list);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+flowtype Graph<captype, tcaptype, flowtype>::maxflow(
+    bool reuse_trees, std::vector<int> &changed_arc_indices,
+    Block<node_id> *_changed_list) {
+  const size_t edge_count = static_cast<size_t>(arc_last - arcs) / 2;
+  if (changed_arc_marks.size() != edge_count) {
+    changed_arc_marks.assign(edge_count, 0);
+    changed_arc_generation = 0;
+  }
+  if (++changed_arc_generation == 0) {
+    std::fill(changed_arc_marks.begin(), changed_arc_marks.end(), 0);
+    ++changed_arc_generation;
+  }
+  changed_arc_indices.clear();
+  return maxflow_impl(reuse_trees, nullptr, &changed_arc_indices,
+                      _changed_list);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+void Graph<captype, tcaptype, flowtype>::record_changed_arc(
+    arc *changed_arc, std::unordered_set<arc *> *changed_arcs,
+    std::vector<int> *changed_arc_indices) {
+  if (changed_arcs) {
+    changed_arcs->insert(changed_arc);
+  }
+  if (!changed_arc_indices) {
+    return;
+  }
+  const int arc_index = static_cast<int>(changed_arc - arcs) / 2;
+  auto &mark = changed_arc_marks[static_cast<size_t>(arc_index)];
+  if (mark != changed_arc_generation) {
+    mark = changed_arc_generation;
+    changed_arc_indices->push_back(arc_index);
+  }
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
+flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
+    bool reuse_trees, std::unordered_set<arc *> *changed_arcs,
+    std::vector<int> *changed_arc_indices,
     Block<node_id> *_changed_list) {
   node *i, *j, *current_node = NULL;
   arc *a;
@@ -553,7 +596,7 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow(
       current_node = i;
 
       /* augmentation */
-      augment(a, changed_arcs_, reuse_trees);
+      augment(a, changed_arcs, changed_arc_indices, reuse_trees);
       /* augmentation end */
 
       /* adoption */
