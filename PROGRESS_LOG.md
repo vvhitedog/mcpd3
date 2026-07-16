@@ -192,3 +192,12 @@
   6.325/4.484/10.766 s to 3.125/2.506/6.231 s; Head h1/h5 improved from
   12.062/11.143 s to 5.913/6.797 s. The changes reduce wall time by 39-51%
   across these configurations.
+
+## 2026-07-15 - Initialize the pre-solve objective
+
+- Repeating mcpd4's TCP saturation test exposed a pre-existing intermittent
+  overflow. `PrimalDualMinCutSolver::mincut_value_` was uninitialized, while
+  `scaleProblem()` legitimately scales it before the first solve.
+- Added a deterministic placement-new regression that poisons solver storage;
+  it failed with `objective scale promotion overflow` before the fix. The
+  constructor now initializes the objective to zero.

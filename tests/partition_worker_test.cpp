@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <limits>
+#include <new>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -3531,6 +3532,25 @@ void primalDualFlowWarmStartMatchesColdPromotedSolve() {
           "promoted warm solve labels should match cold solve");
 }
 
+void primalDualUnsolvedScaleStartsFromZeroObjective() {
+  using Solver = mcpd3::PrimalDualMinCutSolver;
+  alignas(Solver) unsigned char storage[sizeof(Solver)];
+  std::fill(std::begin(storage), std::end(storage), 0x7f);
+  Solver *solver = new (storage) Solver(
+      /*nnode=*/1, /*narc=*/0, std::vector<int>{}, std::vector<int>{},
+      std::vector<int>{1});
+  try {
+    solver->scaleProblem(/*scale=*/2,
+                         /*saturate_capacity_overflow=*/true);
+    require(solver->getMinCutValue() == 0,
+            "an unsolved solver must scale a zero objective");
+  } catch (...) {
+    solver->~Solver();
+    throw;
+  }
+  solver->~Solver();
+}
+
 void primalDualFlowWarmStartRejectsUnsafeReuse() {
   mcpd3::PrimalDualMinCutSolver initial(
       /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
@@ -4684,6 +4704,7 @@ int main() {
     fullSolveContinuesAcrossScales();
     coordinatorDispatchesSolveRoundsAcrossWorkersConcurrently();
     primalDualFlowWarmStartMatchesColdPromotedSolve();
+    primalDualUnsolvedScaleStartsFromZeroObjective();
     primalDualFlowWarmStartRejectsUnsafeReuse();
     primalDualCapacityRefreshCanResetFlowState();
     primalDualCapacityRefreshScalesFlowStateByQuantumRatio();

@@ -100,6 +100,7 @@ public:
         reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
         force_full_mincut_recompute_(false),
         maxflow_changed_list_(128),
+        mincut_value_(0),
         regularization_str_(0),
         last_regularization_budget_(0), last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
