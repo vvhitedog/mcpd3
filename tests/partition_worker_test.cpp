@@ -111,7 +111,8 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
           "BK total estimate should sum node and arc arrays");
   require(estimate.solver_vector_bytes ==
               4 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
-                  2 * sizeof(mcpd3::NodeFlow),
+                  2 * sizeof(mcpd3::NodeFlow) +
+                  2 * sizeof(unsigned char),
           "solver vector estimate should account for arc and node vectors");
   require(estimate.total_bytes ==
               estimate.bk_total_bytes + estimate.solver_vector_bytes,
@@ -3676,6 +3677,100 @@ void primalDualCapacityRefreshScalesFlowStateByQuantumRatio() {
   }
 }
 
+void incrementalCutMaintenanceMatchesFullRecomputeAcrossLabelChanges() {
+  const std::vector<int> arcs{
+      0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 0,
+      0, 1, 1, 4, 2, 6, 3, 7};
+  const std::vector<int> arc_capacities{
+      3, 5, 4, 2, 6, 1, 2, 7, 5, 3, 1, 4, 7, 2, 3, 6,
+      8, 1, 2, 5, 4, 3, 6, 2};
+  const std::vector<int> terminal_capacities(8, 0);
+
+  std::list<mcpd3::DualDecompositionConstraintArc> incremental_constraints;
+  std::list<mcpd3::DualDecompositionConstraintArc> full_constraints;
+  mcpd3::PrimalDualMinCutSolver incremental(
+      /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  mcpd3::PrimalDualMinCutSolver full(
+      /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  full.setForceFullMinCutRecompute(true);
+  for (int node = 0; node < 8; ++node) {
+    incremental_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    full_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    incremental.addSourceDualDecompositionConstraint(
+        std::prev(incremental_constraints.end()));
+    full.addSourceDualDecompositionConstraint(std::prev(full_constraints.end()));
+  }
+
+  std::vector<std::vector<int>> alpha_states{
+      {100, 100, 100, 100, 100, 100, 100, 100},
+      {-100, -100, -100, -100, -100, -100, -100, -100},
+      {100, -100, 100, -100, 100, -100, 100, -100},
+      {-100, 100, -100, 100, -100, 100, -100, 100},
+      {-100, -100, -100, -100, 100, 100, 100, 100},
+      {100, 100, 100, 100, -100, -100, -100, -100},
+      {100, -100, -100, 100, 100, -100, -100, 100},
+      {-100, 100, 100, -100, -100, 100, 100, -100}};
+  std::mt19937 rng(20260715);
+  std::uniform_int_distribution<int> alpha_dist(-150, 150);
+  for (int round = 0; round < 64; ++round) {
+    std::vector<int> alphas(8);
+    for (int &alpha : alphas) {
+      alpha = alpha_dist(rng);
+    }
+    alpha_states.push_back(std::move(alphas));
+  }
+
+  std::vector<int> previous_labels(8, 0);
+  bool saw_adjacent_simultaneous_changes = false;
+  for (int cycle = 0; cycle < 5; ++cycle) {
+    for (const auto &alphas : alpha_states) {
+      auto apply_alphas = [&](auto &constraints) {
+        size_t node = 0;
+        for (auto &constraint : constraints) {
+          constraint.last_alpha = constraint.alpha;
+          constraint.alpha = alphas[node++];
+        }
+      };
+      apply_alphas(incremental_constraints);
+      apply_alphas(full_constraints);
+
+      incremental.solve();
+      full.solve();
+      require(incremental.getMinCutValue() == full.getMinCutValue(),
+              "incremental cut value differs from full recomputation");
+
+      std::vector<int> labels(8);
+      for (int node = 0; node < 8; ++node) {
+        labels[static_cast<size_t>(node)] =
+            incremental.getMinCutSolution(node);
+        require(labels[static_cast<size_t>(node)] ==
+                    full.getMinCutSolution(node),
+                "incremental cut labels differ from full recomputation");
+      }
+      for (size_t edge = 0; edge < arcs.size() / 2; ++edge) {
+        const int source = arcs[2 * edge];
+        const int target = arcs[2 * edge + 1];
+        saw_adjacent_simultaneous_changes |=
+            labels[static_cast<size_t>(source)] !=
+                previous_labels[static_cast<size_t>(source)] &&
+            labels[static_cast<size_t>(target)] !=
+                previous_labels[static_cast<size_t>(target)];
+      }
+      previous_labels = std::move(labels);
+    }
+  }
+  require(saw_adjacent_simultaneous_changes,
+          "test did not exercise incident-edge deduplication");
+}
+
 long binaryCutValue(const std::vector<int> &labels,
                     const std::vector<int> &arcs,
                     const std::vector<int> &arc_capacities,
@@ -4592,6 +4687,7 @@ int main() {
     primalDualFlowWarmStartRejectsUnsafeReuse();
     primalDualCapacityRefreshCanResetFlowState();
     primalDualCapacityRefreshScalesFlowStateByQuantumRatio();
+    incrementalCutMaintenanceMatchesFullRecomputeAcrossLabelChanges();
     canonicalCutSelectionMatchesExhaustiveLatticeExtremes();
     referenceGuidedCutSelectionMatchesClosestExhaustiveOptimum();
     referenceGuidedCutSelectionValidatesLabels();
