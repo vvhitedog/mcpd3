@@ -110,7 +110,7 @@ void solverMemoryEstimateReportsBkAndVectorBytes() {
               estimate.bk_node_bytes + estimate.bk_arc_bytes,
           "BK total estimate should sum node and arc arrays");
   require(estimate.solver_vector_bytes ==
-              4 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
+              7 * sizeof(int) + 5 * sizeof(mcpd3::Capacity) +
                   2 * sizeof(mcpd3::NodeFlow) +
                   3 * sizeof(unsigned char),
           "solver vector estimate should account for arc and node vectors");
