@@ -175,3 +175,20 @@
   edge represented exactly once, weighted partition selection, wrong-sized,
   zero, and out-of-range weights, and non-METIS rejection.
 - Passed both Release 64-bit suites: 2/2 with METIS and 2/2 without METIS.
+
+## 2026-07-15 - Allocation-free incremental maintenance
+
+- Ported three independently validated hot-path changes from the halo
+  experiment: changed cut edges now use reusable node marks, changed flow arcs
+  use one-byte generation marks instead of a hash table, and changed node/arc
+  indices use retained contiguous vectors instead of per-item list nodes.
+- Added a 360-solve incremental-versus-full oracle covering whole-graph,
+  checkerboard, grouped, and randomized alpha changes. It crosses the
+  changed-arc generation wrap and checks labels plus objectives every round.
+- Product tests pass in Release 32-bit plus 64-bit, 128-bit, GMP, legacy
+  replay, and METIS configurations. Phase integration tests pass 36/36.
+- Pinned Ghiglia-Pritt three-run profiles preserve objectives, cut counts, DD
+  rounds, and promotions. Spiral h1/h2/h5 improved from
+  6.325/4.484/10.766 s to 3.125/2.506/6.231 s; Head h1/h5 improved from
+  12.062/11.143 s to 5.913/6.797 s. The changes reduce wall time by 39-51%
+  across these configurations.
