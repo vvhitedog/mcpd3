@@ -503,14 +503,19 @@ public:
     estimate.bk_total_bytes =
         estimate.bk_node_bytes + estimate.bk_arc_bytes;
     const auto arc_index_count = 2 * static_cast<std::size_t>(narc);
+    const auto incremental_arc_index_count =
+        static_cast<std::size_t>(narc);
     const auto arc_capacity_count = 3 * static_cast<std::size_t>(narc);
     const auto arc_change_flag_count = static_cast<std::size_t>(narc);
     const auto node_capacity_count = static_cast<std::size_t>(nnode);
     const auto node_flow_count = static_cast<std::size_t>(nnode);
     const auto node_label_count = static_cast<std::size_t>(nnode);
     const auto node_change_flag_count = static_cast<std::size_t>(nnode);
+    const auto incremental_node_index_count =
+        static_cast<std::size_t>(nnode);
     estimate.solver_vector_bytes =
-        arc_index_count * sizeof(int) +
+        (arc_index_count + incremental_arc_index_count +
+         incremental_node_index_count) * sizeof(int) +
         (arc_capacity_count + node_capacity_count) * sizeof(Capacity) +
         node_flow_count * sizeof(NodeFlow) +
         node_label_count * sizeof(int) +
@@ -1616,7 +1621,7 @@ private:
   bool force_full_mincut_recompute_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
-  std::list<int> incremental_mincut_nodes_;
+  std::vector<int> incremental_mincut_nodes_;
   std::vector<int> incremental_arcs_;
   Objective mincut_value_;
 

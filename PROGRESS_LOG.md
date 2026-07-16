@@ -299,3 +299,29 @@
   cut counts, DD rounds, and promotions are unchanged.
 - A post-change call profile has zero lost samples. Changed-arc hash insertion
   fell from 7.1% self time to zero; dense changed-arc recording is 2.0%.
+
+## 2026-07-15 - Reusable changed-node storage
+
+- Replaced the per-solve `std::list` of changed BK nodes with a reusable
+  contiguous vector. This removes one allocation and free per changed node;
+  all existing consumers only require ordered iteration. The memory estimate
+  now includes worst-case retained changed-node and changed-arc indices.
+- The 360-solve incremental/full oracle remains exact. Release tests pass in
+  32, 64, 128, GMP, legacy replay, and METIS builds, and phase tests pass
+  36/36. A zero-loss call profile reduced allocator symbols from roughly 12%
+  combined to about 1%; the remaining dominant work is BK itself and exact
+  cut-value maintenance.
+- Final pinned three-run results against the original implementation are:
+
+| Dataset | Halo | Before (s) | Final (s) | Wall reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Spiral | h1 | 6.325 | 3.125 | 50.6% |
+| Spiral | h2 | 4.484 | 2.506 | 44.1% |
+| Spiral | h5 | 10.766 | 6.231 | 42.1% |
+| Head | h1 | 12.062 | 5.913 | 51.0% |
+| Head | h5 | 11.143 | 6.797 | 39.0% |
+
+- Every before/after run used the same objective, cut count, DD rounds,
+  promotions, CPU affinity, and Release binary configuration. h2 remains the
+  best Spiral depth; h5 remains over-expanded despite benefiting from the
+  common hot-path improvements.
