@@ -92,6 +92,7 @@ public:
         arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
         d_flow_(nnode_, 0), x_(nnode_, 0),
+        incremental_changed_node_flags_(nnode_, 0),
         maxflow_graph_(nnode_, narc_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
         has_solution_(false),
@@ -506,11 +507,13 @@ public:
     const auto node_capacity_count = static_cast<std::size_t>(nnode);
     const auto node_flow_count = static_cast<std::size_t>(nnode);
     const auto node_label_count = static_cast<std::size_t>(nnode);
+    const auto node_change_flag_count = static_cast<std::size_t>(nnode);
     estimate.solver_vector_bytes =
         arc_index_count * sizeof(int) +
         (arc_capacity_count + node_capacity_count) * sizeof(Capacity) +
         node_flow_count * sizeof(NodeFlow) +
-        node_label_count * sizeof(int);
+        node_label_count * sizeof(int) +
+        node_change_flag_count * sizeof(unsigned char);
     estimate.total_bytes =
         estimate.bk_total_bytes + estimate.solver_vector_bytes;
     return estimate;
@@ -1351,16 +1354,31 @@ private:
       }
     }
 
-    // update node and arc terms that may have changed
-    std::unordered_set<int> proccessed_arcs;
+    // Mark every node whose cut label actually changed. Keeping the old labels
+    // intact until all incident edges are evaluated lets one endpoint own an
+    // edge changed at both ends, without allocating a per-solve hash set.
+    for (const int i : incremental_mincut_nodes_) {
+      if (incremental_changed_node_flags_[static_cast<size_t>(i)] != 0) {
+        continue;
+      }
+      const int x_i_new =
+          maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      if (x_i_new != x_[i]) {
+        incremental_changed_node_flags_[static_cast<size_t>(i)] = 1;
+      }
+    }
+
+    // Update node and arc terms that may have changed.
     auto nodes = maxflow_graph_.get_nodes();
     MaxflowGraph::arc_id first_arc = maxflow_graph_.get_first_arc();
     for (const int i : incremental_mincut_nodes_) {
-      auto x_i_new =
-          maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
-      if (x_i_new == x_[i]) {
-        continue; // do nothing
+      auto &changed =
+          incremental_changed_node_flags_[static_cast<size_t>(i)];
+      if (changed != 1) {
+        continue;
       }
+      const int x_i_new =
+          maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
 
       // process terminals
       auto terminal_capacity = terminal_capacities_[i];
@@ -1380,14 +1398,20 @@ private:
       const auto &node_i = nodes[i];
       for (a = node_i.first; a; a = a->next) {
         auto arc_index = std::distance(first_arc, a) / 2;
-        auto [iter, success] = proccessed_arcs.insert(arc_index);
-        if (!success) {
-          continue; // skip arc as it was processed with other node
+        int s = arcs_[2 * arc_index + 0];
+        int t = arcs_[2 * arc_index + 1];
+        if (s == t) {
+          continue;
+        }
+        const bool source_changed =
+            incremental_changed_node_flags_[static_cast<size_t>(s)] != 0;
+        const bool target_changed =
+            incremental_changed_node_flags_[static_cast<size_t>(t)] != 0;
+        if (source_changed && target_changed && i != s) {
+          continue;
         }
         auto forward_capacity = arc_capacities_[2 * arc_index + 0];
         auto backward_capacity = arc_capacities_[2 * arc_index + 1];
-        int s = arcs_[2 * arc_index + 0];
-        int t = arcs_[2 * arc_index + 1];
         auto x_s_new =
             maxflow_graph_.what_segment(s) == MaxflowGraph::SINK ? 1 : 0;
         auto x_t_new =
@@ -1413,9 +1437,18 @@ private:
               "incremental mincut arc overflow");
         }
       }
+      changed = 2;
+    }
 
-      // update
-      x_[i] = x_i_new;
+    for (const int i : incremental_mincut_nodes_) {
+      auto &changed =
+          incremental_changed_node_flags_[static_cast<size_t>(i)];
+      if (changed == 0) {
+        continue;
+      }
+      x_[i] =
+          maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      changed = 0;
     }
   }
 
@@ -1572,6 +1605,7 @@ private:
   bool track_arc_flow_updates_ = false;
   std::vector<NodeFlow> d_flow_; // flow balance on the nodes
   std::vector<int> x_;      // mincut solution
+  std::vector<unsigned char> incremental_changed_node_flags_;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;

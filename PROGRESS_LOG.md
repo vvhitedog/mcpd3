@@ -264,3 +264,21 @@
   arbitrary precision, the compatibility replay path, and both partitioners.
 - The phase adapter and `mcpd3-nh` benchmark selector pass all 30 tests against
   this final core revision. `git diff --check` is clean in both worktrees.
+
+## 2026-07-15 - Allocation-free incremental cut maintenance
+
+- Added a forced-full-recompute oracle test that drives repeated whole-graph,
+  checkerboard, grouped, and randomized alpha changes. It verifies incremental
+  labels and objectives after every solve and explicitly exercises edges whose
+  two endpoints change in the same round.
+- Replaced the fresh per-solve edge `unordered_set` in incremental cut-value
+  maintenance with one reusable byte per node. Changed labels remain immutable
+  while edge deltas are evaluated, and the original source endpoint owns an
+  edge when both endpoints changed.
+- All Release tests pass in capacity modes 32, 64, 128, and GMP, historical
+  32-bit replay, and 64-bit METIS. The phase integration passes 36/36 tests.
+- Pinned three-run Ghiglia-Pritt profiles retained identical objectives, cut
+  counts, and DD rounds. Spiral h1/h2/h5 improved from 6.325/4.484/10.766 s to
+  3.954/3.200/7.985 s. Head h1/h5 improved from 12.062/11.143 s to
+  7.550/8.472 s. The remaining prominent allocation cost comes from BK's
+  separate changed-flow-arc hash, not cut-value maintenance.
