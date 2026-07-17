@@ -174,6 +174,7 @@ struct DualDecompositionOptions {
   DualDecompositionRegularizationScheme regularization_scheme =
       DualDecompositionRegularizationScheme::SCALED_EPSILON;
   int scaled_epsilon_max_step_size = 10;
+  int scaled_epsilon_strength_cap = 0;
   Objective regularization_budget_limit = 0;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
@@ -717,9 +718,13 @@ public:
         DualDecompositionRegularizationScheme::SCALED_EPSILON) {
       return 0;
     }
-    return step_size <= options_.scaled_epsilon_max_step_size
-               ? static_cast<int>(step_size)
-               : 0;
+    if (step_size > options_.scaled_epsilon_max_step_size) {
+      return 0;
+    }
+    const int step_strength = static_cast<int>(step_size);
+    return options_.scaled_epsilon_strength_cap > 0
+               ? std::min(step_strength, options_.scaled_epsilon_strength_cap)
+               : step_strength;
   }
 
   int plateauRegularizationStrength() const { return 1; }
@@ -1473,6 +1478,10 @@ private:
     if (options_.scaled_epsilon_max_step_size <= 0) {
       throw std::runtime_error(
           "scaled epsilon maximum step size must be positive");
+    }
+    if (options_.scaled_epsilon_strength_cap < 0) {
+      throw std::runtime_error(
+          "scaled epsilon strength cap must be non-negative");
     }
     if (options_.regularization_scheme ==
             DualDecompositionRegularizationScheme::

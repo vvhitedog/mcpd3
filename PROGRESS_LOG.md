@@ -352,3 +352,14 @@
 - Added direct branch coverage for the default cutoff, a configured cutoff at
   its boundary and immediately above it, the disabled regularization scheme,
   and rejection of nonpositive cutoffs.
+
+## 2026-07-17 16:45 PDT - Configurable scaled-epsilon strength cap
+
+- Added `DualDecompositionOptions::scaled_epsilon_strength_cap`. Zero retains
+  the original step-sized strength; a positive value applies
+  `min(step_size, cap)` after the configured activation cutoff.
+- Kept cumulative budget accounting, strict budget certification, and
+  objective-scale promotion unchanged.
+- Added branch coverage for active capping, smaller uncapped steps, zero as
+  backward-compatible behavior, and negative-value rejection. The native
+  partition worker test suite passes.
