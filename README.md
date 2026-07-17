@@ -322,6 +322,9 @@ solver repo.
 - `--capacity-multiplier` is also the objective scale used by exact
   scaled-epsilon regularization. Larger values give more regularization
   resolution but increase 32-bit capacity overflow risk.
+- `DualDecompositionOptions::scaled_epsilon_max_step_size` controls the
+  largest DD step using scaled epsilon. It defaults to 10; raising it is an
+  experimental per-problem tuning choice and can increase budget promotion.
 - `--disable-primal-upper-bound` is useful for lower-bound/dual-decomposition
   benchmarking when primal decoding is not needed.
 

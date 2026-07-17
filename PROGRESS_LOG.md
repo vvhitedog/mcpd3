@@ -343,3 +343,12 @@
   one promotion, 20,122 DD iterations, and 32 cuts. Full per-iteration progress
   logging raised wall time to 28.1 seconds, so this run validates behavior but
   is not a clean performance result.
+
+## 2026-07-17 15:28 PDT - Configurable scaled-epsilon activation step
+
+- Replaced the fixed `step_size <= 10` check with
+  `DualDecompositionOptions::scaled_epsilon_max_step_size`, retaining 10 as
+  the default.
+- Added direct branch coverage for the default cutoff, a configured cutoff at
+  its boundary and immediately above it, the disabled regularization scheme,
+  and rejection of nonpositive cutoffs.

@@ -1651,6 +1651,33 @@ void dualDecompositionRegularizationSchemeControlsLowScaleStrength() {
   require(scaled_epsilon.regularizationStrengthForStepSize(1) == 1,
           "step 1 should use scaled epsilon regularization");
 
+  options.scaled_epsilon_max_step_size = 12;
+  mcpd3::DualDecomposition earlier_scaled_epsilon(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+  require(earlier_scaled_epsilon.regularizationStrengthForStepSize(13) == 0,
+          "scaled epsilon should remain disabled above its configured step");
+  require(earlier_scaled_epsilon.regularizationStrengthForStepSize(12) == 12,
+          "scaled epsilon should activate at its configured step");
+
+  options.scaled_epsilon_max_step_size = 0;
+  requireThrows(
+      [&] {
+        mcpd3::DualDecomposition invalid(
+            /*npartition=*/2,
+            /*nnode=*/2,
+            /*narc=*/1,
+            /*arcs=*/std::vector<int>{0, 1},
+            /*arc_capacities=*/std::vector<int>{3, 5},
+            /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+      },
+      "scaled epsilon maximum step should be positive");
+
+  options.scaled_epsilon_max_step_size = 10;
   options.regularization_scheme =
       mcpd3::DualDecompositionRegularizationScheme::NONE;
   mcpd3::DualDecomposition none(
