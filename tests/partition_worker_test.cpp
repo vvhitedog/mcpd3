@@ -1684,7 +1684,13 @@ void disagreementPlateauTrackerRequiresAFullFlatWindow() {
   require(tracker.active(),
           "plateau tracker should remain active after activation");
   require(!tracker.observe(/*iteration=*/3, /*disagreement_count=*/4),
-          "an active tracker should not report a second activation");
+          "disagreement progress should reset the pulse window");
+  require(!tracker.observe(/*iteration=*/4, /*disagreement_count=*/4),
+          "one flat iteration should not emit another regularization pulse");
+  require(tracker.observe(/*iteration=*/5, /*disagreement_count=*/4),
+          "each additional pulse should require another full flat window");
+  require(!tracker.observe(/*iteration=*/6, /*disagreement_count=*/4),
+          "regularization must not pulse on consecutive iterations");
 }
 
 void disagreementPlateauTrackerResetsOnProgressAndScaleReset() {

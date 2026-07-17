@@ -325,3 +325,21 @@
   promotions, CPU affinity, and Release binary configuration. h2 remains the
   best Spiral depth; h5 remains over-expanded despite benefiting from the
   common hot-path improvements.
+
+## 2026-07-17 15:13 PDT - Patience-spaced plateau regularization
+
+- Changed all-scale disagreement-plateau regularization from a permanently
+  active unit strength to one cumulative unit pulse per complete
+  disagreement-patience window. A disagreement improvement resets the window,
+  and another pulse cannot occur on the immediately following iteration.
+- Kept the strict regularization invariant and existing promotion policy:
+  `R >= Q` stops the current scale immediately and promotes the objective by
+  10 while retaining the supported warm state.
+- Added tracker branch coverage for improvement resets, complete repeated
+  windows, and suppression of consecutive pulses. The full Release CTest suite
+  passes (2/2).
+- A weighted Ghiglia-Pritt Longs direct run with four METIS partitions,
+  `Q=2000`, schedule start 125, and disagreement patience 100 certified after
+  one promotion, 20,122 DD iterations, and 32 cuts. Full per-iteration progress
+  logging raised wall time to 28.1 seconds, so this run validates behavior but
+  is not a clean performance result.

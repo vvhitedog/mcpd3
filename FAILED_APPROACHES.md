@@ -90,3 +90,14 @@
 - Do not create edge-consensus variables. Duplicate node labels are sufficient
   to make every copied min-cut edge term agree, and edge consensus does not map
   cleanly to the current local primal-dual solver.
+
+## 2026-07-17 - Deferred regularization promotion
+
+- Do not defer objective-scale promotion until an over-budget regularized solve
+  reaches agreement. On weighted Ghiglia-Pritt Longs with disagreement
+  patience 10, the speculative solve reached the 30,000-iteration limit with
+  three disagreements and budget 178,690 against quantum 32,000.
+- Choosing a later quantum from the budget observed at speculative agreement,
+  including a `Q' >= 2R` headroom rule, does not address cases that stall before
+  agreement and adds certificate-state complexity. Preserve immediate strict
+  promotion when `R >= Q`.

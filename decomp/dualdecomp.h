@@ -101,17 +101,16 @@ public:
   void reset() {
     active_ = false;
     has_observation_ = false;
+    has_regularization_pulse_ = false;
     best_disagreement_count_ = std::numeric_limits<long>::max();
     last_improvement_iteration_ = 0;
+    last_regularization_pulse_iteration_ = 0;
   }
 
   bool observe(int iteration, long disagreement_count) {
     if (iteration < 0 || disagreement_count < 0) {
       throw std::runtime_error(
           "disagreement plateau observations must be non-negative");
-    }
-    if (active_) {
-      return false;
     }
     if (!has_observation_ ||
         disagreement_count < best_disagreement_count_) {
@@ -120,8 +119,15 @@ public:
       last_improvement_iteration_ = iteration;
       return false;
     }
-    if (iteration - last_improvement_iteration_ >= patience_) {
+    const int window_start =
+        has_regularization_pulse_
+            ? std::max(last_improvement_iteration_,
+                       last_regularization_pulse_iteration_)
+            : last_improvement_iteration_;
+    if (iteration - window_start >= patience_) {
       active_ = true;
+      has_regularization_pulse_ = true;
+      last_regularization_pulse_iteration_ = iteration;
       return true;
     }
     return false;
@@ -137,8 +143,10 @@ private:
   int patience_;
   bool active_ = false;
   bool has_observation_ = false;
+  bool has_regularization_pulse_ = false;
   long best_disagreement_count_ = std::numeric_limits<long>::max();
   int last_improvement_iteration_ = 0;
+  int last_regularization_pulse_iteration_ = 0;
 };
 
 struct DualDecompositionOptions {
@@ -951,8 +959,10 @@ public:
       last_regularized_objective_raw_ = regularized_objective;
       warnIfRegularizationBudgetExceeded(last_regularization_budget_,
                                          regularization_strength);
-      if (isRegularizationBudgetExceeded(last_regularization_budget_,
-                                         regularization_strength)) {
+      const bool regularization_budget_exceeded =
+          isRegularizationBudgetExceeded(last_regularization_budget_,
+                                         regularization_strength);
+      if (regularization_budget_exceeded) {
         if (report_progress) {
           std::fprintf(
               stderr,
@@ -989,23 +999,31 @@ public:
         last_certified_lower_bound_raw_ = lower_bound;
       }
 
-      const bool plateau_activated_now =
+      const bool plateau_was_active =
+          disagreement_plateau_mode && disagreement_plateau_tracker->active();
+      const bool plateau_regularization_pulse_now =
           disagreement_plateau_mode && update_stats.disagreement_count > 0 &&
           disagreement_plateau_tracker->observe(
               i, update_stats.disagreement_count);
-      if (plateau_activated_now) {
+      const bool plateau_activated_now =
+          plateau_regularization_pulse_now && !plateau_was_active;
+      if (plateau_regularization_pulse_now) {
         regularization_strength = plateauRegularizationStrength();
         for (auto &solver_uptr : solvers_) {
           solver_uptr->setRegularizationStrength(regularization_strength);
         }
         last_improvement_iter = i;
-        ++disagreement_plateau_activation_count_;
+        if (plateau_activated_now) {
+          ++disagreement_plateau_activation_count_;
+        }
         if (report_progress) {
           std::fprintf(
               stderr,
-              "mcpd3_progress stage=dd_disagreement_plateau_activate "
+              "mcpd3_progress stage=%s "
               "scale=%ld step_size=%ld iter=%d disagreement_count=%ld "
               "disagreement_patience=%d regularization_strength=%s\n",
+              plateau_activated_now ? "dd_disagreement_plateau_activate"
+                                    : "dd_disagreement_plateau_pulse",
               scale_, step_size, i, update_stats.disagreement_count,
               options_.disagreement_patience,
               integer_to_string(
@@ -1261,6 +1279,15 @@ public:
       //  opt_status = NO_FURTHER_PROGRESS;
       //  break;
       //}
+      if (disagreement_plateau_mode &&
+          disagreement_plateau_tracker->active() &&
+          !plateau_regularization_pulse_now &&
+          regularization_strength != 0) {
+        regularization_strength = 0;
+        for (auto &solver_uptr : solvers_) {
+          solver_uptr->setRegularizationStrength(regularization_strength);
+        }
+      }
     }
     if (options_.verbose) {
       std::cout << " === MAX === lower_bound : "
