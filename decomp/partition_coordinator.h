@@ -77,7 +77,6 @@ struct PartitionWorkerCoordinatorOptions {
   bool exhaust_scale_iterations = false;
   bool exhaust_regularized_scale_iterations = false;
   long min_step_size = 1;
-  long max_step_size = 10000;
   long objective_scale = 1;
   bool use_momentum = true;
   bool enable_group_stopping = true;
@@ -335,7 +334,7 @@ private:
 
     trace.stats.round_id = round_id;
     trace.stats.effective_step_size =
-        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
+        std::max(step_size, options_.min_step_size);
     const auto gather_start = std::chrono::steady_clock::now();
     gatherRoundTerms(trace.partition_results, &trace.stats);
     timing_stats_.gather_round_terms_us += elapsedUs(gather_start);

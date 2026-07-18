@@ -168,7 +168,6 @@ struct DualDecompositionOptions {
   bool saturate_capacity_overflow = false;
   bool verbose = true;
   long min_step_size = 1;
-  long max_step_size = 10000;
   long objective_scale = 1;
   size_t thread_count = 0;
   DualDecompositionRegularizationScheme regularization_scheme =
@@ -178,6 +177,7 @@ struct DualDecompositionOptions {
   Objective regularization_budget_limit = 0;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
+  bool retry_unit_step_without_momentum = false;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -352,6 +352,9 @@ public:
   long getObjectiveScalePromotionCount() const {
     return objective_scale_promotion_count_;
   }
+  long getUnitStepNoMomentumRetryCount() const {
+    return unit_step_no_momentum_retry_count_;
+  }
   long getHaloObjectiveMultiplier() const {
     return halo_objective_multiplier_;
   }
@@ -414,7 +417,6 @@ public:
     }
     options_.num_optimization_scales = num_optimization_scales;
     options_.initial_step_size = initial_step_size;
-    options_.max_step_size = initial_step_size;
     options_.exhaust_regularized_scale_iterations =
         exhaust_regularized_scale_iterations;
   }
@@ -811,8 +813,10 @@ public:
     long step_size = options_.initial_step_size;
     scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
+    unit_step_no_momentum_retry_count_ = 0;
     disagreement_plateau_activation_count_ = 0;
     int iscale = 0;
+    bool unit_step_no_momentum_retry_attempted = false;
     int schedule_level_count = options_.num_optimization_scales;
     while (iscale < schedule_level_count && step_size >= 1) {
       OptimizationStatus status;
@@ -830,6 +834,7 @@ public:
         schedule_level_count = std::max(
             schedule_level_count, optimizationScheduleLevelCount(step_size));
         iscale = 0;
+        unit_step_no_momentum_retry_attempted = false;
         continue;
       }
       if (status == mcpd3::DualDecomposition::OPTIMAL) {
@@ -842,11 +847,40 @@ public:
           break;
         }
       }
+      if (step_size == 1 && options_.use_momentum &&
+          options_.retry_unit_step_without_momentum &&
+          !unit_step_no_momentum_retry_attempted) {
+        unit_step_no_momentum_retry_attempted = true;
+        ++unit_step_no_momentum_retry_count_;
+        if (dualdecomp_progress_enabled()) {
+          std::fprintf(stderr,
+                       "mcpd3_progress stage=dd_unit_step_no_momentum_retry "
+                       "scale=%ld retry_count=%ld\n",
+                       scale_, unit_step_no_momentum_retry_count_);
+          std::fflush(stderr);
+        }
+        status = runOptimizationScale(options_.max_iteration_count,
+                                      /*step_size=*/1,
+                                      options_.max_cycle_count,
+                                      /*use_momentum=*/false);
+        if (status == mcpd3::DualDecomposition::OPTIMAL) {
+          break;
+        }
+        if (status == REGULARIZATION_BUDGET_EXCEEDED &&
+            tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
+          schedule_level_count = std::max(
+              schedule_level_count, optimizationScheduleLevelCount(step_size));
+          iscale = 0;
+          unit_step_no_momentum_retry_attempted = false;
+          continue;
+        }
+      }
       if (step_size == 1 &&
           tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
         schedule_level_count = std::max(
             schedule_level_count, optimizationScheduleLevelCount(step_size));
         iscale = 0;
+        unit_step_no_momentum_retry_attempted = false;
         continue;
       }
       step_size = nextOptimizationScheduleValue(step_size);
@@ -1433,8 +1467,7 @@ private:
       }
     }
     (void)lower_bound;
-    stats.effective_step_size =
-        std::clamp(step_size, options_.min_step_size, options_.max_step_size);
+    stats.effective_step_size = std::max(step_size, options_.min_step_size);
 
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
@@ -1591,6 +1624,7 @@ private:
     scaleProblem(factor);
     ++objective_scale_promotion_count_;
     *step_size = scale_;
+    options_.initial_step_size = *step_size;
     if (dualdecomp_progress_enabled()) {
       std::fprintf(stderr,
                    "mcpd3_progress stage=dd_objective_scale_promote "
@@ -2300,6 +2334,7 @@ private:
   long last_regularization_anchor_sink_count_;
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
+  long unit_step_no_momentum_retry_count_ = 0;
   long objective_scale_promotion_count_;
   long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;

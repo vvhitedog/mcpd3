@@ -151,9 +151,6 @@ int main(int argc, char *argv[]) {
     } else if ((value = get_option_value(i, argc, argv, arg,
                                          "--min-step")) != "") {
       options.min_step_size = std::atol(value.c_str());
-    } else if ((value = get_option_value(i, argc, argv, arg,
-                                         "--max-step")) != "") {
-      options.max_step_size = std::atol(value.c_str());
     } else if (arg == "--legacy-patience") {
       options.legacy_patience = true;
     } else if (arg == "--disable-group-stopping") {

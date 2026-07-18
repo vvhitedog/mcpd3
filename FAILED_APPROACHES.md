@@ -115,3 +115,25 @@
   including a `Q' >= 2R` headroom rule, does not address cases that stall before
   agreement and adds certificate-state complexity. Preserve immediate strict
   promotion when `R >= Q`.
+
+## 2026-07-17 - Unit alpha cleanup for pinned Shear disagreements
+
+- Do not assume a final no-momentum pass with alpha step 1 resolves the
+  generated-coherence Shear pathology. With p4 METIS, objective scale 500,
+  step 125, and four promotions, the cleanup run took about 2m14s and stopped
+  after 40,000 iterations with the same 84 disagreements.
+- A state trace showed no cycle to break: the same 84 global nodes retained the
+  same opposing local labels throughout the 30,000-iteration final attempt.
+  Momentum advanced alpha by about five units per iteration; exact unit updates
+  only traversed the same pinned region more slowly.
+
+## 2026-07-17 - Preserving the pre-promotion alpha-step cap
+
+- Do not preserve `max_step_size=initial_step_size` after multiplying the
+  objective and stored alphas during promotion. The unconditional fixed-step
+  clamp was an artifact of removing the Polyak policy, not original fixed
+  schedule behavior.
+- In three-repeat weighted tests, the cap increased Noise from 2,013 to 5,313
+  DD rounds and Shear from 5,848 to 32,106 rounds without changing either
+  certified objective. Keep the capped branch only for explicit compatibility
+  experiments.

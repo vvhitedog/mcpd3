@@ -382,3 +382,19 @@
 - Added branch coverage for active capping, smaller uncapped steps, zero as
   backward-compatible behavior, and negative-value rejection. The native
   partition worker test suite passes.
+
+## 2026-07-17 20:05 PDT - Experimental alpha recovery policies
+
+- Removed the obsolete fixed-schedule `max_step_size` cap from native and
+  partition-worker coordinator solves. Fixed scheduling now uses each
+  requested step directly, including the promoted objective scale.
+- Added an independent opt-in unit-step cleanup. After a momentum solve
+  exhausts step 1, it retries that objective scale once without momentum, so
+  every disagreeing constraint changes alpha by exactly one unit before any
+  subsequent promotion.
+- Added tests for promoted restart steps and for unit cleanup disabled and
+  enabled. The partition-worker suite passes in default, legacy replay,
+  64-bit, 128-bit, and GMP builds.
+- A three-repeat weighted ablation found no benefit from the cap. Removing it
+  reduced Noise from 5,313 to 2,013 DD rounds and Shear from 32,106 to 5,848
+  rounds while preserving certified objectives.

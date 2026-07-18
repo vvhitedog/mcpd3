@@ -892,7 +892,6 @@ void haloDepthTwoCertifiesTheUnscaledDirectObjective() {
   options.thread_count = 1;
   options.halo_depth = 2;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.num_optimization_scales = 1;
   options.max_iteration_count = 200;
   options.patience = 200;
@@ -1076,7 +1075,6 @@ void haloCapacityReplacementPreservesMultiplicityScaling() {
   options.halo_depth = 2;
   options.emit_partition_packages = true;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.num_optimization_scales = 1;
   options.max_iteration_count = 300;
   options.patience = 300;
@@ -1133,7 +1131,6 @@ void haloPackageCoordinatorNormalizesTheObjectiveMultiplier() {
   options.thread_count = 1;
   options.halo_depth = mcpd3::kInfiniteHaloDepth;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.num_optimization_scales = 1;
   options.max_iteration_count = 10;
   options.patience = 10;
@@ -1160,7 +1157,6 @@ void haloPackageCoordinatorNormalizesTheObjectiveMultiplier() {
   coordinator_options.num_optimization_scales = 1;
   coordinator_options.max_iteration_count = 10;
   coordinator_options.initial_step_size = 1;
-  coordinator_options.max_step_size = 1;
   coordinator_options.patience = 10;
   coordinator_options.use_momentum = false;
   coordinator_options.enable_group_stopping = false;
@@ -1212,7 +1208,6 @@ void haloFlowHeatAggregatesEveryLocalEdgeCopy() {
   options.halo_depth = mcpd3::kInfiniteHaloDepth;
   options.track_arc_flow_updates = true;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.num_optimization_scales = 1;
   options.max_iteration_count = 1;
   options.enable_group_stopping = false;
@@ -1424,7 +1419,6 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRounds() {
 
   mcpd3::PartitionWorkerCoordinatorOptions coordinator_options;
   coordinator_options.min_step_size = 1;
-  coordinator_options.max_step_size = 10000;
   coordinator_options.use_momentum = false;
   mcpd3::PartitionWorkerCoordinator coordinator(
       package_source.getPartitionPackages(), std::move(workers),
@@ -1503,7 +1497,6 @@ makeParityCoordinatorOptions(const mcpd3::DualDecompositionOptions &dual) {
       dual.exhaust_regularized_scale_iterations;
   options.regularization_budget_limit = dual.regularization_budget_limit;
   options.min_step_size = dual.min_step_size;
-  options.max_step_size = dual.max_step_size;
   options.regularization_scheme =
       dual.regularization_scheme ==
               mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON
@@ -2028,6 +2021,58 @@ void dualDecompositionPromotesAfterUnitScaleExhaustion() {
           "native unit-scale exhaustion should promote the objective");
   require(dual_decomp.getLastDisagreementCount() == 0,
           "native promoted schedule should eventually reach agreement");
+  require(dual_decomp.getConfiguredInitialStepSize() == dual_decomp.getScale(),
+          "native promotion should retain its effective restart step");
+}
+
+void dualDecompositionCanRetryUnitStepWithoutMomentum() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10;
+  options.initial_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = true;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.max_objective_scale_promotions = 0;
+
+  mcpd3::DualDecomposition baseline(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  baseline.solve();
+
+  require(baseline.getUnitStepNoMomentumRetryCount() == 0,
+          "unit-step cleanup should remain disabled by default");
+  require(baseline.getTotalOptimizationIterations() == 1,
+          "disabled unit-step cleanup should retain the original schedule");
+
+  options.retry_unit_step_without_momentum = true;
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  dual_decomp.solve();
+
+  require(dual_decomp.getUnitStepNoMomentumRetryCount() == 1,
+          "unit-step cleanup should run once after momentum fails at scale 1");
+  require(dual_decomp.getTotalOptimizationIterations() == 2,
+          "unit-step cleanup should add exactly one scale attempt");
 }
 
 struct ScriptedRound {
@@ -2700,7 +2745,6 @@ void lowScaleScaledEpsilonRegularizationHandlesBoundaryTie() {
   options.use_momentum = false;
   options.enable_group_stopping = false;
   options.min_step_size = 1;
-  options.max_step_size = 10;
   options.objective_scale = 10000;
 
   const auto packages = makeTieBreakRegularizationPackages();
@@ -3347,7 +3391,6 @@ void unitScaleResolvesOppositeDirectionCycle() {
   options.use_momentum = false;
   options.enable_group_stopping = false;
   options.min_step_size = 1;
-  options.max_step_size = 10;
   options.objective_scale = 100;
 
   auto make_coordinator = [&]() {
@@ -3413,7 +3456,6 @@ void unitScaleResolvesOppositeDirectionCycle() {
   solve_options.enable_group_stopping = false;
   solve_options.use_momentum = false;
   solve_options.min_step_size = 1;
-  solve_options.max_step_size = 10;
   solve_options.objective_scale = 100;
   mcpd3::PartitionWorkerCoordinator solver(
       packages, makeInProcessWorkers(packages.size()), solve_options);
@@ -3442,7 +3484,6 @@ void lowObjectiveScaleCyclePromotesAndConverges() {
   options.enable_group_stopping = false;
   options.use_momentum = false;
   options.min_step_size = 1;
-  options.max_step_size = 10;
   options.objective_scale = 10;
 
   mcpd3::PartitionWorkerCoordinator solver(
@@ -3610,6 +3651,9 @@ void fullSolvePromotesRepeatedlyAfterUnitScaleExhaustion() {
   for (size_t index = 0; index < expected_steps.size(); ++index) {
     require(result.progress_records[index].step_size == expected_steps[index],
             "repeated promotion schedule step mismatch");
+    require(result.progress_records[index].effective_step_size ==
+                expected_steps[index],
+            "promotion should use its requested coordinator restart step");
   }
   require(source_worker->scaleFactors() == std::vector<long>({10, 10}),
           "source worker should receive both objective promotions");
@@ -3751,7 +3795,6 @@ void randomInitialAlphaValidationAndZeroRadiusNoop() {
   zero_radius_options.enable_group_stopping = false;
   zero_radius_options.use_momentum = false;
   zero_radius_options.min_step_size = 1;
-  zero_radius_options.max_step_size = 10;
   zero_radius_options.regularization_scheme =
       mcpd3::PartitionWorkerRegularizationScheme::NONE;
   zero_radius_options.randomize_initial_alphas = true;
@@ -3788,7 +3831,6 @@ void randomInitialAlphaResolvesScaleTenCycle() {
     baseline_options.enable_group_stopping = false;
     baseline_options.use_momentum = false;
     baseline_options.min_step_size = 1;
-    baseline_options.max_step_size = 10;
     baseline_options.regularization_scheme =
         mcpd3::PartitionWorkerRegularizationScheme::NONE;
     mcpd3::PartitionWorkerCoordinator baseline(
@@ -4825,7 +4867,6 @@ void dualDecompositionPropagatesReferenceCutLabels() {
   options.num_optimization_scales = 1;
   options.max_iteration_count = 20;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.objective_scale = 1;
   options.regularization_scheme =
       mcpd3::DualDecompositionRegularizationScheme::NONE;
@@ -4861,7 +4902,6 @@ void dualDecompositionPropagatesCanonicalCutSelection() {
   options.num_optimization_scales = 1;
   options.max_iteration_count = 20;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.objective_scale = 1;
   options.regularization_scheme =
       mcpd3::DualDecompositionRegularizationScheme::NONE;
@@ -4892,7 +4932,6 @@ mcpd3::DualDecompositionOptions warmStartDdOptions() {
   options.num_optimization_scales = 1;
   options.max_iteration_count = 1000;
   options.initial_step_size = 1;
-  options.max_step_size = 1;
   options.min_step_size = 1;
   options.patience = 1000;
   options.exhaust_scale_iterations = true;
@@ -5374,6 +5413,7 @@ int main() {
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
     dualDecompositionPromotesAfterUnitScaleExhaustion();
+    dualDecompositionCanRetryUnitStepWithoutMomentum();
     coordinatorRunRoundReportsCertifiedRegularizedLowerBound();
     coordinatorRunRoundStrengthensCertificateAtAgreement();
     coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged();
