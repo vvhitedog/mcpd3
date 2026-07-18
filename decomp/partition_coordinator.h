@@ -456,7 +456,8 @@ public:
     long schedule_scale = options_.initial_step_size;
     long step_size = options_.initial_step_size;
     int scale_index = 0;
-    while (scale_index < options_.num_optimization_scales && step_size >= 1) {
+    int schedule_level_count = options_.num_optimization_scales;
+    while (scale_index < schedule_level_count && step_size >= 1) {
       auto scale_result =
           runOptimizationScale(schedule_scale, step_size, &result);
       result.scale_results.push_back(scale_result);
@@ -466,6 +467,8 @@ public:
               PartitionWorkerOptimizationStatus::REGULARIZATION_BUDGET_EXCEEDED &&
           tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale, &step_size,
                                    &result)) {
+        schedule_level_count = std::max(
+            schedule_level_count, optimizationScheduleLevelCount(step_size));
         scale_index = 0;
         continue;
       }
@@ -476,6 +479,14 @@ public:
                                 localRegularizationStrength(step_size));
         }
         break;
+      }
+      if (step_size == 1 &&
+          tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale, &step_size,
+                                   &result)) {
+        schedule_level_count = std::max(
+            schedule_level_count, optimizationScheduleLevelCount(step_size));
+        scale_index = 0;
+        continue;
       }
       schedule_scale = nextOptimizationScheduleValue(schedule_scale);
       step_size = nextOptimizationScheduleValue(step_size);

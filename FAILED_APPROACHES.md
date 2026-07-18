@@ -1,5 +1,19 @@
 # Failed Approaches
 
+## Finite promoted schedules
+
+- Do not let a disagreeing unit scale terminate merely because its per-scale
+  iteration budget expired. Promote and restart while configured promotion
+  headroom remains; only an explicit promotion/resource limit or numeric limit
+  may terminate without agreement.
+- Do not extend a promoted schedule by a fixed one-level increment. When
+  objective scale and initial step differ, promotion can jump multiple
+  decades. Recompute the exact number of levels required to reach unit scale.
+- Promotion is not a substitute for a usable alpha step. A deliberately poor
+  fixed schedule may still reach its explicit promotion limit with primal
+  disagreement even when its certified lower bound has reached the objective.
+
+
 ## Persistent quantum state
 
 - Do not treat an arbitrary capacity refresh as a flow-scaling transition.

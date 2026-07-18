@@ -813,7 +813,8 @@ public:
     total_optimization_iterations_ = 0;
     disagreement_plateau_activation_count_ = 0;
     int iscale = 0;
-    while (iscale < options_.num_optimization_scales && step_size >= 1) {
+    int schedule_level_count = options_.num_optimization_scales;
+    while (iscale < schedule_level_count && step_size >= 1) {
       OptimizationStatus status;
       auto run_opt_scale_time = time_lambda([&] {
         status = runOptimizationScale(options_.max_iteration_count, step_size,
@@ -826,6 +827,8 @@ public:
       }
       if (status == REGULARIZATION_BUDGET_EXCEEDED &&
           tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
+        schedule_level_count = std::max(
+            schedule_level_count, optimizationScheduleLevelCount(step_size));
         iscale = 0;
         continue;
       }
@@ -838,6 +841,13 @@ public:
                     disagreeing_global_indices_)) {
           break;
         }
+      }
+      if (step_size == 1 &&
+          tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
+        schedule_level_count = std::max(
+            schedule_level_count, optimizationScheduleLevelCount(step_size));
+        iscale = 0;
+        continue;
       }
       step_size = nextOptimizationScheduleValue(step_size);
       ++iscale;
