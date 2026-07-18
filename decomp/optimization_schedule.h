@@ -18,4 +18,13 @@ inline long nextOptimizationScheduleValue(long current) {
   return next >= 1 ? next : 1;
 }
 
+inline int optimizationScheduleLevelCount(long initial) {
+  int count = 0;
+  for (long value = initial; value >= 1;
+       value = nextOptimizationScheduleValue(value)) {
+    ++count;
+  }
+  return count;
+}
+
 } // namespace mcpd3

@@ -1,5 +1,24 @@
 # Progress Log
 
+## 2026-07-17 18:39 PDT - Final-scale promotion invariant
+
+- Fixed both native `DualDecomposition` and package/worker coordinator loops
+  so persistent disagreement at an exhausted unit scale triggers objective
+  promotion and a schedule restart while promotion headroom remains.
+- Promotion now recomputes the exact number of decimal schedule levels needed
+  to return to unit scale. This handles objective scale and initial step being
+  different; promoted schedules can no longer silently stop above unit scale.
+- Added separate native and package regressions. The package test exercises
+  two consecutive final-scale promotions with mismatched initial step and
+  objective scale, checking the complete
+  `1 -> 100,10,1 -> 1000,100,10,1` trajectory.
+- Tests that intentionally inspect finite schedule exhaustion now disable
+  promotion explicitly rather than relying on the old missing transition.
+- The focused suite passes in legacy 32-bit replay, 64-bit, and 128-bit modes;
+  the METIS-configured core CTest suite passes 2/2 and the consuming phase
+  Release suite passes 45/45.
+
+
 ## 2026-07-13 22:00 PDT - Compact capacities with widened solver state
 
 - Reproduced the accepted oracle-perturbed quantum-continuation experiments:

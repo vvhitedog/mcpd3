@@ -1376,6 +1376,40 @@ void dualDecompositionPromotesObjectiveScaleOnOverBudget() {
           "promoted solve should preserve progress and reach agreement");
 }
 
+void dualDecompositionPromotesAfterUnitScaleExhaustion() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10;
+  options.initial_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.max_objective_scale_promotions = 4;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  dual_decomp.solve();
+
+  require(dual_decomp.getObjectiveScalePromotionCount() > 0,
+          "native unit-scale exhaustion should promote the objective");
+  require(dual_decomp.getLastDisagreementCount() == 0,
+          "native promoted schedule should eventually reach agreement");
+}
+
 struct ScriptedRound {
   long lower_bound = 0;
   int label = 0;
@@ -2916,6 +2950,53 @@ void fullSolvePromotionForwardsSaturationFlag() {
           "target worker should receive saturation flag");
 }
 
+void fullSolvePromotesRepeatedlyAfterUnitScaleExhaustion() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 1;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 10;
+  options.max_objective_scale_promotions = 2;
+
+  std::deque<ScriptedRound> source_script;
+  std::deque<ScriptedRound> target_script;
+  for (int round = 0; round < 8; ++round) {
+    source_script.push_back(ScriptedRound{10 + round, 0});
+    target_script.push_back(
+        ScriptedRound{20 + round, round == 7 ? 0 : 1});
+  }
+  ScriptedPartitionWorker *source_worker = nullptr;
+  ScriptedPartitionWorker *target_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::move(source_script), std::move(target_script), options,
+      &source_worker, &target_worker);
+
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "repeated final-scale promotion should reach agreement");
+  require(result.objective_scale_promotion_count == 2,
+          "each exhausted unit scale should promote the objective");
+  require(result.scale == 1000,
+          "two final-scale promotions should increase the objective by 100");
+  require(result.total_iterations == 8,
+          "promoted schedules should retain every level through unit scale");
+  const std::vector<long> expected_steps{1, 100, 10, 1,
+                                         1000, 100, 10, 1};
+  require(result.progress_records.size() == expected_steps.size(),
+          "repeated promotion should record every extended schedule level");
+  for (size_t index = 0; index < expected_steps.size(); ++index) {
+    require(result.progress_records[index].step_size == expected_steps[index],
+            "repeated promotion schedule step mismatch");
+  }
+  require(source_worker->scaleFactors() == std::vector<long>({10, 10}),
+          "source worker should receive both objective promotions");
+  require(target_worker->scaleFactors() == std::vector<long>({10, 10}),
+          "target worker should receive both objective promotions");
+}
+
 void inProcessWorkerSaturatesObjectiveScaleOverflow() {
   mcpd3::PartitionPackage package;
   package.partition_id = 0;
@@ -3378,6 +3459,7 @@ void fullSolveRequestsRegularizationOnlyAtLowScales() {
   options.num_optimization_scales = 4;
   options.patience = 99;
   options.enable_group_stopping = false;
+  options.max_objective_scale_promotions = 0;
 
   ScriptedPartitionWorker *source_worker = nullptr;
   ScriptedPartitionWorker *target_worker = nullptr;
@@ -3421,6 +3503,7 @@ void fullSolveNonDecimalScheduleReachesUnitStep() {
   options.num_optimization_scales = 5;
   options.patience = 99;
   options.enable_group_stopping = false;
+  options.max_objective_scale_promotions = 0;
 
   auto coordinator = makeScriptedCoordinator(
       std::deque<ScriptedRound>{{10, 0}, {11, 0}, {12, 0}, {13, 0}},
@@ -4657,6 +4740,7 @@ int main() {
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
+    dualDecompositionPromotesAfterUnitScaleExhaustion();
     coordinatorRunRoundReportsCertifiedRegularizedLowerBound();
     coordinatorRunRoundStrengthensCertificateAtAgreement();
     coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged();
@@ -4686,6 +4770,7 @@ int main() {
     lowObjectiveScaleCyclePromotesAndConverges();
     fullSolvePromotesObjectiveScaleOnOverBudget();
     fullSolvePromotionForwardsSaturationFlag();
+    fullSolvePromotesRepeatedlyAfterUnitScaleExhaustion();
     inProcessWorkerSaturatesObjectiveScaleOverflow();
     fullSolveStopsOverBudgetWhenPromotionDisabled();
     inProcessCoordinatorPromotesObjectiveScaleOnOverBudget();
