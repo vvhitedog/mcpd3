@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <list>
 #include <limits>
@@ -88,6 +89,24 @@ enum class DualDecompositionRegularizationScheme {
   NONE
 };
 
+struct DualDecompositionIterationRecord {
+  long total_iteration = 0;
+  int scale_iteration = 0;
+  long objective_scale = 1;
+  long step_size = 0;
+  long effective_step_size = 0;
+  Objective certified_lower_bound_raw = 0;
+  Objective best_certified_lower_bound_raw = 0;
+  Objective regularized_objective_raw = 0;
+  long disagreement_count = 0;
+  double disagreement_norm_sq = 0;
+  Capacity regularization_strength = 0;
+  Objective regularization_budget = 0;
+  Objective regularization_contribution = 0;
+  long solve_loop_microseconds = 0;
+  long lagrange_update_microseconds = 0;
+};
+
 class DisagreementPlateauRegularizationTracker {
 public:
   explicit DisagreementPlateauRegularizationTracker(int patience)
@@ -152,6 +171,7 @@ private:
 struct DualDecompositionOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
+  long max_total_iteration_count = 0;
   int max_cycle_count = 2;
   long initial_step_size = 10000;
   int patience = 10;
@@ -187,10 +207,13 @@ struct DualDecompositionOptions {
   bool track_arc_flow_updates = false;
   int halo_depth = 1;
   std::vector<std::uint64_t> partition_edge_weights;
+  std::vector<int> partition_labels;
   std::vector<int> reference_cut_labels;
   ReferenceCutSelection reference_cut_selection =
       ReferenceCutSelection::CLOSEST_EXACT;
   long reference_cut_check_interval = 1;
+  std::function<void(const DualDecompositionIterationRecord &)>
+      iteration_callback;
 };
 
 class DualDecomposition {
@@ -359,7 +382,8 @@ public:
     return halo_objective_multiplier_;
   }
   const std::vector<int> &getPartitionLabels() const {
-    return partition_labels_;
+    return partition_labels_.empty() ? options_.partition_labels
+                                     : partition_labels_;
   }
   std::vector<std::uint64_t> getArcFlowUpdateCounts() const {
     requireConstructedSolvers("getArcFlowUpdateCounts");
@@ -829,6 +853,9 @@ public:
         printf("run optimization scale time: %lums\n",
                run_opt_scale_time.count());
       }
+      if (totalIterationBudgetExhausted()) {
+        break;
+      }
       if (status == REGULARIZATION_BUDGET_EXCEEDED &&
           tryPromoteObjectiveScale(/*factor=*/10, &step_size)) {
         schedule_level_count = std::max(
@@ -935,6 +962,9 @@ public:
       solver_uptr->setRegularizationStrength(regularization_strength);
     }
     for (int i = 0; i < nstep; ++i) {
+      if (totalIterationBudgetExhausted()) {
+        break;
+      }
       ++total_optimization_iterations_;
 
       std::vector<Objective> lower_bound_terms(solvers_.size(), 0);
@@ -1176,6 +1206,25 @@ public:
           regularized_objective > max_regularized_objective_raw_) {
         max_regularized_objective_raw_ = regularized_objective;
         has_max_regularized_objective_raw_ = true;
+      }
+
+      if (options_.iteration_callback) {
+        options_.iteration_callback(DualDecompositionIterationRecord{
+            total_optimization_iterations_,
+            i + 1,
+            scale_,
+            step_size,
+            update_stats.effective_step_size,
+            lower_bound,
+            max_lower_bound_raw_,
+            regularized_objective,
+            update_stats.disagreement_count,
+            update_stats.disagreement_norm_sq,
+            regularization_strength,
+            last_regularization_budget_,
+            last_regularization_contribution_,
+            solve_loop_time.count(),
+            lagrange_update_time.count()});
       }
 
       if (!has_scale_max_lower_bound || lower_bound > max_lower_bound) {
@@ -1536,6 +1585,35 @@ private:
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
     }
+    if (options_.max_total_iteration_count < 0) {
+      throw std::runtime_error(
+          "maximum total iteration count must be non-negative");
+    }
+    if (!options_.partition_labels.empty()) {
+      if (!options_.partition_edge_weights.empty()) {
+        throw std::runtime_error(
+            "partition labels and partition edge weights are mutually "
+            "exclusive");
+      }
+      if (options_.partition_labels.size() !=
+          static_cast<size_t>(nnode_)) {
+        throw std::runtime_error(
+            "partition label count must match the global node count");
+      }
+      std::vector<bool> populated(static_cast<size_t>(npartition_), false);
+      for (const int label : options_.partition_labels) {
+        if (label < 0 || label >= npartition_) {
+          throw std::runtime_error(
+              "partition label must be within the partition range");
+        }
+        populated[static_cast<size_t>(label)] = true;
+      }
+      if (std::find(populated.begin(), populated.end(), false) !=
+          populated.end()) {
+        throw std::runtime_error(
+            "partition labels must populate every partition");
+      }
+    }
     if (!options_.reference_cut_labels.empty()) {
       if (options_.reference_cut_check_interval <= 0) {
         throw std::runtime_error(
@@ -1582,6 +1660,12 @@ private:
     return options_.regularization_budget_limit > 0
                ? options_.regularization_budget_limit
                : Objective(options_.objective_scale);
+  }
+
+  bool totalIterationBudgetExhausted() const {
+    return options_.max_total_iteration_count > 0 &&
+           total_optimization_iterations_ >=
+               options_.max_total_iteration_count;
   }
 
   void warnIfRegularizationBudgetExceeded(const Objective &budget,
@@ -1801,9 +1885,11 @@ private:
         options_.partition_edge_weights.empty()
             ? nullptr
             : &options_.partition_edge_weights;
-    partition_labels_ = configured_graph_partition(
-        npartition_, narc_, nnode_, arcs_, &arc_capacities_,
-        partition_edge_weights);
+    partition_labels_ = options_.partition_labels.empty()
+                            ? configured_graph_partition(
+                                  npartition_, narc_, nnode_, arcs_,
+                                  &arc_capacities_, partition_edge_weights)
+                            : options_.partition_labels;
     const auto &partitions_ = partition_labels_;
     validateAndReportPartition(partitions_);
     HaloPartitionLayout halo_layout;

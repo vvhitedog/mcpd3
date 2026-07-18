@@ -398,3 +398,17 @@
 - A three-repeat weighted ablation found no benefit from the cap. Removing it
   reduced Noise from 5,313 to 2,013 DD rounds and Shear from 32,106 to 5,848
   rounds while preserving certified objectives.
+
+## 2026-07-17 21:52 PDT - Bounded schedule-probe instrumentation
+
+- Added an optional global DD-round budget that spans schedule levels and
+  stops without triggering an objective-scale promotion when exhausted.
+- Added a per-round callback exposing certified and regularized objectives,
+  disagreement, regularization budget, scheduled/effective step, and local
+  solve versus alpha-update time.
+- Added explicit partition-label input so representative-graph experiments
+  can retain the exact fine-graph partition interface instead of silently
+  repartitioning the quotient.
+- Added branch tests for the bounded callback, negative budgets, explicit
+  partition-label use, and malformed/missing/out-of-range partition labels.
+  The native partition-worker test suite passes.

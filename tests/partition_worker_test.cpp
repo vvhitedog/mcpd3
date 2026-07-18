@@ -1948,6 +1948,150 @@ void dualDecompositionObjectiveScaleIsIndependentOfStepSize() {
   require(threw, "nonpositive dual decomposition objective scale should fail");
 }
 
+void dualDecompositionProbeHonorsTotalIterationBudget() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10;
+  options.initial_step_size = 100;
+  options.num_optimization_scales = 3;
+  options.max_iteration_count = 100;
+  options.max_total_iteration_count = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.max_objective_scale_promotions = 4;
+
+  std::vector<mcpd3::DualDecompositionIterationRecord> records;
+  options.iteration_callback =
+      [&](const mcpd3::DualDecompositionIterationRecord &record) {
+        records.push_back(record);
+      };
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  dual_decomp.solve();
+
+  require(dual_decomp.getTotalOptimizationIterations() == 1,
+          "probe should stop at the global DD iteration budget");
+  require(dual_decomp.getObjectiveScalePromotionCount() == 0,
+          "an exhausted probe budget must not promote the objective");
+  require(records.size() == 1,
+          "probe callback should report every completed DD iteration");
+  const auto &record = records.front();
+  require(record.total_iteration == 1,
+          "probe callback total iteration mismatch");
+  require(record.scale_iteration == 1,
+          "probe callback scale iteration mismatch");
+  require(record.objective_scale == 10,
+          "probe callback objective scale mismatch");
+  require(record.step_size == 100,
+          "probe callback scheduled step mismatch");
+  require(record.best_certified_lower_bound_raw ==
+              dual_decomp.getBestCertifiedLowerBoundRaw(),
+          "probe callback should expose the best certified lower bound");
+  require(record.disagreement_count ==
+              dual_decomp.getLastDisagreementCount(),
+          "probe callback should expose the disagreement count");
+}
+
+void dualDecompositionRejectsNegativeTotalIterationBudget() {
+  mcpd3::DualDecompositionOptions options;
+  options.max_total_iteration_count = -1;
+  bool threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/1,
+        /*nnode=*/1,
+        /*narc=*/0,
+        /*arcs=*/std::vector<int>{},
+        /*arc_capacities=*/std::vector<int>{},
+        /*terminal_capacities=*/std::vector<int>{0}, options);
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("total iteration") !=
+            std::string::npos;
+  }
+  require(threw, "negative total DD iteration budget should be rejected");
+}
+
+void dualDecompositionUsesExplicitPartitionLabels() {
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.partition_labels = {0, 1, 0, 1};
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/4,
+      /*narc=*/4,
+      /*arcs=*/std::vector<int>{0, 1, 1, 2, 2, 3, 3, 0},
+      /*arc_capacities=*/std::vector<int>{1, 1, 1, 1, 1, 1, 1, 1},
+      /*terminal_capacities=*/std::vector<int>{1, 0, 0, -1}, options);
+
+  require(dual_decomp.getPartitionLabels() == options.partition_labels,
+          "explicit partition labels should bypass graph partitioning");
+}
+
+void dualDecompositionRejectsInvalidExplicitPartitionLabels() {
+  const auto rejects = [](std::vector<int> labels, int partition_count,
+                          const std::string &message) {
+    mcpd3::DualDecompositionOptions options;
+    options.partition_labels = std::move(labels);
+    bool threw = false;
+    try {
+      mcpd3::DualDecomposition invalid(
+          partition_count,
+          /*nnode=*/3,
+          /*narc=*/2,
+          /*arcs=*/std::vector<int>{0, 1, 1, 2},
+          /*arc_capacities=*/std::vector<int>{1, 1, 1, 1},
+          /*terminal_capacities=*/std::vector<int>{1, 0, -1}, options);
+    } catch (const std::runtime_error &error) {
+      threw = std::string(error.what()).find("partition label") !=
+              std::string::npos;
+    }
+    require(threw, message);
+  };
+
+  rejects({0, 1}, 2,
+          "explicit partition labels must cover every graph node");
+  rejects({0, 2, 1}, 2,
+          "explicit partition labels must be in the partition range");
+  rejects({0, 0, 0}, 2,
+          "explicit partition labels must populate every partition");
+
+  mcpd3::DualDecompositionOptions options;
+  options.partition_labels = {0, 1, 1};
+  options.partition_edge_weights = {1, 1};
+  bool threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/2,
+        /*nnode=*/3,
+        /*narc=*/2,
+        /*arcs=*/std::vector<int>{0, 1, 1, 2},
+        /*arc_capacities=*/std::vector<int>{1, 1, 1, 1},
+        /*terminal_capacities=*/std::vector<int>{1, 0, -1}, options);
+  } catch (const std::runtime_error &error) {
+    threw = std::string(error.what()).find("mutually exclusive") !=
+            std::string::npos;
+  }
+  require(threw,
+          "explicit labels must not silently ignore partition edge weights");
+}
+
 void dualDecompositionPromotesObjectiveScaleOnOverBudget() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
 
@@ -5411,6 +5555,10 @@ int main() {
     disagreementPlateauModeActivatesOnARealDdPlateau();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
+    dualDecompositionProbeHonorsTotalIterationBudget();
+    dualDecompositionRejectsNegativeTotalIterationBudget();
+    dualDecompositionUsesExplicitPartitionLabels();
+    dualDecompositionRejectsInvalidExplicitPartitionLabels();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
     dualDecompositionPromotesAfterUnitScaleExhaustion();
     dualDecompositionCanRetryUnitStepWithoutMomentum();
