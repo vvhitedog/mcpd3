@@ -89,6 +89,21 @@ enum class DualDecompositionRegularizationScheme {
   NONE
 };
 
+enum class DualDecompositionAlphaStepPolicy {
+  SCHEDULED,
+  LOWER_BOUND_LINE_SEARCH,
+};
+
+struct DualDecompositionAlphaLineSearchReport {
+  long scheduled_step_size = 0;
+  long selected_step_size = 0;
+  int probe_count = 0;
+  Objective base_lower_bound_raw = 0;
+  Objective selected_lower_bound_raw = 0;
+  long base_disagreement_count = 0;
+  long selected_disagreement_count = 0;
+};
+
 struct DualDecompositionIterationRecord {
   long total_iteration = 0;
   int scale_iteration = 0;
@@ -198,6 +213,10 @@ struct DualDecompositionOptions {
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
   bool retry_unit_step_without_momentum = false;
+  DualDecompositionAlphaStepPolicy alpha_step_policy =
+      DualDecompositionAlphaStepPolicy::SCHEDULED;
+  int alpha_line_search_max_probes = 10;
+  int alpha_line_search_interval = 1;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -214,6 +233,8 @@ struct DualDecompositionOptions {
   long reference_cut_check_interval = 1;
   std::function<void(const DualDecompositionIterationRecord &)>
       iteration_callback;
+  std::function<void(const DualDecompositionAlphaLineSearchReport &)>
+      alpha_line_search_callback;
 };
 
 class DualDecomposition {
@@ -377,6 +398,12 @@ public:
   }
   long getUnitStepNoMomentumRetryCount() const {
     return unit_step_no_momentum_retry_count_;
+  }
+  long getAlphaLineSearchProbeCount() const {
+    return alpha_line_search_probe_count_;
+  }
+  long getAlphaLineSearchAcceptedCount() const {
+    return alpha_line_search_accepted_count_;
   }
   long getHaloObjectiveMultiplier() const {
     return halo_objective_multiplier_;
@@ -720,6 +747,8 @@ public:
     last_regularization_anchor_sink_count_ = 0;
     last_regularization_active_sink_count_ = 0;
     total_optimization_iterations_ = 0;
+    alpha_line_search_probe_count_ = 0;
+    alpha_line_search_accepted_count_ = 0;
     objective_scale_promotion_count_ = 0;
     warned_regularization_budget_exceeded_ = false;
     disagreeing_global_indices_.clear();
@@ -958,6 +987,7 @@ public:
     }
     int regularization_strength =
         regularizationStrengthForStepSize(step_size);
+    long adaptive_step_size = step_size;
     for (auto &solver_uptr : solvers_) {
       solver_uptr->setRegularizationStrength(regularization_strength);
     }
@@ -1030,7 +1060,7 @@ public:
           std::accumulate(regularization_active_count_terms.begin(),
                           regularization_active_count_terms.end(),
                           static_cast<long>(0));
-      const Objective regularized_objective =
+      Objective regularized_objective =
           regularizedObjectiveRaw(original_objective,
                                   last_regularization_contribution_);
       Objective lower_bound = certifiedOriginalLowerBoundRaw(
@@ -1066,12 +1096,34 @@ public:
 
       LagrangeUpdateStats update_stats;
       auto lagrange_update_time = time_lambda([&] {
-        update_stats =
-            runLagrangeMultipliersUpdateStep(step_size, use_momentum,
-                                             lower_bound);
+        const bool exact_line_search_available =
+            options_.alpha_step_policy ==
+                DualDecompositionAlphaStepPolicy::LOWER_BOUND_LINE_SEARCH &&
+            regularization_strength == 0 &&
+            last_regularization_budget_ == 0;
+        if (exact_line_search_available &&
+            i % options_.alpha_line_search_interval == 0) {
+          update_stats =
+              runAlphaLineSearchStep(adaptive_step_size, &lower_bound);
+          if (update_stats.effective_step_size > 0) {
+            adaptive_step_size = update_stats.effective_step_size;
+          }
+          original_objective = lower_bound;
+          regularized_objective = lower_bound;
+          last_original_objective_raw_ = lower_bound;
+          last_certified_lower_bound_raw_ = lower_bound;
+          last_regularized_objective_raw_ = lower_bound;
+        } else if (exact_line_search_available) {
+          update_stats = runLagrangeMultipliersUpdateStep(
+              adaptive_step_size, /*use_momentum=*/false, lower_bound);
+        } else {
+          update_stats =
+              runLagrangeMultipliersUpdateStep(step_size, use_momentum,
+                                               lower_bound);
+        }
         disagreeing_global_indices_ =
             std::move(update_stats.disagreeing_global_indices);
-          });
+      });
       lagrange_update_time_ += lagrange_update_time.count();
       last_disagreement_count_ = update_stats.disagreement_count;
       last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
@@ -1496,25 +1548,7 @@ private:
   LagrangeUpdateStats runLagrangeMultipliersUpdateStep(long step_size,
                                                        bool use_momentum,
                                                        const Objective &lower_bound) {
-    LagrangeUpdateStats stats;
-    for (auto &[global_index, constraints] : constraint_arc_map_) {
-      bool disagreement_exists = false;
-      for (auto &constraint : constraints) {
-        int diff =
-            solvers_[constraint.partition_index_target]->getMinCutSolution(
-                constraint.local_index_target) -
-            solvers_[constraint.partition_index_source]->getMinCutSolution(
-                constraint.local_index_source);
-        if (diff != 0) {
-          disagreement_exists = true;
-          stats.disagreement_count += std::abs(diff);
-          stats.disagreement_norm_sq += static_cast<double>(diff * diff);
-        }
-      }
-      if (disagreement_exists) {
-        stats.disagreeing_global_indices.emplace_back(global_index);
-      }
-    }
+    LagrangeUpdateStats stats = collectLagrangeUpdateStats();
     (void)lower_bound;
     stats.effective_step_size = std::max(step_size, options_.min_step_size);
 
@@ -1548,6 +1582,274 @@ private:
       }
     }
     return stats;
+  }
+
+  LagrangeUpdateStats collectLagrangeUpdateStats() const {
+    LagrangeUpdateStats stats;
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      bool disagreement_exists = false;
+      for (auto &constraint : constraints) {
+        int diff =
+            solvers_[constraint.partition_index_target]->getMinCutSolution(
+                constraint.local_index_target) -
+            solvers_[constraint.partition_index_source]->getMinCutSolution(
+                constraint.local_index_source);
+        if (diff != 0) {
+          disagreement_exists = true;
+          stats.disagreement_count += std::abs(diff);
+          stats.disagreement_norm_sq += static_cast<double>(diff * diff);
+        }
+      }
+      if (disagreement_exists) {
+        stats.disagreeing_global_indices.emplace_back(global_index);
+      }
+    }
+    return stats;
+  }
+
+  struct AlphaLineSearchComponent {
+    DualDecompositionConstraintArc *constraint = nullptr;
+    Lagrange base_alpha = 0;
+    int direction = 0;
+  };
+
+  struct AlphaLineSearchTrial {
+    long step_size = 0;
+    Objective lower_bound_raw = 0;
+    Objective directional_slope = 0;
+    LagrangeUpdateStats stats;
+  };
+
+  std::vector<AlphaLineSearchComponent>
+  makeAlphaLineSearchComponents() {
+    std::vector<AlphaLineSearchComponent> components;
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      (void)global_index;
+      for (auto &constraint : constraints) {
+        const int diff =
+            solvers_[constraint.partition_index_target]->getMinCutSolution(
+                constraint.local_index_target) -
+            solvers_[constraint.partition_index_source]->getMinCutSolution(
+                constraint.local_index_source);
+        if (diff == 0) {
+          continue;
+        }
+        components.push_back(
+            AlphaLineSearchComponent{&constraint, constraint.alpha, diff});
+      }
+    }
+    return components;
+  }
+
+  void setAlphaLineSearchStep(
+      const std::vector<AlphaLineSearchComponent> &components,
+      long step_size) {
+    if (step_size < 0) {
+      throw std::runtime_error("alpha line-search step must be non-negative");
+    }
+    const Lagrange step = lagrange_from_integer(step_size);
+    for (const auto &component : components) {
+      auto *constraint = component.constraint;
+      constraint->last_alpha = constraint->alpha;
+      constraint->alpha =
+          component.direction > 0
+              ? checked_add(component.base_alpha, step,
+                            "alpha line-search multiplier overflow")
+              : checked_subtract(component.base_alpha, step,
+                                 "alpha line-search multiplier overflow");
+      constraint->alpha_momentum = 0;
+    }
+  }
+
+  void markAlphaLineSearchStepSolved(
+      const std::vector<AlphaLineSearchComponent> &components) {
+    for (const auto &component : components) {
+      component.constraint->last_alpha = component.constraint->alpha;
+    }
+  }
+
+  Objective solveAlphaLineSearchProbe() {
+    std::vector<Objective> lower_bound_terms(solvers_.size(), 0);
+    const auto solve_time = time_lambda([&] {
+      for (size_t solver_index = 0; solver_index < solvers_.size();
+           ++solver_index) {
+        auto *solver = solvers_[solver_index].get();
+        auto *lower_bound = &lower_bound_terms[solver_index];
+        thread_pool_.push([solver, lower_bound] {
+          solver->setRegularizationStrength(0);
+          solver->solve();
+          *lower_bound = solver->getMinCutValue();
+        });
+      }
+      thread_pool_.wait();
+    });
+    solve_loop_time_ += solve_time.count();
+    ++total_optimization_iterations_;
+    ++alpha_line_search_probe_count_;
+
+    Objective lower_bound = 0;
+    for (const auto &term : lower_bound_terms) {
+      lower_bound = checked_add(
+          lower_bound, term, "alpha line-search lower-bound sum overflow");
+    }
+    return lower_bound;
+  }
+
+  Objective alphaLineSearchDirectionalSlope(
+      const std::vector<AlphaLineSearchComponent> &components) const {
+    Objective slope = 0;
+    for (const auto &component : components) {
+      const auto &constraint = *component.constraint;
+      const int diff =
+          solvers_[constraint.partition_index_target]->getMinCutSolution(
+              constraint.local_index_target) -
+          solvers_[constraint.partition_index_source]->getMinCutSolution(
+              constraint.local_index_source);
+      slope = checked_add(
+          slope, Objective(diff * component.direction),
+          "alpha line-search directional slope overflow");
+    }
+    return slope;
+  }
+
+  AlphaLineSearchTrial evaluateAlphaLineSearchTrial(
+      const std::vector<AlphaLineSearchComponent> &components,
+      long step_size) {
+    setAlphaLineSearchStep(components, step_size);
+    AlphaLineSearchTrial trial;
+    trial.step_size = step_size;
+    trial.lower_bound_raw = solveAlphaLineSearchProbe();
+    trial.stats = collectLagrangeUpdateStats();
+    trial.directional_slope = alphaLineSearchDirectionalSlope(components);
+    return trial;
+  }
+
+  static bool isBetterAlphaLineSearchTrial(
+      const AlphaLineSearchTrial &candidate,
+      const AlphaLineSearchTrial &incumbent) {
+    if (candidate.lower_bound_raw != incumbent.lower_bound_raw) {
+      return candidate.lower_bound_raw > incumbent.lower_bound_raw;
+    }
+    if (candidate.stats.disagreement_count !=
+        incumbent.stats.disagreement_count) {
+      return candidate.stats.disagreement_count <
+             incumbent.stats.disagreement_count;
+    }
+    return candidate.stats.disagreement_norm_sq <
+           incumbent.stats.disagreement_norm_sq;
+  }
+
+  LagrangeUpdateStats runAlphaLineSearchStep(long scheduled_step_size,
+                                             Objective *lower_bound) {
+    const Objective base_lower_bound = *lower_bound;
+    LagrangeUpdateStats base_stats = collectLagrangeUpdateStats();
+    base_stats.effective_step_size = 0;
+    const auto components = makeAlphaLineSearchComponents();
+    if (components.empty() || totalIterationBudgetExhausted()) {
+      return base_stats;
+    }
+
+    int exploratory_probe_budget = options_.alpha_line_search_max_probes - 1;
+    if (options_.max_total_iteration_count > 0) {
+      const long remaining = options_.max_total_iteration_count -
+                             total_optimization_iterations_;
+      if (remaining < 2) {
+        return base_stats;
+      }
+      exploratory_probe_budget = static_cast<int>(std::min<long>(
+          exploratory_probe_budget, remaining - 1));
+    }
+
+    AlphaLineSearchTrial best;
+    best.step_size = 0;
+    best.lower_bound_raw = base_lower_bound;
+    best.stats = base_stats;
+    best.directional_slope = Objective(components.size());
+    AlphaLineSearchTrial current = best;
+    int search_probe_count = 0;
+
+    const auto evaluate = [&](long step_size) {
+      current = evaluateAlphaLineSearchTrial(components, step_size);
+      ++search_probe_count;
+      if (isBetterAlphaLineSearchTrial(current, best)) {
+        best = current;
+      }
+    };
+
+    long low = 0;
+    long high = 0;
+    long step_size = std::max<long>(1, scheduled_step_size);
+    evaluate(step_size);
+    if (current.directional_slope > 0) {
+      low = step_size;
+      while (search_probe_count < exploratory_probe_budget &&
+             current.directional_slope > 0 &&
+             step_size <= std::numeric_limits<long>::max() / 2) {
+        step_size *= 2;
+        evaluate(step_size);
+        if (current.directional_slope > 0) {
+          low = step_size;
+        } else {
+          high = step_size;
+        }
+      }
+    } else {
+      high = step_size;
+      while (search_probe_count < exploratory_probe_budget &&
+             current.directional_slope <= 0 && step_size > 1) {
+        step_size = std::max<long>(1, step_size / 2);
+        evaluate(step_size);
+        if (current.directional_slope > 0) {
+          low = step_size;
+        } else {
+          high = step_size;
+        }
+      }
+    }
+
+    while (search_probe_count < exploratory_probe_budget &&
+           high > low + 1) {
+      const long midpoint = low + (high - low) / 2;
+      evaluate(midpoint);
+      if (current.directional_slope > 0) {
+        low = midpoint;
+      } else {
+        high = midpoint;
+      }
+    }
+
+    if (current.step_size != best.step_size) {
+      current = evaluateAlphaLineSearchTrial(components, best.step_size);
+      ++search_probe_count;
+      if (current.lower_bound_raw != best.lower_bound_raw) {
+        throw std::runtime_error(
+            "alpha line-search accepted lower bound was not reproducible: "
+            "step=" +
+            std::to_string(best.step_size) + " expected=" +
+            integer_to_string(best.lower_bound_raw) + " actual=" +
+            integer_to_string(current.lower_bound_raw));
+      }
+      best = current;
+    }
+    markAlphaLineSearchStepSolved(components);
+
+    if (best.step_size > 0) {
+      ++alpha_line_search_accepted_count_;
+    }
+    *lower_bound = best.lower_bound_raw;
+    best.stats.effective_step_size = best.step_size;
+    if (options_.alpha_line_search_callback) {
+      options_.alpha_line_search_callback(
+          DualDecompositionAlphaLineSearchReport{
+              scheduled_step_size,
+              best.step_size,
+              search_probe_count,
+              base_lower_bound,
+              best.lower_bound_raw,
+              base_stats.disagreement_count,
+              best.stats.disagreement_count});
+    }
+    return best.stats;
   }
 
   void validateOptions() const {
@@ -1588,6 +1890,14 @@ private:
     if (options_.max_total_iteration_count < 0) {
       throw std::runtime_error(
           "maximum total iteration count must be non-negative");
+    }
+    if (options_.alpha_line_search_max_probes < 2) {
+      throw std::runtime_error(
+          "alpha line-search probe budget must be at least two");
+    }
+    if (options_.alpha_line_search_interval <= 0) {
+      throw std::runtime_error(
+          "alpha line-search interval must be positive");
     }
     if (!options_.partition_labels.empty()) {
       if (!options_.partition_edge_weights.empty()) {
@@ -2131,7 +2441,9 @@ private:
               options_.reference_cut_check_interval);
         }
         solver->setForceFullMinCutRecompute(
-            options_.force_full_mincut_recompute);
+            options_.force_full_mincut_recompute ||
+            options_.alpha_step_policy ==
+                DualDecompositionAlphaStepPolicy::LOWER_BOUND_LINE_SEARCH);
         solvers_.emplace_back(std::move(solver));
       }
       ++solver_done;
@@ -2421,6 +2733,8 @@ private:
   long last_regularization_active_sink_count_;
   long total_optimization_iterations_;
   long unit_step_no_momentum_retry_count_ = 0;
+  long alpha_line_search_probe_count_ = 0;
+  long alpha_line_search_accepted_count_ = 0;
   long objective_scale_promotion_count_;
   long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;

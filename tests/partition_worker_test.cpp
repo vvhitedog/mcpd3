@@ -2025,6 +2025,155 @@ void dualDecompositionRejectsNegativeTotalIterationBudget() {
   require(threw, "negative total DD iteration budget should be rejected");
 }
 
+void dualDecompositionRejectsInvalidAlphaLineSearchProbeBudget() {
+  mcpd3::DualDecompositionOptions options;
+  options.alpha_step_policy =
+      mcpd3::DualDecompositionAlphaStepPolicy::LOWER_BOUND_LINE_SEARCH;
+  options.alpha_line_search_max_probes = 0;
+
+  bool threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/1,
+        /*nnode=*/1,
+        /*narc=*/0,
+        /*arcs=*/std::vector<int>{},
+        /*arc_capacities=*/std::vector<int>{},
+        /*terminal_capacities=*/std::vector<int>{0}, options);
+  } catch (const std::runtime_error &error) {
+    threw = std::string(error.what()).find("line-search probe") !=
+            std::string::npos;
+  }
+  require(threw, "nonpositive alpha line-search probe budget should fail");
+
+  options.alpha_line_search_max_probes = 2;
+  options.alpha_line_search_interval = 0;
+  threw = false;
+  try {
+    mcpd3::DualDecomposition invalid(
+        /*npartition=*/1,
+        /*nnode=*/1,
+        /*narc=*/0,
+        /*arcs=*/std::vector<int>{},
+        /*arc_capacities=*/std::vector<int>{},
+        /*terminal_capacities=*/std::vector<int>{0}, options);
+  } catch (const std::runtime_error &error) {
+    threw = std::string(error.what()).find("line-search interval") !=
+            std::string::npos;
+  }
+  require(threw, "nonpositive alpha line-search interval should fail");
+}
+
+void dualDecompositionAlphaLineSearchMaximizesExactLowerBound() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 10;
+  options.initial_step_size = 100;
+  options.num_optimization_scales = 3;
+  options.max_iteration_count = 20;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.max_objective_scale_promotions = 0;
+  options.alpha_step_policy =
+      mcpd3::DualDecompositionAlphaStepPolicy::LOWER_BOUND_LINE_SEARCH;
+  options.alpha_line_search_max_probes = 10;
+
+  std::vector<mcpd3::DualDecompositionAlphaLineSearchReport> reports;
+  options.alpha_line_search_callback =
+      [&](const mcpd3::DualDecompositionAlphaLineSearchReport &report) {
+        reports.push_back(report);
+      };
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  dual_decomp.solve();
+
+  require(!reports.empty(), "alpha line search should report a real search");
+  require(dual_decomp.getAlphaLineSearchProbeCount() > 0,
+          "alpha line search should count every extra local solve round");
+  require(dual_decomp.getTotalOptimizationIterations() >=
+              dual_decomp.getAlphaLineSearchProbeCount(),
+          "total DD work must include alpha line-search probes");
+  require(dual_decomp.getAlphaLineSearchAcceptedCount() > 0,
+          "alpha line search should accept an improving or tied trial");
+  for (const auto &report : reports) {
+    require(report.selected_lower_bound_raw >= report.base_lower_bound_raw,
+            "alpha line search must not lower the exact dual bound");
+    require(report.probe_count > 0,
+            "every alpha line-search report should contain a probe");
+    require(report.selected_step_size >= 0,
+            "selected alpha line-search step must be nonnegative");
+  }
+  require(reports.front().selected_step_size !=
+              reports.front().scheduled_step_size,
+          "the overshooting scheduled step should be adapted on this graph");
+
+  options.alpha_line_search_callback = {};
+  options.max_total_iteration_count = 3;
+  mcpd3::DualDecomposition budgeted(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+  budgeted.solve();
+  require(budgeted.getTotalOptimizationIterations() <= 3,
+          "alpha line search must respect the global DD round budget");
+}
+
+void dualDecompositionAlphaLineSearchDefersToExactRegularizationPath() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 100;
+  options.initial_step_size = 1;
+  options.num_optimization_scales = 1;
+  options.max_iteration_count = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::SCALED_EPSILON;
+  options.scaled_epsilon_max_step_size = 10;
+  options.max_objective_scale_promotions = 0;
+  options.alpha_step_policy =
+      mcpd3::DualDecompositionAlphaStepPolicy::LOWER_BOUND_LINE_SEARCH;
+  options.alpha_line_search_max_probes = 10;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{30, 50},
+      /*terminal_capacities=*/std::vector<int>{20, -40}, options);
+
+  dual_decomp.solve();
+
+  require(dual_decomp.getAlphaLineSearchProbeCount() == 0,
+          "regularized scales must not be used as exact dual line-search "
+          "probes");
+  require(dual_decomp.getTotalOptimizationIterations() == 1,
+          "regularized fallback should retain the scheduled update cost");
+}
+
 void dualDecompositionUsesExplicitPartitionLabels() {
   mcpd3::DualDecompositionOptions options;
   options.track_primal_upper_bound = false;
@@ -5557,6 +5706,9 @@ int main() {
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionProbeHonorsTotalIterationBudget();
     dualDecompositionRejectsNegativeTotalIterationBudget();
+    dualDecompositionRejectsInvalidAlphaLineSearchProbeBudget();
+    dualDecompositionAlphaLineSearchMaximizesExactLowerBound();
+    dualDecompositionAlphaLineSearchDefersToExactRegularizationPath();
     dualDecompositionUsesExplicitPartitionLabels();
     dualDecompositionRejectsInvalidExplicitPartitionLabels();
     dualDecompositionPromotesObjectiveScaleOnOverBudget();

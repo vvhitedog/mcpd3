@@ -412,3 +412,20 @@
 - Added branch tests for the bounded callback, negative budgets, explicit
   partition-label use, and malformed/missing/out-of-range partition labels.
   The native partition-worker test suite passes.
+# 2026-07-18 16:33 PDT - Experimental exact dual alpha line search
+
+- Added opt-in `LOWER_BOUND_LINE_SEARCH` alpha updates. The implementation
+  searches integer steps along the current disagreement supergradient,
+  maximizes the exact unregularized local-objective sum, and breaks exact ties
+  by disagreement count and norm.
+- Added configurable probe budget and periodic search interval. The selected
+  step is reused without momentum between searches; regularized states retain
+  the established scheduled update path.
+- Added probe and accepted-search counters plus a per-search callback. Probe
+  solves count toward total DD work and respect the global iteration budget.
+- Exact search is gated on both zero configured regularization strength and
+  zero measured regularization budget. Adaptive mode forces full min-cut
+  recomputation because arbitrary alpha backtracking was not reproducible with
+  incremental cut-value maintenance.
+- Added tests for option validation, exact-LB monotonicity, scheduled-step
+  adaptation, regularized fallback, telemetry, and global budget accounting.

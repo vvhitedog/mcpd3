@@ -137,3 +137,15 @@
   DD rounds and Shear from 5,848 to 32,106 rounds without changing either
   certified objective. Keep the capped branch only for explicit compatibility
   experiments.
+# 2026-07-18 - Exact alpha line search as a default DD update
+
+- Keep the policy experimental. Exact line-search probes are full local
+  maxflow rounds and generally cost more than the outer DD iterations they
+  remove on the tested PU workloads.
+- A zero configured regularization strength does not imply an unregularized
+  local objective. Persistent cumulative epsilon weights must be checked via
+  the measured regularization budget.
+- Arbitrary alpha trial/backtracking sequences cannot use the current
+  incremental cut-value path as an exact objective oracle. Re-solving the same
+  accepted alpha produced a different lower bound unless full min-cut
+  recomputation was enabled.
