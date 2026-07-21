@@ -132,9 +132,13 @@ public:
                          SolverArray<Capacity> terminal_capacities,
                          SolverStorageOptions storage_options = {})
       : nnode_(nnode), narc_(narc),
-        storage_options_(std::move(storage_options)), arcs_(std::move(arcs)),
-        arc_capacities_(std::move(arc_capacities)),
-        terminal_capacities_(std::move(terminal_capacities)),
+        storage_options_(std::move(storage_options)),
+        arcs_(std::move(arcs).rehome(storage_options_, "topology")),
+        arc_capacities_(std::move(arc_capacities)
+                            .rehome(storage_options_, "arc_capacities")),
+        terminal_capacities_(
+            std::move(terminal_capacities)
+                .rehome(storage_options_, "terminal_capacities")),
         v_flow_(narc_, Capacity{0}, storage_options_, "arc_flow"),
         d_flow_(nnode_, NodeFlow{0}, storage_options_, "node_flow"),
         x_(nnode_, 0, storage_options_, "labels"),
@@ -360,6 +364,11 @@ public:
   }
 
   void setReferenceCutLabels(std::vector<int> labels) {
+    setReferenceCutLabelsStorage(SolverArray<int>(
+        std::move(labels), storage_options_, "reference_cut_labels"));
+  }
+
+  void setReferenceCutLabelsStorage(SolverArray<int> labels) {
     if (labels.size() != static_cast<size_t>(nnode_)) {
       throw std::runtime_error(
           "reference cut label count must match the local node count");
@@ -369,7 +378,8 @@ public:
         throw std::runtime_error("reference cut labels must be binary");
       }
     }
-    reference_cut_labels_ = std::move(labels);
+    reference_cut_labels_ = std::move(labels).rehome(
+        storage_options_, "reference_cut_labels");
   }
 
   void clearReferenceCutLabels() { reference_cut_labels_.clear(); }
@@ -1174,7 +1184,7 @@ private:
           ++reference_current_cut_hit_count_;
         } else if (isReferenceCutOptimal()) {
           ++reference_exact_hit_count_;
-          x_.replace(reference_cut_labels_);
+          x_.replaceFrom(reference_cut_labels_);
         } else if (reference_cut_selection_ ==
                    ReferenceCutSelection::CLOSEST_EXACT) {
           ++reference_closure_count_;
@@ -1742,7 +1752,7 @@ private:
   bool has_solution_;
   CanonicalCutSelection canonical_cut_selection_;
   ReferenceCutSelection reference_cut_selection_;
-  std::vector<int> reference_cut_labels_;
+  SolverArray<int> reference_cut_labels_;
   long reference_cut_check_interval_ = 1;
   long reference_cut_schedule_count_ = 0;
   long reference_decode_count_ = 0;

@@ -7,6 +7,8 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <initializer_list>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -77,7 +79,16 @@ inline void applySolverMmapAdvice(void *address, std::size_t bytes,
 
 template <typename T> class SolverArray {
 public:
+  using value_type = T;
+
   SolverArray() = default;
+
+  SolverArray(std::initializer_list<T> values)
+      : SolverArray(std::vector<T>(values), SolverStorageOptions{},
+                    "array") {}
+
+  SolverArray(std::vector<T> values)
+      : SolverArray(std::move(values), SolverStorageOptions{}, "array") {}
 
   SolverArray(std::size_t count, const T &value,
               const SolverStorageOptions &options, const std::string &kind) {
@@ -92,17 +103,28 @@ public:
 
   SolverArray(std::vector<T> values, const SolverStorageOptions &options,
               const std::string &kind) {
-    if (options.mode == SolverStorageMode::RESIDENT) {
+    initialize(values.size(), options, kind);
+    if (mode_ == SolverStorageMode::RESIDENT) {
       resident_ = std::move(values);
       size_ = resident_.size();
-      return;
+    } else {
+      std::copy(values.begin(), values.end(), begin());
     }
-    initialize(values.size(), options, kind);
-    std::copy(values.begin(), values.end(), begin());
   }
 
-  SolverArray(const SolverArray &) = delete;
-  SolverArray &operator=(const SolverArray &) = delete;
+  SolverArray(const SolverArray &other) {
+    initialize(other.size_, other.storage_options_, other.kind_ + "_copy");
+    std::copy(other.begin(), other.end(), begin());
+  }
+
+  SolverArray &operator=(const SolverArray &other) {
+    if (this != &other) {
+      release();
+      initialize(other.size_, other.storage_options_, other.kind_ + "_copy");
+      std::copy(other.begin(), other.end(), begin());
+    }
+    return *this;
+  }
 
   SolverArray(SolverArray &&other) noexcept { moveFrom(std::move(other)); }
 
@@ -116,6 +138,16 @@ public:
 
   ~SolverArray() { release(); }
 
+  SolverArray &operator=(std::vector<T> values) {
+    assign(values.begin(), values.end());
+    return *this;
+  }
+
+  SolverArray &operator=(std::initializer_list<T> values) {
+    assign(values.begin(), values.end());
+    return *this;
+  }
+
   std::size_t size() const { return size_; }
   bool empty() const { return size_ == 0; }
   T *data() { return mapped_ != nullptr ? mapped_ : resident_.data(); }
@@ -128,11 +160,67 @@ public:
   const T *end() const { return size_ == 0 ? data() : data() + size_; }
   T &operator[](std::size_t index) { return data()[index]; }
   const T &operator[](std::size_t index) const { return data()[index]; }
+  std::size_t capacity() const {
+    return mode_ == SolverStorageMode::RESIDENT ? resident_.capacity() : size_;
+  }
+
+  void reserve(std::size_t count) {
+    requireResidentDynamicOperation("reserve");
+    resident_.reserve(count);
+  }
+
+  void push_back(const T &value) {
+    requireResidentDynamicOperation("push_back");
+    resident_.push_back(value);
+    size_ = resident_.size();
+  }
+
+  void push_back(T &&value) {
+    requireResidentDynamicOperation("push_back");
+    resident_.push_back(std::move(value));
+    size_ = resident_.size();
+  }
+
+  void resize(std::size_t count, const T &value = T{}) {
+    requireResidentDynamicOperation("resize");
+    resident_.resize(count, value);
+    size_ = resident_.size();
+  }
+
+  void clear() {
+    release();
+  }
+
+  void shrink_to_fit() {
+    if (mode_ == SolverStorageMode::RESIDENT) {
+      resident_.shrink_to_fit();
+    }
+  }
+
+  template <typename Iterator,
+            std::enable_if_t<!std::is_integral_v<Iterator>, int> = 0>
+  void assign(Iterator first, Iterator last) {
+    const auto count = static_cast<std::size_t>(std::distance(first, last));
+    const SolverStorageOptions options = storage_options_;
+    const std::string kind = kind_.empty() ? "array" : kind_;
+    release();
+    initialize(count, options, kind);
+    std::copy(first, last, begin());
+  }
+
+  void assign(std::size_t count, const T &value) {
+    const SolverStorageOptions options = storage_options_;
+    const std::string kind = kind_.empty() ? "array" : kind_;
+    release();
+    initialize(count, options, kind);
+    std::fill(begin(), end(), value);
+  }
 
   bool isFileBacked() const {
     return mapped_ != nullptr &&
            mode_ == SolverStorageMode::FILE_BACKED_MMAP;
   }
+  SolverStorageMode storageMode() const { return mode_; }
   std::size_t fileBackedBytes() const {
     return isFileBacked() ? mapped_bytes_ : 0;
   }
@@ -178,11 +266,51 @@ public:
     return copy;
   }
 
+  SolverArray rehome(const SolverStorageOptions &options,
+                     const std::string &kind) && {
+    if (mode_ == options.mode) {
+      kind_ = kind;
+      return std::move(*this);
+    }
+    return clone(options, kind);
+  }
+
+  friend bool operator==(const SolverArray &lhs, const SolverArray &rhs) {
+    return lhs.size() == rhs.size() &&
+           std::equal(lhs.begin(), lhs.end(), rhs.begin());
+  }
+
+  friend bool operator!=(const SolverArray &lhs, const SolverArray &rhs) {
+    return !(lhs == rhs);
+  }
+
+  friend bool operator==(const SolverArray &lhs,
+                         const std::vector<T> &rhs) {
+    return lhs.equals(rhs);
+  }
+
+  friend bool operator==(const std::vector<T> &lhs,
+                         const SolverArray &rhs) {
+    return rhs.equals(lhs);
+  }
+
+  friend bool operator!=(const SolverArray &lhs,
+                         const std::vector<T> &rhs) {
+    return !(lhs == rhs);
+  }
+
+  friend bool operator!=(const std::vector<T> &lhs,
+                         const SolverArray &rhs) {
+    return !(lhs == rhs);
+  }
+
 private:
   void initialize(std::size_t count, const SolverStorageOptions &options,
                   const std::string &kind) {
     size_ = count;
     mode_ = options.mode;
+    storage_options_ = options;
+    kind_ = kind;
     if (mode_ == SolverStorageMode::RESIDENT) {
       resident_.resize(count);
       return;
@@ -250,6 +378,13 @@ private:
     }
   }
 
+  void requireResidentDynamicOperation(const char *operation) const {
+    if (mode_ != SolverStorageMode::RESIDENT || mapped_ != nullptr) {
+      throw std::runtime_error(std::string("solver array ") + operation +
+                               " requires resident storage");
+    }
+  }
+
   void release() noexcept {
     if (mapped_ != nullptr) {
       munmap(mapped_, mapped_bytes_);
@@ -271,6 +406,8 @@ private:
     mapped_bytes_ = other.mapped_bytes_;
     fd_ = other.fd_;
     mode_ = other.mode_;
+    storage_options_ = std::move(other.storage_options_);
+    kind_ = std::move(other.kind_);
     other.mapped_ = nullptr;
     other.size_ = 0;
     other.mapped_bytes_ = 0;
@@ -283,6 +420,8 @@ private:
   std::size_t mapped_bytes_ = 0;
   int fd_ = -1;
   SolverStorageMode mode_ = SolverStorageMode::RESIDENT;
+  SolverStorageOptions storage_options_;
+  std::string kind_ = "array";
 };
 
 } // namespace mcpd3

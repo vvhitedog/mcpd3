@@ -69,19 +69,26 @@ struct NodeLabel {
 struct PartitionPackage {
   int partition_id = -1;
   int local_node_count = 0;
-  std::vector<int> arcs;
-  std::vector<Capacity> arc_capacities;
-  std::vector<Capacity> terminal_capacities;
-  std::vector<int> local_to_global;
+  SolverArray<int> arcs;
+  SolverArray<Capacity> arc_capacities;
+  SolverArray<Capacity> terminal_capacities;
+  SolverArray<int> local_to_global;
   std::vector<ConstraintEndpointBinding> constraint_endpoints;
   long objective_multiplier = 1;
   CanonicalCutSelection canonical_cut_selection =
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
-  std::vector<int> reference_cut_labels;
+  SolverArray<int> reference_cut_labels;
   ReferenceCutSelection reference_cut_selection =
       ReferenceCutSelection::CLOSEST_EXACT;
   long reference_cut_check_interval = 1;
+
+  std::size_t fileBackedBytes() const {
+    return arcs.fileBackedBytes() + arc_capacities.fileBackedBytes() +
+           terminal_capacities.fileBackedBytes() +
+           local_to_global.fileBackedBytes() +
+           reference_cut_labels.fileBackedBytes();
+  }
 };
 
 struct PartitionSolveRequest {
@@ -107,8 +114,8 @@ struct PartitionSolveResult {
 
 struct PartitionCapacityUpdate {
   int partition_id = -1;
-  std::vector<Capacity> arc_capacities;
-  std::vector<Capacity> terminal_capacities;
+  SolverArray<Capacity> arc_capacities;
+  SolverArray<Capacity> terminal_capacities;
   bool preserve_flow_state = true;
   Objective flow_scale_numerator = 1;
   Objective flow_scale_denominator = 1;
@@ -244,7 +251,8 @@ public:
     auto &loaded = partitions_[package.partition_id];
     loaded.partition_id = partition_id;
     loaded.local_node_count = local_node_count;
-    loaded.local_to_global = std::move(package.local_to_global);
+    loaded.local_to_global = std::move(package.local_to_global)
+                                 .rehome(storage_options_, "local_to_global");
     loaded.constraint_endpoints = std::move(package.constraint_endpoints);
     loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
         local_node_count, arc_count, std::move(package.arcs),
@@ -254,7 +262,7 @@ public:
     loaded.solver->setForceFullMinCutRecompute(
         package.force_full_mincut_recompute);
     if (!package.reference_cut_labels.empty()) {
-      loaded.solver->setReferenceCutLabels(
+      loaded.solver->setReferenceCutLabelsStorage(
           std::move(package.reference_cut_labels));
       loaded.solver->setReferenceCutSelection(
           package.reference_cut_selection);
@@ -351,7 +359,7 @@ private:
   struct LoadedPartition {
     int partition_id = -1;
     int local_node_count = 0;
-    std::vector<int> local_to_global;
+    SolverArray<int> local_to_global;
     std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::unique_ptr<PrimalDualMinCutSolver> solver;
     std::list<DualDecompositionConstraintArc> constraint_arcs;
@@ -602,7 +610,6 @@ public:
     stored.warm_state_path =
         storage_directory_ /
         ("partition_" + std::to_string(package.partition_id) + ".warm");
-    stored.local_to_global = package.local_to_global;
     stored.constraint_endpoints = std::move(package.constraint_endpoints);
     std::sort(stored.constraint_endpoints.begin(),
               stored.constraint_endpoints.end(),
@@ -613,6 +620,7 @@ public:
     stored.resident_bytes = estimateResidentBytes(stored);
 
     writePackagePayload(stored.path, package);
+    stored.local_to_global = std::move(package.local_to_global);
     partitions_.emplace(stored.partition_id, std::move(stored));
   }
 
@@ -737,7 +745,7 @@ private:
     std::uint64_t last_used = 0;
     bool has_solution = false;
     bool has_warm_state = false;
-    std::vector<int> local_to_global;
+    SolverArray<int> local_to_global;
     std::vector<ConstraintEndpointBinding> constraint_endpoints;
     std::vector<int> last_solution;
     std::unique_ptr<InProcessPartitionWorker> resident_worker;
@@ -779,9 +787,10 @@ private:
     return value;
   }
 
-  template <typename T>
-  static void writeVector(std::ostream &out, const std::vector<T> &values,
+  template <typename Container>
+  static void writeVector(std::ostream &out, const Container &values,
                           const std::string &name) {
+    using T = typename Container::value_type;
     const std::uint64_t size = values.size();
     writeScalar(out, size, name + " size");
     if (!values.empty()) {
@@ -848,10 +857,11 @@ private:
     }
   }
 
-  template <typename Integer>
+  template <typename Container>
   static void writeIntegerVector(std::ostream &out,
-                                 const std::vector<Integer> &values,
+                                 const Container &values,
                                  const std::string &name) {
+    using Integer = typename Container::value_type;
     const std::uint64_t size = values.size();
     writeScalar(out, size, name + " size");
     if constexpr (std::is_trivially_copyable_v<Integer>) {
@@ -898,8 +908,8 @@ private:
     return values;
   }
 
-  static void writeIntVector(std::ostream &out,
-                             const std::vector<int> &values,
+  template <typename Container>
+  static void writeIntVector(std::ostream &out, const Container &values,
                              const std::string &name) {
     writeVector(out, values, name);
   }

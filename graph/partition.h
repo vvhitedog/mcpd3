@@ -27,6 +27,7 @@
 #include <deque>
 #include <limits>
 #include <graph/mcgraph.h>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -67,11 +68,43 @@ inline std::vector<int> basic_graph_partition(int npartition, int narc,
                                               int nnode,
                                               const ArcContainer &arc) {
   std::vector<int> partitions(nnode);
-  int nnode_in_each_partition = (nnode + npartition - 1) / npartition;
+  const int nnode_in_each_partition =
+      (nnode + npartition - 1) / npartition;
   for (int i = 0; i < nnode; ++i) {
     partitions[i] = i / nnode_in_each_partition;
   }
   return partitions;
+}
+
+template <typename PartitionContainer>
+inline void basic_graph_partition_into(int npartition, int nnode,
+                                       PartitionContainer *partitions) {
+  if (partitions == nullptr ||
+      partitions->size() != static_cast<size_t>(nnode)) {
+    throw std::invalid_argument(
+        "basic partition output must match the graph node count");
+  }
+  int nnode_in_each_partition = (nnode + npartition - 1) / npartition;
+  for (int i = 0; i < nnode; ++i) {
+    (*partitions)[static_cast<size_t>(i)] = i / nnode_in_each_partition;
+  }
+}
+
+inline bool configured_graph_partition_uses_basic(
+    const std::vector<std::uint64_t> *edge_weights = nullptr) {
+  if (edge_weights != nullptr) {
+    return false;
+  }
+  const char *mode_env = std::getenv("MCPD3_PARTITIONER");
+  const std::string mode = mode_env == nullptr ? "metis" : mode_env;
+  if (mode == "basic" || mode == "contiguous") {
+    return true;
+  }
+#ifndef HAVE_METIS
+  return mode != "local" && mode != "local_search";
+#else
+  return false;
+#endif
 }
 
 inline std::vector<int> basic_graph_partition(

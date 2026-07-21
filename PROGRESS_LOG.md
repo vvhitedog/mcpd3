@@ -468,3 +468,21 @@
 - Corrected native plateau iteration telemetry to report the regularization
   used by the completed solve, and made coordinator progress retain global
   best bounds across schedule levels. The full `partition_worker_test` passes.
+
+## 2026-07-20 23:04 PDT - Mapped partition-package and refresh payloads
+
+- Added direct basic-partition label generation into the selected
+  `SolverArray` backing, removing the full resident label staging vector in
+  the out-of-core path.
+- Converted partition topology, capacities, local/global maps, reference
+  labels, and persistent capacity-refresh payloads to backing-preserving
+  `SolverArray` storage.
+- Package-only decomposition now moves each completed local graph into its
+  package instead of copying it; callers can consume packages through
+  `takePartitionPackages()` without another full package copy.
+- Worker adoption now preserves matching mapped arrays and rehomes resident
+  network payloads into the configured file-backed worker storage. This keeps
+  execution identical while making storage policy authoritative.
+- Added tests for direct mapped label generation, zero-copy package transfer,
+  mapped package payloads, and exact resident/file-backed worker behavior.
+  MCPD3 passes 2/2 CTest targets.

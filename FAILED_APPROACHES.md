@@ -165,3 +165,12 @@
   the product profile's 500. Halo/objective normalization tests and library
   users require neutral defaults. Product tuning belongs in a named entry-point
   policy, shared by MCPD3-N and MCPD4.
+
+## 2026-07-20 - Resident partition-package staging in mmap mode
+
+- Do not build file-backed local graphs and then copy their topology and
+  capacities through resident `std::vector` package fields. That creates a
+  second partition-sized resident allocation before the worker can map it.
+- Do not assume moving a resident package into a file-backed worker applies the
+  worker storage policy. The worker must explicitly rehome arrays whose backing
+  mode differs, while adopting already mapped arrays without a copy.

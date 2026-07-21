@@ -517,8 +517,9 @@ void inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate() {
   auto direct_ref = --direct_constraints.end();
   mcpd3::PrimalDualMinCutSolver direct_solver(
       package.local_node_count,
-      static_cast<int>(package.arcs.size() / 2), std::vector<int>(package.arcs),
-      package.arc_capacities, package.terminal_capacities);
+      static_cast<int>(package.arcs.size() / 2), package.arcs.copyToVector(),
+      package.arc_capacities.copyToVector(),
+      package.terminal_capacities.copyToVector());
   direct_solver.addSourceDualDecompositionConstraint(direct_ref);
 
   mcpd3::InProcessPartitionWorker worker;
@@ -980,10 +981,11 @@ void haloDepthTwoPromotesWhenDuplicatedNodesExhaustTheBudget() {
           "public h2 objective must normalize both Q and primary scaling");
 }
 
+template <typename ArcContainer, typename CapacityContainer,
+          typename TerminalContainer>
 mcpd3::Objective evaluateCutObjective(
-    const std::vector<int> &arcs,
-    const std::vector<mcpd3::Capacity> &capacities,
-    const std::vector<mcpd3::Capacity> &terminals,
+    const ArcContainer &arcs, const CapacityContainer &capacities,
+    const TerminalContainer &terminals,
     const std::vector<int> &labels) {
   mcpd3::Objective objective = 0;
   for (size_t arc = 0; arc < arcs.size() / 2; ++arc) {
@@ -1663,8 +1665,8 @@ void partitionWorkerCoordinatorCapacityRefreshMatchesNativeState() {
   for (const auto &package : replacement_packages.getPartitionPackages()) {
     updates.push_back(mcpd3::PartitionCapacityUpdate{
         package.partition_id,
-        package.arc_capacities,
-        package.terminal_capacities,
+        package.arc_capacities.copyToVector(),
+        package.terminal_capacities.copyToVector(),
         /*preserve_flow_state=*/true,
         /*flow_scale_numerator=*/2,
         /*flow_scale_denominator=*/1});
@@ -2248,6 +2250,111 @@ void fileBackedNativeDdBacksPersistentGlobalMetadata() {
   decomposition.solve();
   require(decomposition.getAgreedGlobalLabels().size() == 8,
           "file-backed metadata must support global label recovery");
+  std::filesystem::remove_all(scratch);
+}
+
+void fileBackedBasicPartitioningGeneratesLabelsWithoutResidentStaging() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-native-partition-label-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+
+  auto generated_options = makeParityDualOptions(/*use_momentum=*/true);
+  generated_options.emit_partition_packages = false;
+  generated_options.materialize_all_partition_nodes = true;
+  generated_options.solver_storage.mode =
+      mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  generated_options.solver_storage.directory = scratch.string();
+
+  if constexpr (!fileBackedNativeDdSupported()) {
+    requireThrows(
+        [&] {
+          mcpd3::DualDecomposition unsupported(
+              /*npartition=*/4, makeParityFixtureGraph(), generated_options);
+        },
+        "file-backed partition labels must reject nontrivial capacity types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  mcpd3::DualDecomposition generated(
+      /*npartition=*/4, makeParityFixtureGraph(), generated_options);
+  const auto generated_diagnostics = generated.getGlobalStorageDiagnostics();
+  require(generated_diagnostics.partition_labels_generated_in_backing_store,
+          "basic partition labels must be generated directly in mmap storage");
+  require(generated_diagnostics.partition_label_generation_was_file_backed,
+          "basic partition label generation must use a file-backed mapping");
+
+  auto supplied_options = generated_options;
+  supplied_options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  mcpd3::DualDecomposition supplied(
+      /*npartition=*/4, makeParityFixtureGraph(), supplied_options);
+  require(!supplied.getGlobalStorageDiagnostics()
+               .partition_labels_generated_in_backing_store,
+          "caller-supplied partition labels must remain distinguishable from "
+          "direct generation");
+
+  std::filesystem::remove_all(scratch);
+}
+
+void packageOnlyFileBackedDdTransfersMappedPayloadWithoutCopies() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-package-payload-file-backed-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+
+  auto options = makeParityDualOptions(/*use_momentum=*/true);
+  options.construct_solvers = false;
+  options.emit_partition_packages = true;
+  options.materialize_all_partition_nodes = true;
+  options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  options.solver_storage.mode = mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  options.solver_storage.directory = scratch.string();
+
+  if constexpr (!fileBackedNativeDdSupported()) {
+    requireThrows(
+        [&] {
+          mcpd3::DualDecomposition unsupported(
+              /*npartition=*/4, makeParityFixtureGraph(), options);
+        },
+        "file-backed package payloads must reject nontrivial capacity types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  mcpd3::DualDecomposition decomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+  size_t nonempty_package_count = 0;
+  for (const auto &package : decomposition.getPartitionPackages()) {
+    if (package.local_node_count == 0) {
+      continue;
+    }
+    ++nonempty_package_count;
+    require(package.arcs.isFileBacked(),
+            "package topology must remain file-backed");
+    require(package.arc_capacities.isFileBacked(),
+            "package arc capacities must remain file-backed");
+    require(package.terminal_capacities.isFileBacked(),
+            "package terminal capacities must remain file-backed");
+    require(package.local_to_global.isFileBacked(),
+            "package local-to-global mapping must remain file-backed");
+    require(package.fileBackedBytes() > 0,
+            "package must report its mapped payload bytes");
+  }
+  require(nonempty_package_count == 4,
+          "fixture must export four nonempty mapped packages");
+  require(decomposition.getGlobalStorageDiagnostics()
+              .partition_package_zero_copy_transfer_count == 4,
+          "package-only export must move each local mapped graph into its "
+          "package");
+
   std::filesystem::remove_all(scratch);
 }
 
@@ -6411,6 +6518,8 @@ int main() {
     fileBackedNativeDdRejectsInvalidStorage();
     nativeDdRecoversGlobalLabelsWithoutPartitionPackages();
     fileBackedNativeDdBacksPersistentGlobalMetadata();
+    fileBackedBasicPartitioningGeneratesLabelsWithoutResidentStaging();
+    packageOnlyFileBackedDdTransfersMappedPayloadWithoutCopies();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     disagreementPlateauTrackerRequiresAFullFlatWindow();

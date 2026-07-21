@@ -346,6 +346,8 @@ public:
 
   struct GlobalStorageDiagnostics {
     bool partition_labels_file_backed = false;
+    bool partition_labels_generated_in_backing_store = false;
+    bool partition_label_generation_was_file_backed = false;
     bool original_topology_file_backed = false;
     bool original_capacities_file_backed = false;
     bool arc_locations_file_backed = false;
@@ -357,6 +359,7 @@ public:
     std::size_t
         last_capacity_refresh_terminal_buffers_file_backed_partition_count = 0;
     std::size_t local_graph_construction_file_backed_partition_count = 0;
+    std::size_t partition_package_zero_copy_transfer_count = 0;
     std::size_t file_backed_bytes = 0;
   };
 
@@ -364,6 +367,10 @@ public:
     GlobalStorageDiagnostics diagnostics;
     diagnostics.partition_labels_file_backed =
         partition_labels_.isFileBacked();
+    diagnostics.partition_labels_generated_in_backing_store =
+        partition_labels_generated_in_backing_store_;
+    diagnostics.partition_label_generation_was_file_backed =
+        partition_label_generation_was_file_backed_;
     diagnostics.original_topology_file_backed = original_arcs_.isFileBacked();
     diagnostics.original_capacities_file_backed =
         original_arc_capacities_.isFileBacked() &&
@@ -378,6 +385,8 @@ public:
         last_capacity_refresh_terminal_buffers_file_backed_partition_count_;
     diagnostics.local_graph_construction_file_backed_partition_count =
         local_graph_construction_file_backed_partition_count_;
+    diagnostics.partition_package_zero_copy_transfer_count =
+        partition_package_zero_copy_transfer_count_;
     diagnostics.file_backed_bytes = original_arcs_.fileBackedBytes() +
                                     original_arc_capacities_.fileBackedBytes() +
                                     original_terminal_capacities_.fileBackedBytes() +
@@ -494,6 +503,13 @@ public:
           "partition package export is disabled for this DualDecomposition");
     }
     return partition_packages_;
+  }
+
+  std::vector<PartitionPackage> takePartitionPackages() {
+    if (!options_.emit_partition_packages) {
+      throw std::runtime_error("partition package export is disabled");
+    }
+    return std::move(partition_packages_);
   }
 
   std::vector<DualDecompositionConstraintSnapshot>
@@ -2005,14 +2021,24 @@ private:
             ? nullptr
             : &options_.partition_edge_weights;
     retain_partition_labels_ = !options_.partition_labels.empty();
-    auto partition_labels = options_.partition_labels.empty()
-                                ? configured_graph_partition(
-                                      npartition_, narc_, nnode_, arcs_,
-                                      &arc_capacities_, partition_edge_weights)
-                                : options_.partition_labels;
-    partition_labels_ = SolverArray<int>(
-        std::move(partition_labels), options_.solver_storage,
-        "global_partition_labels");
+    if (!options_.partition_labels.empty()) {
+      partition_labels_ = SolverArray<int>(
+          std::move(options_.partition_labels), options_.solver_storage,
+          "global_partition_labels");
+    } else if (configured_graph_partition_uses_basic(partition_edge_weights)) {
+      partition_labels_ = SolverArray<int>(
+          static_cast<size_t>(nnode_), options_.solver_storage,
+          "global_partition_labels");
+      basic_graph_partition_into(npartition_, nnode_, &partition_labels_);
+      partition_labels_generated_in_backing_store_ = true;
+      partition_label_generation_was_file_backed_ =
+          partition_labels_.isFileBacked();
+    } else {
+      partition_labels_ = SolverArray<int>(
+          configured_graph_partition(npartition_, narc_, nnode_, arcs_,
+                                     &arc_capacities_, partition_edge_weights),
+          options_.solver_storage, "global_partition_labels");
+    }
     options_.partition_labels.clear();
     options_.partition_labels.shrink_to_fit();
     const auto &partitions_ = partition_labels_;
@@ -2278,26 +2304,50 @@ private:
         package.reference_cut_selection = options_.reference_cut_selection;
         package.reference_cut_check_interval =
             options_.reference_cut_check_interval;
-        package.reference_cut_labels.clear();
+        package.reference_cut_labels = SolverArray<int>();
         if (!options_.reference_cut_labels.empty()) {
-          package.reference_cut_labels.reserve(
-              min_cut_sub_graph.local_to_global.size());
-          for (const int global_node : min_cut_sub_graph.local_to_global) {
-            package.reference_cut_labels.push_back(
-                options_.reference_cut_labels[static_cast<size_t>(global_node)]);
+          package.reference_cut_labels = SolverArray<int>(
+              min_cut_sub_graph.local_to_global.size(),
+              options_.solver_storage,
+              "partition_" + std::to_string(partition) +
+                  "_reference_cut_labels");
+          for (size_t local = 0;
+               local < min_cut_sub_graph.local_to_global.size(); ++local) {
+            const int global_node =
+                min_cut_sub_graph.local_to_global[local];
+            package.reference_cut_labels[local] =
+                options_.reference_cut_labels[static_cast<size_t>(global_node)];
           }
         }
-        package.arcs.assign(min_cut_sub_graph.graph.arcs.begin(),
-                            min_cut_sub_graph.graph.arcs.end());
-        package.arc_capacities.assign(
-            min_cut_sub_graph.graph.arc_capacities.begin(),
-            min_cut_sub_graph.graph.arc_capacities.end());
-        package.terminal_capacities.assign(
-            min_cut_sub_graph.graph.terminal_capacities.begin(),
-            min_cut_sub_graph.graph.terminal_capacities.end());
-        package.local_to_global.assign(
-            min_cut_sub_graph.local_to_global.begin(),
-            min_cut_sub_graph.local_to_global.end());
+        if (!options_.construct_solvers) {
+          package.arcs = std::move(min_cut_sub_graph.graph.arcs);
+          package.arc_capacities =
+              std::move(min_cut_sub_graph.graph.arc_capacities);
+          package.terminal_capacities =
+              std::move(min_cut_sub_graph.graph.terminal_capacities);
+          package.local_to_global =
+              std::move(min_cut_sub_graph.local_to_global);
+          ++partition_package_zero_copy_transfer_count_;
+        } else {
+          package.arcs = min_cut_sub_graph.graph.arcs.clone(
+              options_.solver_storage,
+              "partition_" + std::to_string(partition) +
+                  "_package_topology");
+          package.arc_capacities =
+              min_cut_sub_graph.graph.arc_capacities.clone(
+                  options_.solver_storage,
+                  "partition_" + std::to_string(partition) +
+                      "_package_arc_capacities");
+          package.terminal_capacities =
+              min_cut_sub_graph.graph.terminal_capacities.clone(
+                  options_.solver_storage,
+                  "partition_" + std::to_string(partition) +
+                      "_package_terminal_capacities");
+          package.local_to_global = min_cut_sub_graph.local_to_global.clone(
+              options_.solver_storage,
+              "partition_" + std::to_string(partition) +
+                  "_package_local_to_global");
+        }
         package.constraint_endpoints.clear();
       }
 
@@ -2686,6 +2736,9 @@ private:
   long total_optimization_iterations_;
   long unit_step_no_momentum_retry_count_ = 0;
   long objective_scale_promotion_count_;
+  bool partition_labels_generated_in_backing_store_ = false;
+  bool partition_label_generation_was_file_backed_ = false;
+  std::size_t partition_package_zero_copy_transfer_count_ = 0;
   long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;
   bool warned_regularization_budget_exceeded_;
