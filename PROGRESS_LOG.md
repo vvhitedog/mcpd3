@@ -499,7 +499,7 @@
 - Added mapped-result, exact-content, count, null-destination, and unknown-ID
   branch tests. MCPD3 passes both CTest targets in Release mode.
 
-## 2026-07-21 02:17 PDT - Partition-scoped objective promotion
+## 2026-07-21 00:36 PDT - Partition-scoped objective promotion
 
 - Extended the worker contract so a coordinator promotes only the partitions
   assigned to that coordinator, while retaining the historical all-partition
@@ -509,3 +509,12 @@
   partially scaling a shared worker.
 - Added selected, unselected, duplicate, and unknown-ID regressions. MCPD3
   passes both CTest targets in Release mode.
+
+## 2026-07-21 00:36 PDT - Zero-copy targeted capacity refresh
+
+- Added a worker operation that applies an existing capacity-update payload to
+  a separately named target partition. In-process and historical streaming
+  implementations consume the original arrays directly, preserving mapped
+  storage and avoiding a partition-sized copy used only to rewrite an ID.
+- Existing same-ID refresh remains unchanged and delegates to the targeted
+  operation. MCPD3 passes both CTest targets in Release mode.

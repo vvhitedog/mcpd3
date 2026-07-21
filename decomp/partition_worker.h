@@ -233,6 +233,14 @@ public:
     throw std::runtime_error(
         "partition worker does not support capacity replacement");
   }
+  virtual void replacePartitionCapacitiesFor(
+      int target_partition_id, const PartitionCapacityUpdate &update) {
+    if (target_partition_id != update.partition_id) {
+      throw std::runtime_error(
+          "partition worker does not support remapped capacity replacement");
+    }
+    replacePartitionCapacities(update);
+  }
   virtual std::size_t fullLabelCount(int partition_id) const {
     (void)partition_id;
     throw std::runtime_error(
@@ -402,7 +410,13 @@ public:
 
   void replacePartitionCapacities(
       const PartitionCapacityUpdate &update) override {
-    auto &loaded = loadedPartitionById(update.partition_id);
+    replacePartitionCapacitiesFor(update.partition_id, update);
+  }
+
+  void replacePartitionCapacitiesFor(
+      int target_partition_id,
+      const PartitionCapacityUpdate &update) override {
+    auto &loaded = loadedPartitionById(target_partition_id);
     loaded.solver->replaceProblemCapacities(
         update.arc_capacities, update.terminal_capacities,
         update.preserve_flow_state, update.flow_scale_numerator,
@@ -833,14 +847,20 @@ public:
 
   void replacePartitionCapacities(
       const PartitionCapacityUpdate &update) override {
-    auto find_iter = partitions_.find(update.partition_id);
+    replacePartitionCapacitiesFor(update.partition_id, update);
+  }
+
+  void replacePartitionCapacitiesFor(
+      int target_partition_id,
+      const PartitionCapacityUpdate &update) override {
+    auto find_iter = partitions_.find(target_partition_id);
     if (find_iter == partitions_.end()) {
       throw std::runtime_error("unknown partition id " +
-                               std::to_string(update.partition_id));
+                               std::to_string(target_partition_id));
     }
     auto &stored = find_iter->second;
     auto *worker = materializePartition(&stored);
-    worker->replacePartitionCapacities(update);
+    worker->replacePartitionCapacitiesFor(target_partition_id, update);
     auto package = readPackagePayload(stored);
     package.arc_capacities = update.arc_capacities;
     package.terminal_capacities = update.terminal_capacities;
