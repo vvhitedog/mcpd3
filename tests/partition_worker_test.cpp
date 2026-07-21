@@ -13,6 +13,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <list>
 #include <map>
@@ -24,6 +25,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include <decomp/dualdecomp.h>
 #include <decomp/halo_partition.h>
@@ -38,6 +41,43 @@ void require(bool condition, const std::string &message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
+}
+
+std::string captureStderr(const std::function<void()> &function) {
+  std::fflush(stderr);
+  const int saved_stderr = ::dup(STDERR_FILENO);
+  require(saved_stderr >= 0, "failed to duplicate stderr");
+  FILE *capture = std::tmpfile();
+  require(capture != nullptr, "failed to create stderr capture file");
+  require(::dup2(::fileno(capture), STDERR_FILENO) >= 0,
+          "failed to redirect stderr");
+
+  try {
+    function();
+  } catch (...) {
+    std::fflush(stderr);
+    (void)::dup2(saved_stderr, STDERR_FILENO);
+    ::close(saved_stderr);
+    std::fclose(capture);
+    throw;
+  }
+
+  std::fflush(stderr);
+  require(std::fseek(capture, 0, SEEK_END) == 0,
+          "failed to seek captured stderr");
+  const long capture_size = std::ftell(capture);
+  require(capture_size >= 0, "failed to size captured stderr");
+  std::rewind(capture);
+  std::string output(static_cast<size_t>(capture_size), '\0');
+  require(output.empty() ||
+              std::fread(output.data(), 1, output.size(), capture) ==
+                  output.size(),
+          "failed to read captured stderr");
+  require(::dup2(saved_stderr, STDERR_FILENO) >= 0,
+          "failed to restore stderr");
+  ::close(saved_stderr);
+  std::fclose(capture);
+  return output;
 }
 
 template <typename Function>
@@ -806,6 +846,68 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
   require(countWorkerDisagreements(worker_results) ==
               dual_decomp.getLastDisagreementCount(),
           "worker disagreement count differs from DualDecomposition");
+}
+
+void nativeProgressReportsEveryPartitionSolve() {
+  const char *old_progress = std::getenv("MCPD3_PROGRESS");
+  const bool had_old_progress = old_progress != nullptr;
+  const std::string old_progress_value = had_old_progress ? old_progress : "";
+  ::unsetenv("MCPD3_PROGRESS");
+  ::setenv("MCPD3_PARTITIONER", "basic", 1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.objective_scale = 100;
+  options.force_full_mincut_recompute = true;
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/2,
+      /*nnode=*/2,
+      /*narc=*/1,
+      /*arcs=*/std::vector<int>{0, 1},
+      /*arc_capacities=*/std::vector<int>{3, 5},
+      /*terminal_capacities=*/std::vector<int>{2, -4}, options);
+
+  ::setenv("MCPD3_PROGRESS", "1", 1);
+  const std::string progress = captureStderr([&] {
+    dual_decomp.runOptimizationScale(
+        /*nstep=*/1, /*step_size=*/100, /*max_cycle_count=*/2,
+        /*use_momentum=*/false);
+  });
+
+  if (had_old_progress) {
+    ::setenv("MCPD3_PROGRESS", old_progress_value.c_str(), 1);
+  } else {
+    ::unsetenv("MCPD3_PROGRESS");
+  }
+
+  const size_t start_zero = progress.find(
+      "stage=dd_partition_solve_started objective_scale=1 iter=0 partition=0 ");
+  const size_t complete_zero = progress.find(
+      "stage=dd_partition_solve_completed objective_scale=1 iter=0 partition=0 ");
+  const size_t start_one = progress.find(
+      "stage=dd_partition_solve_started objective_scale=1 iter=0 partition=1 ");
+  const size_t complete_one = progress.find(
+      "stage=dd_partition_solve_completed objective_scale=1 iter=0 partition=1 ");
+  if (start_zero == std::string::npos ||
+      complete_zero == std::string::npos || start_one == std::string::npos ||
+      complete_one == std::string::npos) {
+    std::cerr << "captured partition progress:\n" << progress;
+  }
+  require(start_zero != std::string::npos &&
+              complete_zero != std::string::npos &&
+              start_one != std::string::npos &&
+              complete_one != std::string::npos,
+          "native progress must report each partition start and completion");
+  require(start_zero < complete_zero && complete_zero < start_one &&
+              start_one < complete_one,
+          "a one-thread solve must expose sequential partition handoff");
+  require(progress.find("partition_count=2") != std::string::npos,
+          "partition progress must report the round partition count");
+  require(progress.find("solve_elapsed_sec=") != std::string::npos,
+          "partition completion must report local maxflow wall time");
 }
 
 void exportedPartitionPackagesMaterializeBoundaryDuplicates() {
@@ -6696,6 +6798,7 @@ int main() {
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     inProcessPartitionWorkerReturnsFullLabelsOnRequest();
     exportedPartitionPackagesMatchDualDecompositionRound();
+    nativeProgressReportsEveryPartitionSolve();
     exportedPartitionPackagesMaterializeBoundaryDuplicates();
     disabledPartitionPackageExportPreservesNativeSolve();
     packageOnlyExportMatchesSolverBackedExport();

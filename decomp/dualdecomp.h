@@ -1103,6 +1103,9 @@ public:
       std::vector<Objective> regularization_contribution_terms(solvers_.size(), 0);
       std::vector<long> regularization_anchor_count_terms(solvers_.size(), 0);
       std::vector<long> regularization_active_count_terms(solvers_.size(), 0);
+      const long round_objective_scale = scale_;
+      const long round_total_iteration = total_optimization_iterations_;
+      const size_t round_partition_count = solvers_.size();
       auto solve_loop_time = time_lambda([&] {
         for (size_t solver_index = 0; solver_index < solvers_.size();
              ++solver_index) {
@@ -1120,7 +1123,23 @@ public:
                              regularization_budget_result,
                              regularization_contribution_result,
                              regularization_anchor_count_result,
-                             regularization_active_count_result] {
+                             regularization_active_count_result,
+                             report_progress, round_objective_scale,
+                             step_size, i, round_total_iteration,
+                             solver_index, round_partition_count] {
+            const auto partition_solve_start =
+                std::chrono::steady_clock::now();
+            if (report_progress) {
+              std::fprintf(
+                  stderr,
+                  "mcpd3_progress stage=dd_partition_solve_started "
+                  "objective_scale=%ld iter=%d partition=%zu "
+                  "partition_count=%zu "
+                  "total_iter=%ld step_size=%ld\n",
+                  round_objective_scale, i, solver_index,
+                  round_partition_count, round_total_iteration, step_size);
+              std::fflush(stderr);
+            }
             solver->solve();
             *lower_result = solver->getMinCutValue();
             *regularization_budget_result =
@@ -1131,6 +1150,24 @@ public:
                 solver->getLastRegularizationAnchorSinkCount();
             *regularization_active_count_result =
                 solver->getLastRegularizationActiveSinkCount();
+            if (report_progress) {
+              const double elapsed = std::chrono::duration<double>(
+                                         std::chrono::steady_clock::now() -
+                                         partition_solve_start)
+                                         .count();
+              std::fprintf(
+                  stderr,
+                  "mcpd3_progress stage=dd_partition_solve_completed "
+                  "objective_scale=%ld iter=%d partition=%zu "
+                  "partition_count=%zu "
+                  "total_iter=%ld step_size=%ld solve_elapsed_sec=%.6f "
+                  "lower_bound=%.6lf\n",
+                  round_objective_scale, i, solver_index,
+                  round_partition_count, round_total_iteration, step_size,
+                  elapsed,
+                  integer_to_double(*lower_result) / round_objective_scale);
+              std::fflush(stderr);
+            }
           });
         }
         thread_pool_.wait();

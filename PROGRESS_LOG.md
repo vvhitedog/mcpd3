@@ -550,3 +550,15 @@
 - Added diagnostics and worker/native-DD assertions proving the marker array
   is mapped. Multi-scale resident/file-backed state trajectories remain exact.
 - MCPD3 passes 2/2 tests, MCPD4 passes 8/8, and Phase passes 58/58.
+
+## 2026-07-21 02:18 PDT - Per-partition native solve progress
+
+- Added opt-in `MCPD3_PROGRESS` events immediately before and after every
+  local partition maxflow. Each event identifies the objective scale, DD
+  iteration, partition index, partition count, and step size; completion also
+  reports that partition's maxflow wall time and lower-bound contribution.
+- A one-thread regression proves the observable execution order is partition
+  0 start/completion followed by partition 1 start/completion. This makes a
+  memory-bounded sequential handoff visible without waiting for the aggregate
+  DD-round event.
+- The complete MCPD3 suite passes 2/2 in Release mode.
