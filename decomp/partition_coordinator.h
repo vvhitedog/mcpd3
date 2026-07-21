@@ -329,7 +329,7 @@ public:
             const auto count = static_cast<std::size_t>(
                 package_local_node_counts_[package_index]);
             workers_[worker_index]->copyFullLabels(
-                packages_[package_index].partition_id,
+                packages_[package_index].partition_id, /*offset=*/0,
                 count == 0 ? nullptr : labels.begin() + offsets[package_index],
                 count);
           }

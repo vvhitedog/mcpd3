@@ -224,9 +224,15 @@ public:
     throw std::runtime_error(
         "partition worker does not support capacity replacement");
   }
-  virtual void copyFullLabels(int partition_id, NodeLabel *destination,
-                              std::size_t count) {
+  virtual std::size_t fullLabelCount(int partition_id) const {
     (void)partition_id;
+    throw std::runtime_error(
+        "partition worker does not support bounded label recovery");
+  }
+  virtual void copyFullLabels(int partition_id, std::size_t offset,
+                              NodeLabel *destination, std::size_t count) {
+    (void)partition_id;
+    (void)offset;
     (void)destination;
     (void)count;
     throw std::runtime_error(
@@ -363,21 +369,28 @@ public:
         update.flow_scale_denominator);
   }
 
-  void copyFullLabels(int partition_id, NodeLabel *destination,
-                      std::size_t count) override {
+  std::size_t fullLabelCount(int partition_id) const override {
+    return static_cast<std::size_t>(
+        loadedPartitionById(partition_id).local_node_count);
+  }
+
+  void copyFullLabels(int partition_id, std::size_t offset,
+                      NodeLabel *destination, std::size_t count) override {
     const auto &loaded = loadedPartitionById(partition_id);
-    if (count != static_cast<std::size_t>(loaded.local_node_count)) {
-      throw std::runtime_error("full label destination count mismatch");
+    const auto total = static_cast<std::size_t>(loaded.local_node_count);
+    if (offset > total || count > total - offset) {
+      throw std::runtime_error("full label range is outside partition");
     }
     if (count != 0 && destination == nullptr) {
       throw std::runtime_error("full label destination must not be null");
     }
-    for (std::size_t local_index = 0; local_index < count; ++local_index) {
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto local_index = offset + index;
       const int global_node_id =
           loaded.local_to_global.empty()
               ? static_cast<int>(local_index)
               : loaded.local_to_global[local_index];
-      destination[local_index] = NodeLabel{
+      destination[index] = NodeLabel{
           global_node_id, static_cast<int>(local_index),
           loaded.solver->getMinCutSolution(static_cast<int>(local_index))};
     }
@@ -747,8 +760,17 @@ public:
     std::filesystem::remove(stored.warm_state_path, error);
   }
 
-  void copyFullLabels(int partition_id, NodeLabel *destination,
-                      std::size_t count) override {
+  std::size_t fullLabelCount(int partition_id) const override {
+    auto find_iter = partitions_.find(partition_id);
+    if (find_iter == partitions_.end()) {
+      throw std::runtime_error("unknown partition id " +
+                               std::to_string(partition_id));
+    }
+    return static_cast<std::size_t>(find_iter->second.local_node_count);
+  }
+
+  void copyFullLabels(int partition_id, std::size_t offset,
+                      NodeLabel *destination, std::size_t count) override {
     auto find_iter = partitions_.find(partition_id);
     if (find_iter == partitions_.end()) {
       throw std::runtime_error("unknown partition id " +
@@ -756,7 +778,7 @@ public:
     }
     auto &stored = find_iter->second;
     auto *worker = materializePartition(&stored);
-    worker->copyFullLabels(partition_id, destination, count);
+    worker->copyFullLabels(partition_id, offset, destination, count);
     stored.last_used = ++use_clock_;
   }
 

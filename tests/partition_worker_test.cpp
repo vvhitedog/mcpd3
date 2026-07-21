@@ -585,7 +585,8 @@ void inProcessPartitionWorkerReturnsFullLabelsOnRequest() {
           "full labels should match the worker min-cut solution");
 
   std::vector<mcpd3::NodeLabel> copied_labels(2);
-  worker.copyFullLabels(package.partition_id, copied_labels.data(),
+  worker.copyFullLabels(package.partition_id, /*offset=*/0,
+                        copied_labels.data(),
                         copied_labels.size());
   require(copied_labels[0].global_node_id == 10 &&
               copied_labels[0].local_index == 0 &&
@@ -596,15 +597,27 @@ void inProcessPartitionWorkerReturnsFullLabelsOnRequest() {
           "bounded label recovery should copy the current solved labeling");
   requireThrows(
       [&] {
-        worker.copyFullLabels(package.partition_id, copied_labels.data(), 1);
+        worker.copyFullLabels(package.partition_id, /*offset=*/2,
+                              copied_labels.data(), 1);
       },
-      "bounded label recovery should reject a wrong destination count");
+      "bounded label recovery should reject an out-of-range destination");
   requireThrows(
-      [&] { worker.copyFullLabels(package.partition_id, nullptr, 2); },
+      [&] {
+        worker.copyFullLabels(package.partition_id, /*offset=*/0, nullptr, 2);
+      },
       "bounded label recovery should reject a null destination");
   requireThrows(
-      [&] { worker.copyFullLabels(/*partition_id=*/999, nullptr, 0); },
+      [&] {
+        worker.copyFullLabels(/*partition_id=*/999, /*offset=*/0, nullptr, 0);
+      },
       "bounded label recovery should reject an unknown partition");
+  require(worker.fullLabelCount(package.partition_id) == 2,
+          "worker should report its exact full label count");
+  mcpd3::NodeLabel second_label;
+  worker.copyFullLabels(package.partition_id, /*offset=*/1, &second_label, 1);
+  require(second_label.global_node_id == 20 && second_label.local_index == 1 &&
+              second_label.label == full_result.full_labels[1].label,
+          "bounded label recovery should support partial ranges");
 }
 
 long countWorkerDisagreements(

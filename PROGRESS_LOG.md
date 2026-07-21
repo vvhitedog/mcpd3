@@ -490,8 +490,9 @@
 ## 2026-07-20 23:44 PDT - Backing-preserving final-label recovery
 
 - Added a shared worker contract that copies the current solved partition
-  labeling into a caller-provided bounded destination. It does not solve again,
-  reconstruct the worker, or allocate a partition-sized result vector.
+  labeling by validated offset/count ranges into caller-provided bounded
+  destinations. It does not solve again, reconstruct the worker, or allocate a
+  partition-sized result vector.
 - Final coordinator recovery still performs the same local solve at the final
   alpha and regularization state, then copies worker-owned labels in parallel
   and package order into one configurable `SolverArray<NodeLabel>`.
