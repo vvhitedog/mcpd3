@@ -348,6 +348,7 @@ public:
     bool partition_labels_file_backed = false;
     bool partition_labels_generated_in_backing_store = false;
     bool partition_label_generation_was_file_backed = false;
+    bool partition_validation_was_file_backed = false;
     bool original_topology_file_backed = false;
     bool original_capacities_file_backed = false;
     bool arc_locations_file_backed = false;
@@ -371,6 +372,8 @@ public:
         partition_labels_generated_in_backing_store_;
     diagnostics.partition_label_generation_was_file_backed =
         partition_label_generation_was_file_backed_;
+    diagnostics.partition_validation_was_file_backed =
+        partition_validation_was_file_backed_;
     diagnostics.original_topology_file_backed = original_arcs_.isFileBacked();
     diagnostics.original_capacities_file_backed =
         original_arc_capacities_.isFileBacked() &&
@@ -408,13 +411,22 @@ public:
     return diagnostics;
   }
 
-  std::vector<int> getAgreedGlobalLabels() const {
-    requireConstructedSolvers("getAgreedGlobalLabels");
+  void copyAgreedGlobalLabels(int *destination, std::size_t count) const {
+    requireConstructedSolvers("copyAgreedGlobalLabels");
     if (last_disagreement_count_ != 0) {
       throw std::runtime_error(
           "global labels require partition agreement");
     }
-    std::vector<int> labels(static_cast<size_t>(nnode_), -1);
+    if (count != static_cast<std::size_t>(nnode_)) {
+      throw std::runtime_error(
+          "global label destination size does not match node count");
+    }
+    if (count != 0 && destination == nullptr) {
+      throw std::runtime_error("global label destination is null");
+    }
+    if (count != 0) {
+      std::fill(destination, destination + count, -1);
+    }
     for (size_t partition = 0; partition < min_cut_sub_graphs_.size();
          ++partition) {
       const auto &local_to_global =
@@ -427,7 +439,7 @@ public:
         const int global = local_to_global[local];
         const int label = solvers_[partition]->getMinCutSolution(
             static_cast<int>(local));
-        int &assigned = labels[static_cast<size_t>(global)];
+        int &assigned = destination[static_cast<size_t>(global)];
         if (assigned != -1 && assigned != label) {
           throw std::runtime_error(
               "partition labels disagree during global recovery");
@@ -435,7 +447,14 @@ public:
         assigned = label;
       }
     }
-    std::replace(labels.begin(), labels.end(), -1, 0);
+    if (count != 0) {
+      std::replace(destination, destination + count, -1, 0);
+    }
+  }
+
+  std::vector<int> getAgreedGlobalLabels() const {
+    std::vector<int> labels(static_cast<size_t>(nnode_));
+    copyAgreedGlobalLabels(labels.data(), labels.size());
     return labels;
   }
   std::vector<std::uint64_t> getArcFlowUpdateCounts() const {
@@ -1922,15 +1941,19 @@ private:
   }
 
   template <typename PartitionContainer>
-  void validateAndReportPartition(const PartitionContainer &partitions) const {
+  void validateAndReportPartition(const PartitionContainer &partitions) {
     if (static_cast<int>(partitions.size()) != nnode_) {
       throw std::runtime_error("partition vector size does not match node count");
     }
 
     std::vector<long> part_node_counts(npartition_, 0);
     std::vector<long> part_arc_counts(npartition_, 0);
-    std::vector<unsigned char> boundary_nodes(nnode_, 0);
-    std::vector<unsigned char> constrained_nodes(nnode_, 0);
+    constexpr unsigned char kBoundaryNode = 1U << 0;
+    constexpr unsigned char kConstrainedNode = 1U << 1;
+    SolverArray<unsigned char> node_flags(
+        static_cast<std::size_t>(nnode_), static_cast<unsigned char>(0),
+        options_.solver_storage, "partition_validation_node_flags");
+    partition_validation_was_file_backed_ = node_flags.isFileBacked();
 
     for (int node = 0; node < nnode_; ++node) {
       const int part = partitions[node];
@@ -1957,18 +1980,18 @@ private:
       ++part_arc_counts[s_part];
       if (s_part != t_part) {
         ++crossing_edges;
-        if (!boundary_nodes[s]) {
-          boundary_nodes[s] = 1;
+        if ((node_flags[static_cast<std::size_t>(s)] & kBoundaryNode) == 0) {
+          node_flags[static_cast<std::size_t>(s)] |= kBoundaryNode;
           ++boundary_node_count;
         }
-        if (!boundary_nodes[t]) {
-          boundary_nodes[t] = 1;
+        if ((node_flags[static_cast<std::size_t>(t)] & kBoundaryNode) == 0) {
+          node_flags[static_cast<std::size_t>(t)] |= kBoundaryNode;
           ++boundary_node_count;
         }
         // This mirrors initializeDecomposition(): after endpoint ordering, the
         // arc belongs to s_part and t becomes the constrained clone node.
-        if (!constrained_nodes[t]) {
-          constrained_nodes[t] = 1;
+        if ((node_flags[static_cast<std::size_t>(t)] & kConstrainedNode) == 0) {
+          node_flags[static_cast<std::size_t>(t)] |= kConstrainedNode;
           ++constrained_node_count;
         }
       }
@@ -2738,6 +2761,7 @@ private:
   long objective_scale_promotion_count_;
   bool partition_labels_generated_in_backing_store_ = false;
   bool partition_label_generation_was_file_backed_ = false;
+  bool partition_validation_was_file_backed_ = false;
   std::size_t partition_package_zero_copy_transfer_count_ = 0;
   long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;

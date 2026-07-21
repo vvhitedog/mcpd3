@@ -2343,8 +2343,24 @@ void nativeDdRecoversGlobalLabelsWithoutPartitionPackages() {
 
   require(direct.getLastDisagreementCount() == 0,
           "package-free native DD must solve to agreement");
-  require(direct.getAgreedGlobalLabels() == packaged.getAgreedGlobalLabels(),
+  const auto packaged_labels = packaged.getAgreedGlobalLabels();
+  require(direct.getAgreedGlobalLabels() == packaged_labels,
           "package-free label recovery must match package-backed recovery");
+  std::vector<int> direct_labels(packaged_labels.size(), -1);
+  direct.copyAgreedGlobalLabels(direct_labels.data(), direct_labels.size());
+  require(direct_labels == packaged_labels,
+          "bounded global label copy must match vector recovery");
+  requireThrows(
+      [&] {
+        direct.copyAgreedGlobalLabels(direct_labels.data(),
+                                     direct_labels.size() - 1);
+      },
+      "global label copy must reject a mismatched destination size");
+  requireThrows(
+      [&] {
+        direct.copyAgreedGlobalLabels(nullptr, direct_labels.size());
+      },
+      "global label copy must reject a null nonempty destination");
   requireThrows([&] { (void)direct.getPartitionPackages(); },
                 "disabled package export must remain inaccessible");
 }
@@ -2389,6 +2405,8 @@ void fileBackedNativeDdBacksPersistentGlobalMetadata() {
           "retained global capacities must use file-backed storage");
   require(diagnostics.partition_labels_file_backed,
           "partition labels must use file-backed storage");
+  require(diagnostics.partition_validation_was_file_backed,
+          "partition validation node markers must use file-backed storage");
   require(diagnostics.arc_locations_file_backed,
           "arc locations must use file-backed storage");
   require(diagnostics.terminal_locations_file_backed,
@@ -2405,8 +2423,13 @@ void fileBackedNativeDdBacksPersistentGlobalMetadata() {
           "global metadata must report mapped bytes");
 
   decomposition.solve();
-  require(decomposition.getAgreedGlobalLabels().size() == 8,
-          "file-backed metadata must support global label recovery");
+  mcpd3::SolverArray<int> recovered_labels(
+      8, options.solver_storage, "direct_global_label_recovery");
+  decomposition.copyAgreedGlobalLabels(recovered_labels.data(),
+                                       recovered_labels.size());
+  require(recovered_labels.isFileBacked() &&
+              recovered_labels.equals(decomposition.getAgreedGlobalLabels()),
+          "global labels must recover directly into file-backed storage");
   std::filesystem::remove_all(scratch);
 }
 

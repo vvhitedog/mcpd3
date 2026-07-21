@@ -530,3 +530,14 @@
 - Tests prove invalid requests cannot partially release state, released IDs
   become unknown, unaffected partitions retain their exact objective, and disk
   payloads are deleted. The complete MCPD3 suite passes 2/2.
+
+## 2026-07-21 01:12 PDT - Mapped validation and bounded global recovery
+
+- Replaced two node-sized resident partition-validation marker arrays with one
+  bit-packed `SolverArray` that follows the configured storage policy.
+- Added bounded agreed-label recovery into caller-owned memory, preserving the
+  vector-returning compatibility API while allowing downstream code to write
+  directly into mapped output without a full resident staging copy.
+- Covered mapped validation, direct mapped recovery, size mismatch, null
+  destination, and compatibility behavior. The complete MCPD3 suite passes
+  2/2.
