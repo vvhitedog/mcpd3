@@ -170,6 +170,12 @@ Graph<captype, tcaptype, flowtype>::Graph(
   if (edge_num_max < 16)
     edge_num_max = 16;
 
+  if (storage_options.mode != mcpd3::SolverStorageMode::RESIDENT) {
+    changed_arc_marks = mcpd3::SolverArray<unsigned char>(
+        static_cast<std::size_t>(edge_num_max), static_cast<unsigned char>(0),
+        storage_options, "bk_changed_arc_marks");
+  }
+
   nodes_mmap_bytes = node_num_max * sizeof(node);
   arcs_mmap_bytes = 2 * edge_num_max * sizeof(arc);
   if constexpr (std::is_trivially_copyable_v<node>) {

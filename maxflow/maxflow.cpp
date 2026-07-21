@@ -465,12 +465,13 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow(
     bool reuse_trees, std::vector<int> &changed_arc_indices,
     Block<node_id> *_changed_list) {
   const size_t edge_count = static_cast<size_t>(arc_last - arcs) / 2;
-  if (changed_arc_marks.size() != edge_count) {
+  if (changed_arc_marks.size() < edge_count) {
     changed_arc_marks.assign(edge_count, 0);
     changed_arc_generation = 0;
   }
   if (++changed_arc_generation == 0) {
-    std::fill(changed_arc_marks.begin(), changed_arc_marks.end(), 0);
+    std::fill(changed_arc_marks.begin(),
+              changed_arc_marks.begin() + edge_count, 0);
     ++changed_arc_generation;
   }
   changed_arc_indices.clear();

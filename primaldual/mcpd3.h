@@ -92,6 +92,7 @@ public:
     bool labels_file_backed = false;
     bool bk_nodes_file_backed = false;
     bool bk_arcs_file_backed = false;
+    bool bk_changed_arc_marks_file_backed = false;
     bool last_capacity_replacement_flow_scratch_file_backed = false;
     std::size_t file_backed_bytes = 0;
   };
@@ -561,6 +562,8 @@ public:
         x_.isFileBacked() && incremental_changed_node_flags_.isFileBacked();
     diagnostics.bk_nodes_file_backed = maxflow_graph_.nodesAreFileBacked();
     diagnostics.bk_arcs_file_backed = maxflow_graph_.arcsAreFileBacked();
+    diagnostics.bk_changed_arc_marks_file_backed =
+        maxflow_graph_.changedArcMarksAreFileBacked();
     diagnostics.last_capacity_replacement_flow_scratch_file_backed =
         last_capacity_replacement_flow_scratch_file_backed_;
     diagnostics.file_backed_bytes =

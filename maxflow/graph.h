@@ -200,9 +200,13 @@ public:
                                              int edge_num_max);
   bool nodesAreFileBacked() const { return nodes_file_backed; }
   bool arcsAreFileBacked() const { return arcs_file_backed; }
+  bool changedArcMarksAreFileBacked() const {
+    return changed_arc_marks.isFileBacked();
+  }
   std::size_t fileBackedBytes() const {
     return (nodes_file_backed ? nodes_mmap_bytes : 0) +
-           (arcs_file_backed ? arcs_mmap_bytes : 0);
+           (arcs_file_backed ? arcs_mmap_bytes : 0) +
+           changed_arc_marks.fileBackedBytes();
   }
 
   struct ReusableState {
@@ -359,7 +363,7 @@ private:
       *node_max; // node_last = nodes+node_num, node_max = nodes+node_num_max;
   arc *arcs, *arc_last,
       *arc_max; // arc_last = arcs+2*edge_num, arc_max = arcs+2*edge_num_max;
-  std::vector<unsigned char> changed_arc_marks;
+  mcpd3::SolverArray<unsigned char> changed_arc_marks;
   unsigned char changed_arc_generation = 0;
   bool nodes_mmap_backed;
   bool arcs_mmap_backed;

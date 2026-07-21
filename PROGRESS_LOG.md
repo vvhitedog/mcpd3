@@ -541,3 +541,12 @@
 - Covered mapped validation, direct mapped recovery, size mismatch, null
   destination, and compatibility behavior. The complete MCPD3 suite passes
   2/2.
+
+## 2026-07-21 01:21 PDT - File-backed BK changed-arc markers
+
+- Moved BK's edge-sized changed-arc deduplication marker array under the
+  solver storage policy. File-backed solvers reserve it in a mapped file;
+  resident one-shot BK retains the previous lazy allocation behavior.
+- Added diagnostics and worker/native-DD assertions proving the marker array
+  is mapped. Multi-scale resident/file-backed state trajectories remain exact.
+- MCPD3 passes 2/2 tests, MCPD4 passes 8/8, and Phase passes 58/58.

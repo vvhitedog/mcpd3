@@ -1985,6 +1985,8 @@ void inProcessWorkerFileBacksEveryPersistentSolverArray() {
   require(diagnostics.bk_nodes_file_backed &&
               diagnostics.bk_arcs_file_backed,
           "worker BK state must be file-backed");
+  require(diagnostics.bk_changed_arc_marks_file_backed,
+          "worker BK changed-arc marks must be file-backed");
   require(diagnostics.file_backed_bytes > 0,
           "worker must report file-backed bytes");
 
@@ -2157,6 +2159,8 @@ void fileBackedNativeDdMatchesResidentStateExactly() {
             "file-backed DD BK nodes must use a file mapping");
     require(diagnostic.bk_arcs_file_backed,
             "file-backed DD BK residual arcs must use a file mapping");
+    require(diagnostic.bk_changed_arc_marks_file_backed,
+            "file-backed DD BK changed-arc marks must use a file mapping");
     require(diagnostic.file_backed_bytes > 0,
             "file-backed DD must report mapped state bytes");
   }
