@@ -205,6 +205,11 @@ public:
   virtual void loadPartition(PartitionPackage &&package) {
     loadPartition(static_cast<const PartitionPackage &>(package));
   }
+  virtual void unloadPartitions(const std::vector<int> &partition_ids) {
+    (void)partition_ids;
+    throw std::runtime_error(
+        "partition worker does not support partition unloading");
+  }
   virtual PartitionSolveResult solveRound(
       const PartitionSolveRequest &request) = 0;
   virtual std::vector<PartitionSolveResult> solveRoundBatch(
@@ -303,6 +308,27 @@ public:
 
     for (const auto &binding : loaded.constraint_endpoints) {
       addConstraintEndpoint(&loaded, binding);
+    }
+  }
+
+  void unloadPartitions(const std::vector<int> &partition_ids) override {
+    if (partition_ids.empty()) {
+      throw std::runtime_error(
+          "partition unload requires at least one partition id");
+    }
+    std::unordered_set<int> seen;
+    for (const int partition_id : partition_ids) {
+      if (!seen.insert(partition_id).second) {
+        throw std::runtime_error("duplicate partition unload id " +
+                                 std::to_string(partition_id));
+      }
+      if (partitions_.find(partition_id) == partitions_.end()) {
+        throw std::runtime_error("unknown partition id " +
+                                 std::to_string(partition_id));
+      }
+    }
+    for (const int partition_id : partition_ids) {
+      partitions_.erase(partition_id);
     }
   }
 
@@ -717,6 +743,41 @@ public:
     writePackagePayload(stored.path, package);
     stored.local_to_global = std::move(package.local_to_global);
     partitions_.emplace(stored.partition_id, std::move(stored));
+  }
+
+  void unloadPartitions(const std::vector<int> &partition_ids) override {
+    if (partition_ids.empty()) {
+      throw std::runtime_error(
+          "partition unload requires at least one partition id");
+    }
+    std::unordered_set<int> seen;
+    for (const int partition_id : partition_ids) {
+      if (!seen.insert(partition_id).second) {
+        throw std::runtime_error("duplicate partition unload id " +
+                                 std::to_string(partition_id));
+      }
+      if (partitions_.find(partition_id) == partitions_.end()) {
+        throw std::runtime_error("unknown partition id " +
+                                 std::to_string(partition_id));
+      }
+    }
+    for (const int partition_id : partition_ids) {
+      auto found = partitions_.find(partition_id);
+      evictResident(&found->second, /*persist_warm_state=*/false);
+      std::error_code package_error;
+      std::filesystem::remove(found->second.path, package_error);
+      std::error_code warm_error;
+      std::filesystem::remove(found->second.warm_state_path, warm_error);
+      partitions_.erase(found);
+      if (package_error) {
+        throw std::runtime_error("failed to remove partition payload: " +
+                                 package_error.message());
+      }
+      if (warm_error) {
+        throw std::runtime_error("failed to remove partition warm state: " +
+                                 warm_error.message());
+      }
+    }
   }
 
   PartitionSolveResult solveRound(

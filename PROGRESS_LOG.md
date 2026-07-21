@@ -518,3 +518,15 @@
   storage and avoiding a partition-sized copy used only to rewrite an ID.
 - Existing same-ID refresh remains unchanged and delegates to the targeted
   operation. MCPD3 passes both CTest targets in Release mode.
+## 2026-07-21 01:10 PDT - Explicit partition lifetime
+
+- Added an atomic partition-unload operation to the common worker contract.
+  Empty, duplicate, and partly unknown selections fail before any partition is
+  released.
+- The native in-process worker destroys the selected persistent solver state
+  while preserving unrelated partitions. The historical disk-payload worker
+  also removes selected package and warm-state files without changing solve
+  behavior for retained partitions.
+- Tests prove invalid requests cannot partially release state, released IDs
+  become unknown, unaffected partitions retain their exact objective, and disk
+  payloads are deleted. The complete MCPD3 suite passes 2/2.

@@ -504,6 +504,74 @@ void inProcessWorkerScopesObjectiveScalingToSelectedPartitions() {
 
 }
 
+void partitionWorkersUnloadSelectedPartitionsAtomically() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/40,
+                                       /*terminal_capacity=*/3);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/41,
+                                       /*terminal_capacity=*/5);
+
+  mcpd3::InProcessPartitionWorker in_process;
+  in_process.loadPartition(package0);
+  in_process.loadPartition(package1);
+  requireThrows([&] { in_process.unloadPartitions({}); },
+                "partition unload must reject an empty selection");
+  requireThrows([&] { in_process.unloadPartitions({0, 0}); },
+                "partition unload must reject duplicate partition ids");
+  requireThrows([&] { in_process.unloadPartitions({0, 99}); },
+                "partition unload must reject an unknown partition id");
+
+  mcpd3::PartitionSolveRequest request;
+  request.partition_id = 0;
+  (void)in_process.solveRound(request);
+  request.partition_id = 1;
+  const auto retained = in_process.solveRound(request);
+
+  in_process.unloadPartitions({0});
+  request.partition_id = 0;
+  requireThrows([&] { (void)in_process.solveRound(request); },
+                "an unloaded in-process partition must become unknown");
+  request.partition_id = 1;
+  require(in_process.solveRound(request).lower_bound == retained.lower_bound,
+          "unloading one partition must preserve the other partition");
+
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-unload-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  mcpd3::StreamingPartitionWorker::Options options;
+  options.storage_directory = scratch.string();
+  options.remove_storage_on_destroy = false;
+  mcpd3::StreamingPartitionWorker streaming(options);
+  streaming.loadPartition(package0);
+  streaming.loadPartition(package1);
+  require(std::filesystem::exists(scratch / "partition_0.bin") &&
+              std::filesystem::exists(scratch / "partition_1.bin"),
+          "streaming unload test requires both disk payloads");
+  requireThrows([&] { streaming.unloadPartitions({0, 99}); },
+                "streaming unload must validate before deleting payloads");
+  require(std::filesystem::exists(scratch / "partition_0.bin") &&
+              std::filesystem::exists(scratch / "partition_1.bin"),
+          "invalid streaming unload must not partially delete payloads");
+
+  streaming.unloadPartitions({0});
+  require(!std::filesystem::exists(scratch / "partition_0.bin") &&
+              std::filesystem::exists(scratch / "partition_1.bin"),
+          "streaming unload must remove only the selected disk payload");
+  request.partition_id = 0;
+  requireThrows([&] { (void)streaming.solveRound(request); },
+                "an unloaded streaming partition must become unknown");
+  request.partition_id = 1;
+  (void)streaming.solveRound(request);
+  streaming.unloadPartitions({1});
+  require(!std::filesystem::exists(scratch / "partition_1.bin"),
+          "streaming unload must remove the final disk payload");
+  std::filesystem::remove_all(scratch);
+}
+
 struct DirectSolverResult {
   mcpd3::Objective lower_bound;
   int constrained_label;
@@ -6597,6 +6665,7 @@ int main() {
     streamingWorkerMatchesInProcessAcrossEviction();
     streamingWorkerScalesEvictedDiskPayload();
     inProcessWorkerScopesObjectiveScalingToSelectedPartitions();
+    partitionWorkersUnloadSelectedPartitionsAtomically();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     inProcessPartitionWorkerReturnsFullLabelsOnRequest();
     exportedPartitionPackagesMatchDualDecompositionRound();
