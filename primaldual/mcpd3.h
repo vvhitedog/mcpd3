@@ -85,15 +85,33 @@ public:
     std::vector<int> x;
   };
 
+  struct StorageDiagnostics {
+    bool topology_file_backed = false;
+    bool capacity_file_backed = false;
+    bool flow_file_backed = false;
+    bool labels_file_backed = false;
+    bool bk_nodes_file_backed = false;
+    bool bk_arcs_file_backed = false;
+    std::size_t file_backed_bytes = 0;
+  };
+
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<Capacity> arc_capacities,
-                         std::vector<Capacity> terminal_capacities)
-      : nnode_(nnode), narc_(narc), arcs_(std::move(arcs)),
-        arc_capacities_(std::move(arc_capacities)),
-        terminal_capacities_(std::move(terminal_capacities)), v_flow_(narc_, 0),
-        d_flow_(nnode_, 0), x_(nnode_, 0),
-        incremental_changed_node_flags_(nnode_, 0),
-        maxflow_graph_(nnode_, narc_),
+                         std::vector<Capacity> terminal_capacities,
+                         SolverStorageOptions storage_options = {})
+      : nnode_(nnode), narc_(narc),
+        storage_options_(std::move(storage_options)),
+        arcs_(std::move(arcs), storage_options_, "topology"),
+        arc_capacities_(std::move(arc_capacities), storage_options_,
+                        "arc_capacities"),
+        terminal_capacities_(std::move(terminal_capacities), storage_options_,
+                             "terminal_capacities"),
+        v_flow_(narc_, Capacity{0}, storage_options_, "arc_flow"),
+        d_flow_(nnode_, NodeFlow{0}, storage_options_, "node_flow"),
+        x_(nnode_, 0, storage_options_, "labels"),
+        incremental_changed_node_flags_(nnode_, 0, storage_options_,
+                                        "changed_node_flags"),
+        maxflow_graph_(nnode_, narc_, storage_options_),
         is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
         has_solution_(false),
         canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
@@ -112,17 +130,21 @@ public:
             std::enable_if_t<!std::is_same_v<InputCapacity, Capacity>, int> = 0>
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          const std::vector<InputCapacity> &arc_capacities,
-                         const std::vector<InputCapacity> &terminal_capacities)
+                         const std::vector<InputCapacity> &terminal_capacities,
+                         SolverStorageOptions storage_options = {})
       : PrimalDualMinCutSolver(
             nnode, narc, std::move(arcs),
             capacity_vector_from(arc_capacities),
-            capacity_vector_from(terminal_capacities)) {}
+            capacity_vector_from(terminal_capacities),
+            std::move(storage_options)) {}
 
-  PrimalDualMinCutSolver(MinCutGraph min_cut_graph)
+  PrimalDualMinCutSolver(MinCutGraph min_cut_graph,
+                         SolverStorageOptions storage_options = {})
       : PrimalDualMinCutSolver(min_cut_graph.nnode, min_cut_graph.narc,
                                std::move(min_cut_graph.arcs),
                                std::move(min_cut_graph.arc_capacities),
-                               std::move(min_cut_graph.terminal_capacities)) {}
+                               std::move(min_cut_graph.terminal_capacities),
+                               std::move(storage_options)) {}
 
   void setTrackArcFlowUpdates(bool enabled) {
     if (enabled == track_arc_flow_updates_) {
@@ -486,6 +508,26 @@ public:
 
   int getMinCutSolution(int index) const { return x_[index]; }
 
+  StorageDiagnostics getStorageDiagnostics() const {
+    StorageDiagnostics diagnostics;
+    diagnostics.topology_file_backed = arcs_.isFileBacked();
+    diagnostics.capacity_file_backed =
+        arc_capacities_.isFileBacked() && terminal_capacities_.isFileBacked();
+    diagnostics.flow_file_backed =
+        v_flow_.isFileBacked() && d_flow_.isFileBacked();
+    diagnostics.labels_file_backed =
+        x_.isFileBacked() && incremental_changed_node_flags_.isFileBacked();
+    diagnostics.bk_nodes_file_backed = maxflow_graph_.nodesAreFileBacked();
+    diagnostics.bk_arcs_file_backed = maxflow_graph_.arcsAreFileBacked();
+    diagnostics.file_backed_bytes =
+        arcs_.fileBackedBytes() + arc_capacities_.fileBackedBytes() +
+        terminal_capacities_.fileBackedBytes() + v_flow_.fileBackedBytes() +
+        d_flow_.fileBackedBytes() + x_.fileBackedBytes() +
+        incremental_changed_node_flags_.fileBackedBytes() +
+        maxflow_graph_.fileBackedBytes();
+    return diagnostics;
+  }
+
   struct MemoryEstimate {
     std::size_t bk_node_bytes = 0;
     std::size_t bk_arc_bytes = 0;
@@ -550,8 +592,11 @@ public:
       throw std::runtime_error(
           "cannot capture flow warm start from a regularized solve");
     }
-    return FlowWarmStart{arcs_, arc_capacities_, terminal_capacities_,
-                         v_flow_, d_flow_, x_};
+    return FlowWarmStart{arcs_.copyToVector(),
+                         arc_capacities_.copyToVector(),
+                         terminal_capacities_.copyToVector(),
+                         v_flow_.copyToVector(), d_flow_.copyToVector(),
+                         x_.copyToVector()};
   }
 
   void restoreFlowWarmStart(const FlowWarmStart &state) {
@@ -563,7 +608,7 @@ public:
       throw std::runtime_error(
           "flow warm start requires regularization to be disabled");
     }
-    if (state.arcs != arcs_) {
+    if (!arcs_.equals(state.arcs)) {
       throw std::runtime_error("flow warm start graph topology mismatch");
     }
     if (state.arc_capacities.size() != arc_capacities_.size() ||
@@ -593,9 +638,9 @@ public:
       }
     }
 
-    v_flow_ = state.v_flow;
-    d_flow_ = state.d_flow;
-    x_ = state.x;
+    v_flow_.replace(state.v_flow);
+    d_flow_.replace(state.d_flow);
+    x_.replace(state.x);
     has_solution_ = true;
   }
 
@@ -655,12 +700,12 @@ public:
       }
     }
 
-    arc_capacities_ = arc_capacities;
-    terminal_capacities_ = terminal_capacities;
+    arc_capacities_.replace(arc_capacities);
+    terminal_capacities_.replace(terminal_capacities);
     if (!preserve_flow_state) {
       std::fill(v_flow_.begin(), v_flow_.end(), 0);
     } else if (!replacement_flow.empty()) {
-      v_flow_ = std::move(replacement_flow);
+      v_flow_.replace(std::move(replacement_flow));
     }
     std::fill(d_flow_.begin(), d_flow_.end(), 0);
     for (int i = 0; i < narc_; ++i) {
@@ -704,9 +749,9 @@ public:
 
   WarmState captureWarmState() const {
     WarmState state;
-    state.v_flow = v_flow_;
-    state.d_flow = d_flow_;
-    state.x = x_;
+    state.v_flow.assign(v_flow_.begin(), v_flow_.end());
+    state.d_flow.assign(d_flow_.begin(), d_flow_.end());
+    state.x.assign(x_.begin(), x_.end());
     state.is_first_iteration = is_first_iteration_;
     state.is_first_iteration_of_new_scale = is_first_iteration_of_new_scale_;
     state.has_solution = has_solution_;
@@ -733,9 +778,9 @@ public:
         state.x.size() != static_cast<size_t>(nnode_)) {
       throw std::runtime_error("solver warm state shape does not match graph");
     }
-    v_flow_ = state.v_flow;
-    d_flow_ = state.d_flow;
-    x_ = state.x;
+    v_flow_.replace(state.v_flow);
+    d_flow_.replace(state.d_flow);
+    x_.replace(state.x);
     is_first_iteration_ = state.is_first_iteration;
     is_first_iteration_of_new_scale_ = state.is_first_iteration_of_new_scale;
     has_solution_ = state.has_solution;
@@ -1041,11 +1086,11 @@ private:
       const auto decode_time = time_lambda([&] {
         ++reference_decode_count_;
         updateMinCutInitial();
-        if (x_ == reference_cut_labels_) {
+        if (x_.equals(reference_cut_labels_)) {
           ++reference_current_cut_hit_count_;
         } else if (isReferenceCutOptimal()) {
           ++reference_exact_hit_count_;
-          x_ = reference_cut_labels_;
+          x_.replace(reference_cut_labels_);
         } else if (reference_cut_selection_ ==
                    ReferenceCutSelection::CLOSEST_EXACT) {
           ++reference_closure_count_;
@@ -1592,19 +1637,20 @@ private:
    */
   int nnode_;
   int narc_;
-  std::vector<int> arcs_;
-  std::vector<Capacity> arc_capacities_;
-  std::vector<Capacity> terminal_capacities_;
+  SolverStorageOptions storage_options_;
+  SolverArray<int> arcs_;
+  SolverArray<Capacity> arc_capacities_;
+  SolverArray<Capacity> terminal_capacities_;
 
   /**
    * data structures needed for solving primal dual problem
    */
-  std::vector<Capacity> v_flow_; // flow on the arcs
+  SolverArray<Capacity> v_flow_; // flow on the arcs
   std::vector<std::uint64_t> arc_flow_update_counts_;
   bool track_arc_flow_updates_ = false;
-  std::vector<NodeFlow> d_flow_; // flow balance on the nodes
-  std::vector<int> x_;      // mincut solution
-  std::vector<unsigned char> incremental_changed_node_flags_;
+  SolverArray<NodeFlow> d_flow_; // flow balance on the nodes
+  SolverArray<int> x_;      // mincut solution
+  SolverArray<unsigned char> incremental_changed_node_flags_;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;

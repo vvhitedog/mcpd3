@@ -412,3 +412,22 @@
 - Added branch tests for the bounded callback, negative budgets, explicit
   partition-label use, and malformed/missing/out-of-range partition labels.
   The native partition-worker test suite passes.
+
+## 2026-07-20 17:47 PDT - Native file-backed solver state foundation
+
+- Reset the streaming experiment to MCPD3 commit `fd90bab`, the native solver
+  used by the phase `6206639` aggregate-fast 2048x2048 benchmark baseline.
+- Added an allocation policy beneath `PrimalDualMinCutSolver`; the native
+  `DualDecomposition` schedule, stopping logic, alpha updates, and local-solve
+  dispatch are unchanged.
+- File-backed mode maps local topology, capacities, arc/node flow, labels,
+  changed-node flags, and BK node/residual-arc arrays into files in an explicit
+  scratch directory. Solver objects and mappings remain alive, allowing the OS
+  to page complete warm state without serialization or reconstruction.
+- Added per-round parity tests with momentum and scaled-epsilon regularization.
+  They compare objectives, bounds, disagreements, alpha/last-alpha/momentum,
+  local labels and diagnostics, primal-dual flow, and BK residual/tree state.
+- Added persistent-capacity-refresh parity with proportional flow scaling and
+  invalid/missing file-backed directory branches. The 32-bit and 64-bit CTest
+  suites pass 2/2. The 128-bit suite also passes while explicitly verifying
+  that its nontrivial widened objective type rejects raw file-backed storage.

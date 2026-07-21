@@ -1593,6 +1593,307 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds() {
       /*use_momentum=*/true);
 }
 
+void requireFlowWarmStartsEqual(
+    const mcpd3::DualDecomposition::FlowWarmStart &actual,
+    const mcpd3::DualDecomposition::FlowWarmStart &expected,
+    const std::string &context) {
+  require(actual.constraints.size() == expected.constraints.size(),
+          context + ": constraint count differs");
+  requireConstraintSnapshotsEqual(actual.constraints, expected.constraints,
+                                  context);
+  require(actual.partitions.size() == expected.partitions.size(),
+          context + ": partition count differs");
+  for (size_t partition = 0; partition < actual.partitions.size(); ++partition) {
+    const auto &actual_partition = actual.partitions[partition];
+    const auto &expected_partition = expected.partitions[partition];
+    const std::string partition_context =
+        context + " partition " + std::to_string(partition);
+    require(actual_partition.arcs == expected_partition.arcs,
+            partition_context + ": topology differs");
+    require(actual_partition.arc_capacities ==
+                expected_partition.arc_capacities,
+            partition_context + ": arc capacities differ");
+    require(actual_partition.terminal_capacities ==
+                expected_partition.terminal_capacities,
+            partition_context + ": terminal capacities differ");
+    require(actual_partition.v_flow == expected_partition.v_flow,
+            partition_context + ": arc flow differs");
+    require(actual_partition.d_flow == expected_partition.d_flow,
+            partition_context + ": node flow differs");
+    require(actual_partition.x == expected_partition.x,
+            partition_context + ": labels differ");
+  }
+}
+
+void requireLocalWarmStatesEqual(
+    const std::vector<mcpd3::PrimalDualMinCutSolver::WarmState> &actual,
+    const std::vector<mcpd3::PrimalDualMinCutSolver::WarmState> &expected,
+    const std::string &context) {
+  require(actual.size() == expected.size(),
+          context + ": local warm-state count differs");
+  for (size_t partition = 0; partition < actual.size(); ++partition) {
+    const auto &a = actual[partition];
+    const auto &e = expected[partition];
+    const std::string p = context + " partition " + std::to_string(partition);
+    require(a.v_flow == e.v_flow, p + ": arc flow differs");
+    require(a.d_flow == e.d_flow, p + ": node flow differs");
+    require(a.x == e.x, p + ": labels differ");
+    require(a.is_first_iteration == e.is_first_iteration,
+            p + ": first-iteration state differs");
+    require(a.is_first_iteration_of_new_scale ==
+                e.is_first_iteration_of_new_scale,
+            p + ": new-scale state differs");
+    require(a.has_solution == e.has_solution, p + ": solved state differs");
+    require(a.mincut_value == e.mincut_value, p + ": mincut value differs");
+    require(a.cached_lagrange_multipliers == e.cached_lagrange_multipliers,
+            p + ": cached alpha differs");
+    require(a.cached_last_lagrange_multipliers ==
+                e.cached_last_lagrange_multipliers,
+            p + ": cached last alpha differs");
+    require(a.regularization_str == e.regularization_str,
+            p + ": regularization strength differs");
+    require(a.last_regularization_budget == e.last_regularization_budget,
+            p + ": regularization budget differs");
+    require(a.last_regularization_contribution ==
+                e.last_regularization_contribution,
+            p + ": regularization contribution differs");
+    require(a.last_regularization_anchor_sink_count ==
+                e.last_regularization_anchor_sink_count,
+            p + ": regularization anchor count differs");
+    require(a.last_regularization_active_sink_count ==
+                e.last_regularization_active_sink_count,
+            p + ": regularization active count differs");
+    require(a.regularization_weights == e.regularization_weights,
+            p + ": regularization weights differ");
+    const auto &ag = a.maxflow_graph_state;
+    const auto &eg = e.maxflow_graph_state;
+    require(ag.node_num == eg.node_num && ag.arc_num == eg.arc_num,
+            p + ": BK graph shape differs");
+    require(ag.flow == eg.flow, p + ": BK flow differs");
+    require(ag.maxflow_iteration == eg.maxflow_iteration,
+            p + ": BK iteration differs");
+    require(ag.time == eg.time, p + ": BK timestamp differs");
+    require(ag.node_tr_caps == eg.node_tr_caps,
+            p + ": BK terminal residuals differ");
+    require(ag.node_parent_arc_indices == eg.node_parent_arc_indices,
+            p + ": BK search-tree parents differ");
+    require(ag.node_timestamps == eg.node_timestamps,
+            p + ": BK node timestamps differ");
+    require(ag.node_distances == eg.node_distances,
+            p + ": BK tree distances differ");
+    require(ag.node_is_sink == eg.node_is_sink,
+            p + ": BK tree labels differ");
+    require(ag.arc_residual_capacities == eg.arc_residual_capacities,
+            p + ": BK residual capacities differ");
+  }
+}
+
+constexpr bool fileBackedNativeDdSupported() {
+  return mcpd3::solver_storage_mmap_compatible_v<mcpd3::Capacity> &&
+         mcpd3::solver_storage_mmap_compatible_v<mcpd3::NodeFlow> &&
+         mcpd3::solver_storage_mmap_compatible_v<mcpd3::TerminalResidual> &&
+         mcpd3::solver_storage_mmap_compatible_v<mcpd3::Objective>;
+}
+
+void fileBackedNativeDdMatchesResidentStateExactly() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-native-file-backed-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+
+  auto resident_options = makeParityDualOptions(/*use_momentum=*/true);
+  resident_options.emit_partition_packages = false;
+  resident_options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+
+  auto file_options = resident_options;
+  file_options.solver_storage.mode =
+      mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  file_options.solver_storage.directory = scratch.string();
+
+  if constexpr (!fileBackedNativeDdSupported()) {
+    requireThrows(
+        [&] {
+          mcpd3::DualDecomposition unsupported(
+              /*npartition=*/4, makeParityFixtureGraph(), file_options);
+        },
+        "file-backed DD must reject nontrivial capacity types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  auto resident = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), resident_options);
+  auto file_backed = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), file_options);
+
+  const auto diagnostics = file_backed.getLocalSolverStorageDiagnostics();
+  require(diagnostics.size() == 4,
+          "file-backed DD must report one storage record per partition");
+  for (const auto &diagnostic : diagnostics) {
+    require(diagnostic.topology_file_backed,
+            "file-backed DD topology must use a file mapping");
+    require(diagnostic.capacity_file_backed,
+            "file-backed DD capacities must use file mappings");
+    require(diagnostic.flow_file_backed,
+            "file-backed DD primal-dual flow must use file mappings");
+    require(diagnostic.labels_file_backed,
+            "file-backed DD labels must use a file mapping");
+    require(diagnostic.bk_nodes_file_backed,
+            "file-backed DD BK nodes must use a file mapping");
+    require(diagnostic.bk_arcs_file_backed,
+            "file-backed DD BK residual arcs must use a file mapping");
+    require(diagnostic.file_backed_bytes > 0,
+            "file-backed DD must report mapped state bytes");
+  }
+
+  const std::vector<long> step_sizes = {1000, 100, 10, 10, 1, 1, 100};
+  for (size_t round = 0; round < step_sizes.size(); ++round) {
+    resident.runOptimizationScale(/*nstep=*/1, step_sizes[round],
+                                  /*max_cycle_count=*/2,
+                                  /*use_momentum=*/true);
+    file_backed.runOptimizationScale(/*nstep=*/1, step_sizes[round],
+                                     /*max_cycle_count=*/2,
+                                     /*use_momentum=*/true);
+    const std::string context =
+        "file-backed parity round " + std::to_string(round + 1);
+    require(resident.getLastOriginalObjectiveRaw() ==
+                file_backed.getLastOriginalObjectiveRaw(),
+            context + ": original objective differs");
+    require(resident.getLastCertifiedLowerBoundRaw() ==
+                file_backed.getLastCertifiedLowerBoundRaw(),
+            context + ": certified lower bound differs");
+    require(resident.getLastRegularizedObjectiveRaw() ==
+                file_backed.getLastRegularizedObjectiveRaw(),
+            context + ": regularized objective differs");
+    require(resident.getLastDisagreementCount() ==
+                file_backed.getLastDisagreementCount(),
+            context + ": disagreement count differs");
+    require(resident.getLastDisagreementNormSq() ==
+                file_backed.getLastDisagreementNormSq(),
+            context + ": disagreement norm differs");
+    require(resident.getLastRegularizationBudget() ==
+                file_backed.getLastRegularizationBudget(),
+            context + ": regularization budget differs");
+    require(resident.getLastRegularizationContribution() ==
+                file_backed.getLastRegularizationContribution(),
+            context + ": regularization contribution differs");
+    requireConstraintSnapshotsEqual(file_backed.getConstraintSnapshots(),
+                                    resident.getConstraintSnapshots(), context);
+    requirePartitionSnapshotsEqual(file_backed.getPartitionSnapshots(),
+                                   resident.getPartitionSnapshots(), context);
+    requireLocalWarmStatesEqual(file_backed.captureLocalSolverWarmStates(),
+                                resident.captureLocalSolverWarmStates(),
+                                context);
+  }
+
+  std::filesystem::remove_all(scratch);
+}
+
+void fileBackedNativeDdPreservesPersistentFlowExactly() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-native-file-backed-persistent-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+
+  auto resident_options = makeParityDualOptions(/*use_momentum=*/true);
+  resident_options.emit_partition_packages = false;
+  resident_options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  resident_options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  auto file_options = resident_options;
+  file_options.solver_storage.mode =
+      mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  file_options.solver_storage.directory = scratch.string();
+
+  if constexpr (!fileBackedNativeDdSupported()) {
+    requireThrows(
+        [&] {
+          mcpd3::DualDecomposition unsupported(
+              /*npartition=*/4, makeParityFixtureGraph(), file_options);
+        },
+        "persistent file-backed DD must reject nontrivial capacity types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  auto resident = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), resident_options);
+  auto file_backed = mcpd3::DualDecomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), file_options);
+  for (const long step : {1000L, 100L, 10L}) {
+    resident.runOptimizationScale(1, step, 2, true);
+    file_backed.runOptimizationScale(1, step, 2, true);
+  }
+  requireFlowWarmStartsEqual(file_backed.captureFlowWarmStart(),
+                             resident.captureFlowWarmStart(),
+                             "before persistent capacity replacement");
+
+  const auto graph = makeParityFixtureGraph();
+  std::vector<mcpd3::Capacity> replacement_arcs = graph.arc_capacities;
+  std::vector<mcpd3::Capacity> replacement_terminals =
+      graph.terminal_capacities;
+  for (auto &capacity : replacement_arcs) {
+    capacity *= 2;
+  }
+  for (auto &capacity : replacement_terminals) {
+    capacity *= 2;
+  }
+  resident.replaceProblemCapacities(replacement_arcs, replacement_terminals,
+                                    /*preserve_alpha_state=*/true,
+                                    /*preserve_flow_state=*/true,
+                                    /*flow_scale_numerator=*/2,
+                                    /*flow_scale_denominator=*/1);
+  file_backed.replaceProblemCapacities(
+      replacement_arcs, replacement_terminals,
+      /*preserve_alpha_state=*/true, /*preserve_flow_state=*/true,
+      /*flow_scale_numerator=*/2, /*flow_scale_denominator=*/1);
+
+  for (const long step : {100L, 10L, 1L}) {
+    resident.runOptimizationScale(1, step, 2, true);
+    file_backed.runOptimizationScale(1, step, 2, true);
+  }
+  requireFlowWarmStartsEqual(file_backed.captureFlowWarmStart(),
+                             resident.captureFlowWarmStart(),
+                             "after persistent capacity replacement");
+  requireConstraintSnapshotsEqual(file_backed.getConstraintSnapshots(),
+                                  resident.getConstraintSnapshots(),
+                                  "persistent file-backed constraints");
+  requirePartitionSnapshotsEqual(file_backed.getPartitionSnapshots(),
+                                 resident.getPartitionSnapshots(),
+                                 "persistent file-backed partitions");
+  requireLocalWarmStatesEqual(file_backed.captureLocalSolverWarmStates(),
+                              resident.captureLocalSolverWarmStates(),
+                              "persistent file-backed local state");
+
+  std::filesystem::remove_all(scratch);
+}
+
+void fileBackedNativeDdRejectsInvalidStorage() {
+  auto options = makeParityDualOptions(/*use_momentum=*/true);
+  options.solver_storage.mode = mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  requireThrows(
+      [&] {
+        mcpd3::DualDecomposition invalid(
+            /*npartition=*/4, makeParityFixtureGraph(), options);
+      },
+      "file-backed DD must require an explicit storage directory");
+
+  options.solver_storage.directory =
+      "/definitely/missing/mcpd3-native-file-backed-test";
+  requireThrows(
+      [&] {
+        mcpd3::DualDecomposition invalid(
+            /*npartition=*/4, makeParityFixtureGraph(), options);
+      },
+      "file-backed DD must reject a missing storage directory");
+}
+
 void directedStreamingDimacsMatchesGeneralReaderValue() {
   const std::string path = "/tmp/mcpd3-directed-streaming-dimacs-test.max";
   {
@@ -5547,6 +5848,9 @@ int main() {
     haloFlowHeatAggregatesEveryLocalEdgeCopy();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
+    fileBackedNativeDdMatchesResidentStateExactly();
+    fileBackedNativeDdPreservesPersistentFlowExactly();
+    fileBackedNativeDdRejectsInvalidStorage();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     disagreementPlateauTrackerRequiresAFullFlatWindow();

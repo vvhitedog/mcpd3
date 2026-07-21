@@ -68,6 +68,7 @@ Vision (ICCV), 2005
 #include <vector>
 
 #include <assert.h>
+#include <io/solverstorage.h>
 // NOTE: in UNIX you need to use -DNDEBUG preprocessor option to supress
 // assert's!!!
 
@@ -101,6 +102,9 @@ public:
   // than needed. Similarly for edges. If you wish to avoid this overhead, you
   // can download version 2.2, where nodes and edges are stored in blocks.
   Graph(int node_num_max, int edge_num_max,
+        void (*err_function)(const char *) = NULL);
+  Graph(int node_num_max, int edge_num_max,
+        const mcpd3::SolverStorageOptions &storage_options,
         void (*err_function)(const char *) = NULL);
 
   // Destructor
@@ -194,6 +198,12 @@ public:
   static std::size_t estimated_arc_array_bytes(int edge_num_max);
   static std::size_t estimated_storage_bytes(int node_num_max,
                                              int edge_num_max);
+  bool nodesAreFileBacked() const { return nodes_file_backed; }
+  bool arcsAreFileBacked() const { return arcs_file_backed; }
+  std::size_t fileBackedBytes() const {
+    return (nodes_file_backed ? nodes_mmap_bytes : 0) +
+           (arcs_file_backed ? arcs_mmap_bytes : 0);
+  }
 
   struct ReusableState {
     int node_num = 0;
@@ -353,6 +363,8 @@ private:
   unsigned char changed_arc_generation = 0;
   bool nodes_mmap_backed;
   bool arcs_mmap_backed;
+  bool nodes_file_backed;
+  bool arcs_file_backed;
   int nodes_mmap_fd;
   int arcs_mmap_fd;
   size_t nodes_mmap_bytes;

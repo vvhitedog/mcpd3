@@ -137,3 +137,15 @@
   DD rounds and Shear from 5,848 to 32,106 rounds without changing either
   certified objective. Keep the capped branch only for explicit compatibility
   experiments.
+
+## 2026-07-20 - Separate coordinator loop for native streaming
+
+- Do not implement MCPD3-N out-of-core execution by exporting partition
+  packages to `PartitionWorkerCoordinator` or by recreating local solvers after
+  eviction. That is a separate DD implementation and changed round counts even
+  when final objectives matched.
+- Do not drop BK residual/search-tree state or primal-dual arc/node flow between
+  PU cuts. The accepted resident baseline relies on persistent solver state.
+- Native out-of-core mode must execute the existing `DualDecomposition` object
+  and differ only in allocation backing. Large persistent arrays, including
+  flow and BK residual state, belong in file-backed mappings that remain live.

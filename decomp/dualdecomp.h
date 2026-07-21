@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <filesystem>
 #include <iostream>
 #include <list>
 #include <limits>
@@ -212,6 +213,7 @@ struct DualDecompositionOptions {
   ReferenceCutSelection reference_cut_selection =
       ReferenceCutSelection::CLOSEST_EXACT;
   long reference_cut_check_interval = 1;
+  SolverStorageOptions solver_storage;
   std::function<void(const DualDecompositionIterationRecord &)>
       iteration_callback;
 };
@@ -502,6 +504,28 @@ public:
       snapshots.push_back(std::move(snapshot));
     }
     return snapshots;
+  }
+
+  std::vector<PrimalDualMinCutSolver::StorageDiagnostics>
+  getLocalSolverStorageDiagnostics() const {
+    requireConstructedSolvers("getLocalSolverStorageDiagnostics");
+    std::vector<PrimalDualMinCutSolver::StorageDiagnostics> diagnostics;
+    diagnostics.reserve(solvers_.size());
+    for (const auto &solver : solvers_) {
+      diagnostics.push_back(solver->getStorageDiagnostics());
+    }
+    return diagnostics;
+  }
+
+  std::vector<PrimalDualMinCutSolver::WarmState>
+  captureLocalSolverWarmStates() const {
+    requireConstructedSolvers("captureLocalSolverWarmStates");
+    std::vector<PrimalDualMinCutSolver::WarmState> states;
+    states.reserve(solvers_.size());
+    for (const auto &solver : solvers_) {
+      states.push_back(solver->captureWarmState());
+    }
+    return states;
   }
 
   struct FlowWarmStart {
@@ -1589,6 +1613,28 @@ private:
       throw std::runtime_error(
           "maximum total iteration count must be non-negative");
     }
+    if (options_.solver_storage.mode ==
+        SolverStorageMode::FILE_BACKED_MMAP) {
+      if (options_.solver_storage.directory.empty()) {
+        throw std::runtime_error(
+            "file-backed solver storage requires an explicit directory");
+      }
+      std::error_code error;
+      const bool is_directory = std::filesystem::is_directory(
+          options_.solver_storage.directory, error);
+      if (error || !is_directory) {
+        throw std::runtime_error(
+            "file-backed solver storage directory does not exist: " +
+            options_.solver_storage.directory);
+      }
+      if (!solver_storage_mmap_compatible_v<Capacity> ||
+          !solver_storage_mmap_compatible_v<NodeFlow> ||
+          !solver_storage_mmap_compatible_v<TerminalResidual> ||
+          !solver_storage_mmap_compatible_v<Objective>) {
+        throw std::runtime_error(
+            "file-backed solver storage requires fixed-width capacity types");
+      }
+    }
     if (!options_.partition_labels.empty()) {
       if (!options_.partition_edge_weights.empty()) {
         throw std::runtime_error(
@@ -2115,7 +2161,7 @@ private:
 
       if (options_.construct_solvers) {
         auto solver = std::make_unique<PrimalDualMinCutSolver>(
-            std::move(min_cut_sub_graph.graph));
+            std::move(min_cut_sub_graph.graph), options_.solver_storage);
         solver->setTrackArcFlowUpdates(options_.track_arc_flow_updates);
         solver->setCanonicalCutSelection(options_.canonical_cut_selection);
         if (!options_.reference_cut_labels.empty()) {

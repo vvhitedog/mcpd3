@@ -23,84 +23,57 @@
 
 namespace {
 
-enum class BKStorageMode {
-  Malloc,
-  FileMmap,
-  AnonymousMmap,
-};
-
-BKStorageMode get_bk_storage_mode() {
+mcpd3::SolverStorageOptions get_bk_storage_options() {
+  mcpd3::SolverStorageOptions options;
   const char *mode = getenv("MCPD3_BK_STORAGE");
   if (mode && mode[0] != '\0') {
     if (strcmp(mode, "malloc") == 0) {
-      return BKStorageMode::Malloc;
+      options.mode = mcpd3::SolverStorageMode::RESIDENT;
+      return options;
     }
     if (strcmp(mode, "file_mmap") == 0) {
-      return BKStorageMode::FileMmap;
+      options.mode = mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+      const char *directory = getenv("MCPD3_BK_MMAP_DIR");
+      options.directory = directory ? directory : "";
+      const char *advice = getenv("MCPD3_BK_MMAP_ADVISE");
+      options.mmap_advice = advice ? advice : "";
+      return options;
     }
     if (strcmp(mode, "anon_mmap") == 0 || strcmp(mode, "anonymous_mmap") == 0) {
-      return BKStorageMode::AnonymousMmap;
+      options.mode = mcpd3::SolverStorageMode::ANONYMOUS_MMAP;
+      const char *advice = getenv("MCPD3_BK_MMAP_ADVISE");
+      options.mmap_advice = advice ? advice : "";
+      return options;
     }
     fprintf(stderr, "unknown MCPD3_BK_STORAGE=%s; using malloc\n", mode);
-    return BKStorageMode::Malloc;
+    return options;
   }
 
   const char *mmap_dir = getenv("MCPD3_BK_MMAP_DIR");
   if (mmap_dir && mmap_dir[0] != '\0') {
-    return BKStorageMode::FileMmap;
+    options.mode = mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+    options.directory = mmap_dir;
   }
-  return BKStorageMode::Malloc;
-}
-
-void advise_bk_mapping(void *ptr, size_t bytes, const char *kind) {
-  const char *advise = getenv("MCPD3_BK_MMAP_ADVISE");
-  if (!advise || advise[0] == '\0' || strcmp(advise, "none") == 0) {
-    return;
-  }
-  int rc = 0;
-  if (strcmp(advise, "willneed") == 0) {
-    rc = madvise(ptr, bytes, MADV_WILLNEED);
-#ifdef MAP_POPULATE
-  } else if (strcmp(advise, "populate") == 0) {
-    // MAP_POPULATE is applied at mmap time. Keep this spelling accepted so
-    // users can combine one environment interface with both mmap sites.
-    rc = madvise(ptr, bytes, MADV_WILLNEED);
-#endif
-#ifdef MLOCK_ONFAULT
-  } else if (strcmp(advise, "lock_onfault") == 0) {
-    rc = mlock2(ptr, bytes, MLOCK_ONFAULT);
-#endif
-  } else if (strcmp(advise, "lock") == 0) {
-    rc = mlock(ptr, bytes);
-  } else if (strcmp(advise, "dontdump") == 0) {
-#ifdef MADV_DONTDUMP
-    rc = madvise(ptr, bytes, MADV_DONTDUMP);
-#endif
-  } else {
-    fprintf(stderr, "unknown MCPD3_BK_MMAP_ADVISE=%s; ignoring\n", advise);
-    return;
-  }
-  if (rc != 0) {
-    fprintf(stderr, "BK mmap advise %s failed for %s array of %zu bytes: %s\n",
-            advise, kind, bytes, strerror(errno));
-  }
+  const char *advice = getenv("MCPD3_BK_MMAP_ADVISE");
+  options.mmap_advice = advice ? advice : "";
+  return options;
 }
 
 void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
-                        bool &is_mmap_backed) {
+                        bool &is_mmap_backed, bool &is_file_backed,
+                        const mcpd3::SolverStorageOptions &storage_options) {
   fd = -1;
   is_mmap_backed = false;
-  const BKStorageMode mode = get_bk_storage_mode();
-  if (mode == BKStorageMode::Malloc) {
+  is_file_backed = false;
+  if (storage_options.mode == mcpd3::SolverStorageMode::RESIDENT) {
     return malloc(bytes);
   }
 
   int mmap_flags = MAP_SHARED;
-  if (mode == BKStorageMode::AnonymousMmap) {
+  if (storage_options.mode == mcpd3::SolverStorageMode::ANONYMOUS_MMAP) {
     mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #ifdef MAP_POPULATE
-    const char *advise = getenv("MCPD3_BK_MMAP_ADVISE");
-    if (advise && strcmp(advise, "populate") == 0) {
+    if (storage_options.mmap_advice == "populate") {
       mmap_flags |= MAP_POPULATE;
     }
 #endif
@@ -111,18 +84,23 @@ void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
       return nullptr;
     }
     is_mmap_backed = true;
-    advise_bk_mapping(ptr, bytes, kind);
+    try {
+      mcpd3::applySolverMmapAdvice(ptr, bytes, storage_options, kind);
+    } catch (...) {
+      munmap(ptr, bytes);
+      throw;
+    }
     return ptr;
   }
 
-  const char *mmap_dir = getenv("MCPD3_BK_MMAP_DIR");
-  if (!mmap_dir || mmap_dir[0] == '\0') {
+  if (storage_options.directory.empty()) {
     fprintf(stderr,
-            "MCPD3_BK_STORAGE=file_mmap requires MCPD3_BK_MMAP_DIR\n");
+            "file-backed BK storage requires an explicit directory\n");
     return nullptr;
   }
 
-  std::string pattern = std::string(mmap_dir) + "/mcpd3_bk_" + kind + "_XXXXXX";
+  std::string pattern =
+      storage_options.directory + "/mcpd3_bk_" + kind + "_XXXXXX";
   fd = mkstemp(pattern.data());
   if (fd == -1) {
     fprintf(stderr, "failed to create BK mmap file %s: %s\n", pattern.c_str(),
@@ -146,7 +124,15 @@ void *allocate_bk_array(size_t bytes, const char *kind, int &fd,
     return nullptr;
   }
   is_mmap_backed = true;
-  advise_bk_mapping(ptr, bytes, kind);
+  is_file_backed = true;
+  try {
+    mcpd3::applySolverMmapAdvice(ptr, bytes, storage_options, kind);
+  } catch (...) {
+    munmap(ptr, bytes);
+    close(fd);
+    fd = -1;
+    throw;
+  }
   return ptr;
 }
 
@@ -168,7 +154,15 @@ void free_bk_array(void *ptr, size_t bytes, int fd, bool is_mmap_backed) {
 template <typename captype, typename tcaptype, typename flowtype>
 Graph<captype, tcaptype, flowtype>::Graph(int node_num_max, int edge_num_max,
                                           void (*err_function)(const char *))
-    : nodes_mmap_backed(false), arcs_mmap_backed(false), nodes_mmap_fd(-1),
+    : Graph(node_num_max, edge_num_max, get_bk_storage_options(), err_function) {}
+
+template <typename captype, typename tcaptype, typename flowtype>
+Graph<captype, tcaptype, flowtype>::Graph(
+    int node_num_max, int edge_num_max,
+    const mcpd3::SolverStorageOptions &storage_options,
+    void (*err_function)(const char *))
+    : nodes_mmap_backed(false), arcs_mmap_backed(false),
+      nodes_file_backed(false), arcs_file_backed(false), nodes_mmap_fd(-1),
       arcs_mmap_fd(-1), nodes_mmap_bytes(0), arcs_mmap_bytes(0), node_num(0),
       nodeptr_block(NULL), error_function(err_function) {
   if (node_num_max < 16)
@@ -180,13 +174,15 @@ Graph<captype, tcaptype, flowtype>::Graph(int node_num_max, int edge_num_max,
   arcs_mmap_bytes = 2 * edge_num_max * sizeof(arc);
   if constexpr (std::is_trivially_copyable_v<node>) {
     nodes = (node *)allocate_bk_array(nodes_mmap_bytes, "nodes", nodes_mmap_fd,
-                                      nodes_mmap_backed);
+                                      nodes_mmap_backed, nodes_file_backed,
+                                      storage_options);
   } else {
     nodes = new (std::nothrow) node[static_cast<size_t>(node_num_max)];
   }
   if constexpr (std::is_trivially_copyable_v<arc>) {
     arcs = (arc *)allocate_bk_array(arcs_mmap_bytes, "arcs", arcs_mmap_fd,
-                                    arcs_mmap_backed);
+                                    arcs_mmap_backed, arcs_file_backed,
+                                    storage_options);
   } else {
     arcs = new (std::nothrow) arc[static_cast<size_t>(2 * edge_num_max)];
   }
