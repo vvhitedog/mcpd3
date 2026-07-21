@@ -92,6 +92,7 @@ public:
     bool labels_file_backed = false;
     bool bk_nodes_file_backed = false;
     bool bk_arcs_file_backed = false;
+    bool last_capacity_replacement_flow_scratch_file_backed = false;
     std::size_t file_backed_bytes = 0;
   };
 
@@ -123,6 +124,37 @@ public:
         last_regularization_budget_(0), last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
         last_regularization_active_sink_count_(0) {
+    initializeMaxflowGraph();
+  }
+
+  PrimalDualMinCutSolver(int nnode, int narc, SolverArray<int> arcs,
+                         SolverArray<Capacity> arc_capacities,
+                         SolverArray<Capacity> terminal_capacities,
+                         SolverStorageOptions storage_options = {})
+      : nnode_(nnode), narc_(narc),
+        storage_options_(std::move(storage_options)), arcs_(std::move(arcs)),
+        arc_capacities_(std::move(arc_capacities)),
+        terminal_capacities_(std::move(terminal_capacities)),
+        v_flow_(narc_, Capacity{0}, storage_options_, "arc_flow"),
+        d_flow_(nnode_, NodeFlow{0}, storage_options_, "node_flow"),
+        x_(nnode_, 0, storage_options_, "labels"),
+        incremental_changed_node_flags_(nnode_, 0, storage_options_,
+                                        "changed_node_flags"),
+        maxflow_graph_(nnode_, narc_, storage_options_),
+        is_first_iteration_(true), is_first_iteration_of_new_scale_(true),
+        has_solution_(false),
+        canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
+        reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
+        force_full_mincut_recompute_(false), maxflow_changed_list_(128),
+        mincut_value_(0), regularization_str_(0),
+        last_regularization_budget_(0), last_regularization_contribution_(0),
+        last_regularization_anchor_sink_count_(0),
+        last_regularization_active_sink_count_(0) {
+    if (arcs_.size() != static_cast<size_t>(2 * narc_) ||
+        arc_capacities_.size() != static_cast<size_t>(2 * narc_) ||
+        terminal_capacities_.size() != static_cast<size_t>(nnode_)) {
+      throw std::invalid_argument("mapped min-cut graph shape mismatch");
+    }
     initializeMaxflowGraph();
   }
 
@@ -519,6 +551,8 @@ public:
         x_.isFileBacked() && incremental_changed_node_flags_.isFileBacked();
     diagnostics.bk_nodes_file_backed = maxflow_graph_.nodesAreFileBacked();
     diagnostics.bk_arcs_file_backed = maxflow_graph_.arcsAreFileBacked();
+    diagnostics.last_capacity_replacement_flow_scratch_file_backed =
+        last_capacity_replacement_flow_scratch_file_backed_;
     diagnostics.file_backed_bytes =
         arcs_.fileBackedBytes() + arc_capacities_.fileBackedBytes() +
         terminal_capacities_.fileBackedBytes() + v_flow_.fileBackedBytes() +
@@ -644,9 +678,10 @@ public:
     has_solution_ = true;
   }
 
-  void validateProblemCapacityReplacement(
-      const std::vector<Capacity> &arc_capacities,
-      const std::vector<Capacity> &terminal_capacities,
+  template <typename ArcCapacityContainer, typename TerminalCapacityContainer>
+  void validateProblemCapacityReplacementFrom(
+      const ArcCapacityContainer &arc_capacities,
+      const TerminalCapacityContainer &terminal_capacities,
       bool preserve_flow_state = true,
       const Objective &flow_scale_numerator = 1,
       const Objective &flow_scale_denominator = 1) const {
@@ -681,31 +716,59 @@ public:
     }
   }
 
-  void replaceProblemCapacities(const std::vector<Capacity> &arc_capacities,
-                                const std::vector<Capacity> &terminal_capacities,
-                                bool preserve_flow_state = true,
-                                const Objective &flow_scale_numerator = 1,
-                                const Objective &flow_scale_denominator = 1) {
-    validateProblemCapacityReplacement(
+  void validateProblemCapacityReplacement(
+      const std::vector<Capacity> &arc_capacities,
+      const std::vector<Capacity> &terminal_capacities,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) const {
+    validateProblemCapacityReplacementFrom(
+        arc_capacities, terminal_capacities, preserve_flow_state,
+        flow_scale_numerator, flow_scale_denominator);
+  }
+
+  void validateProblemCapacityReplacement(
+      const SolverArray<Capacity> &arc_capacities,
+      const SolverArray<Capacity> &terminal_capacities,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) const {
+    validateProblemCapacityReplacementFrom(
+        arc_capacities, terminal_capacities, preserve_flow_state,
+        flow_scale_numerator, flow_scale_denominator);
+  }
+
+  template <typename ArcCapacityContainer, typename TerminalCapacityContainer>
+  void replaceProblemCapacitiesFrom(
+      const ArcCapacityContainer &arc_capacities,
+      const TerminalCapacityContainer &terminal_capacities,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
+    validateProblemCapacityReplacementFrom(
         arc_capacities, terminal_capacities, preserve_flow_state,
         flow_scale_numerator, flow_scale_denominator);
 
-    std::vector<Capacity> replacement_flow;
+    SolverArray<Capacity> replacement_flow;
+    last_capacity_replacement_flow_scratch_file_backed_ = false;
     if (preserve_flow_state &&
         flow_scale_numerator != flow_scale_denominator) {
-      replacement_flow.reserve(v_flow_.size());
-      for (const Capacity &flow : v_flow_) {
-        replacement_flow.push_back(checked_scale_capacity_ratio(
-            flow, flow_scale_numerator, flow_scale_denominator));
+      replacement_flow = SolverArray<Capacity>(
+          v_flow_.size(), storage_options_, "capacity_replacement_flow");
+      last_capacity_replacement_flow_scratch_file_backed_ =
+          replacement_flow.isFileBacked();
+      for (size_t index = 0; index < v_flow_.size(); ++index) {
+        replacement_flow[index] = checked_scale_capacity_ratio(
+            v_flow_[index], flow_scale_numerator, flow_scale_denominator);
       }
     }
 
-    arc_capacities_.replace(arc_capacities);
-    terminal_capacities_.replace(terminal_capacities);
+    arc_capacities_.replaceFrom(arc_capacities);
+    terminal_capacities_.replaceFrom(terminal_capacities);
     if (!preserve_flow_state) {
       std::fill(v_flow_.begin(), v_flow_.end(), 0);
     } else if (!replacement_flow.empty()) {
-      v_flow_.replace(std::move(replacement_flow));
+      v_flow_.replaceFrom(replacement_flow);
     }
     std::fill(d_flow_.begin(), d_flow_.end(), 0);
     for (int i = 0; i < narc_; ++i) {
@@ -731,6 +794,27 @@ public:
     is_first_iteration_of_new_scale_ = true;
     mincut_value_ = 0;
     resetRegularizationDiagnostics();
+  }
+
+  void replaceProblemCapacities(const std::vector<Capacity> &arc_capacities,
+                                const std::vector<Capacity> &terminal_capacities,
+                                bool preserve_flow_state = true,
+                                const Objective &flow_scale_numerator = 1,
+                                const Objective &flow_scale_denominator = 1) {
+    replaceProblemCapacitiesFrom(
+        arc_capacities, terminal_capacities, preserve_flow_state,
+        flow_scale_numerator, flow_scale_denominator);
+  }
+
+  void replaceProblemCapacities(
+      const SolverArray<Capacity> &arc_capacities,
+      const SolverArray<Capacity> &terminal_capacities,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
+    replaceProblemCapacitiesFrom(
+        arc_capacities, terminal_capacities, preserve_flow_state,
+        flow_scale_numerator, flow_scale_denominator);
   }
 
   template <typename InputCapacity,
@@ -1651,6 +1735,7 @@ private:
   SolverArray<NodeFlow> d_flow_; // flow balance on the nodes
   SolverArray<int> x_;      // mincut solution
   SolverArray<unsigned char> incremental_changed_node_flags_;
+  bool last_capacity_replacement_flow_scratch_file_backed_ = false;
   MaxflowGraph maxflow_graph_; // graph used to compute maxflow
   bool is_first_iteration_;
   bool is_first_iteration_of_new_scale_;

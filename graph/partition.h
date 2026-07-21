@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -61,9 +62,10 @@ inline void partition_progress_report(
   std::fflush(stderr);
 }
 
+template <typename ArcContainer>
 inline std::vector<int> basic_graph_partition(int npartition, int narc,
                                               int nnode,
-                                              const std::vector<int> &arc) {
+                                              const ArcContainer &arc) {
   std::vector<int> partitions(nnode);
   int nnode_in_each_partition = (nnode + npartition - 1) / npartition;
   for (int i = 0; i < nnode; ++i) {
@@ -89,7 +91,8 @@ inline double env_double_or_default(const char *name, double default_value) {
                                               : default_value;
 }
 
-inline double partition_edge_weight(const std::vector<Capacity> *arc_capacities,
+template <typename CapacityContainer>
+inline double partition_edge_weight(const CapacityContainer *arc_capacities,
                                     int edge_index, double lambda) {
   if (arc_capacities == nullptr || arc_capacities->empty() || lambda == 0.0) {
     return 1.0;
@@ -207,9 +210,10 @@ inline std::vector<int> region_grow_initial_partition(
   return partitions;
 }
 
+template <typename ArcContainer, typename CapacityContainer>
 inline std::vector<int> local_search_graph_partition(
-    int npartition, int narc, int nnode, const std::vector<int> &arc,
-    const std::vector<Capacity> *arc_capacities = nullptr) {
+    int npartition, int narc, int nnode, const ArcContainer &arc,
+    const CapacityContainer *arc_capacities) {
   const bool report_progress = partition_progress_enabled();
   const long progress_interval = 10000000;
   const int passes = std::max(0, env_int_or_default("MCPD3_LOCAL_PARTITION_PASSES", 3));
@@ -421,8 +425,9 @@ inline std::vector<int> local_search_graph_partition(
 
 #ifdef HAVE_METIS
 
+template <typename ArcContainer>
 inline std::vector<int> metis_partition(int npartition, int narc, int nnode,
-                                        const std::vector<int> &arc,
+                                        const ArcContainer &arc,
                                         const std::vector<std::uint64_t>
                                             *edge_weights = nullptr) {
 
@@ -563,9 +568,10 @@ inline std::vector<int> metis_partition(int npartition,
 }
 #endif
 
+template <typename ArcContainer, typename CapacityContainer>
 inline std::vector<int> configured_graph_partition(
-    int npartition, int narc, int nnode, const std::vector<int> &arc,
-    const std::vector<Capacity> *arc_capacities = nullptr,
+    int npartition, int narc, int nnode, const ArcContainer &arc,
+    const CapacityContainer *arc_capacities,
     const std::vector<std::uint64_t> *edge_weights = nullptr) {
   const char *mode_env = std::getenv("MCPD3_PARTITIONER");
   const std::string mode = mode_env == nullptr ? "metis" : mode_env;
@@ -607,5 +613,23 @@ inline std::vector<int> configured_graph_partition(
   }
   return basic_graph_partition(npartition, narc, nnode, arc);
 #endif
+}
+
+template <typename ArcContainer>
+inline std::vector<int> configured_graph_partition(
+    int npartition, int narc, int nnode, const ArcContainer &arc,
+    std::nullptr_t,
+    const std::vector<std::uint64_t> *edge_weights = nullptr) {
+  return configured_graph_partition<ArcContainer, std::vector<Capacity>>(
+      npartition, narc, nnode, arc,
+      static_cast<const std::vector<Capacity> *>(nullptr), edge_weights);
+}
+
+template <typename ArcContainer>
+inline std::vector<int> configured_graph_partition(
+    int npartition, int narc, int nnode, const ArcContainer &arc) {
+  return configured_graph_partition(
+      npartition, narc, nnode, arc, nullptr,
+      static_cast<const std::vector<std::uint64_t> *>(nullptr));
 }
 } // namespace mcpd3

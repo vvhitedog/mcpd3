@@ -29,6 +29,7 @@
 #include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
 #include <decomp/regularization_schedule.h>
+#include <decomp/solver_policy.h>
 #include <multithread/threadpool.h>
 
 namespace mcpd3 {
@@ -803,22 +804,22 @@ private:
               round_stats.disagreement_norm_sq;
 
           const Objective best_lower_bound =
-              !has_scale_best_lower_bound ||
-                      round_stats.lower_bound > scale_best_lower_bound
+              !result->has_best_lower_bound ||
+                      round_stats.lower_bound > result->best_lower_bound_raw
                   ? round_stats.lower_bound
-                  : scale_best_lower_bound;
+                  : result->best_lower_bound_raw;
           const Objective best_certified_lower_bound =
-              !scale_result.has_best_certified_lower_bound ||
+              !result->has_best_certified_lower_bound ||
                       round_stats.certified_lower_bound >
-                          scale_result.best_certified_lower_bound_raw
+                          result->best_certified_lower_bound_raw
                   ? round_stats.certified_lower_bound
-                  : scale_result.best_certified_lower_bound_raw;
+                  : result->best_certified_lower_bound_raw;
           const Objective best_regularized_objective =
-              !scale_result.has_best_regularized_objective ||
+              !result->has_best_regularized_objective ||
                       round_stats.regularized_objective >
-                          scale_result.best_regularized_objective_raw
+                          result->best_regularized_objective_raw
                   ? round_stats.regularized_objective
-                  : scale_result.best_regularized_objective_raw;
+                  : result->best_regularized_objective_raw;
           PartitionWorkerProgressRecord record{
               /*scale=*/scale,
               /*iteration=*/iteration,

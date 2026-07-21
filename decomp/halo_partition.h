@@ -42,9 +42,10 @@ inline void insertHaloMembership(std::vector<int> *memberships,
   }
 }
 
+template <typename ArcContainer, typename PartitionContainer>
 inline HaloPartitionLayout buildHaloPartitionLayout(
-    int partition_count, int node_count, const std::vector<int> &arcs,
-    const std::vector<int> &partition_labels, int halo_depth) {
+    int partition_count, int node_count, const ArcContainer &arcs,
+    const PartitionContainer &partition_labels, int halo_depth) {
   if (partition_count <= 0) {
     throw std::runtime_error("halo partition count must be positive");
   }

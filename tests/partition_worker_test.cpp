@@ -2107,6 +2107,26 @@ void fileBackedNativeDdPreservesPersistentFlowExactly() {
       /*preserve_alpha_state=*/true, /*preserve_flow_state=*/true,
       /*flow_scale_numerator=*/2, /*flow_scale_denominator=*/1);
 
+  const auto resident_refresh = resident.getGlobalStorageDiagnostics();
+  require(resident_refresh.last_capacity_refresh_arc_buffers_file_backed_partition_count ==
+              0,
+          "resident refresh buffers must remain resident");
+  require(resident_refresh.last_capacity_refresh_terminal_buffers_file_backed_partition_count ==
+              0,
+          "resident terminal refresh buffers must remain resident");
+  const auto mapped_refresh = file_backed.getGlobalStorageDiagnostics();
+  require(mapped_refresh.last_capacity_refresh_arc_buffers_file_backed_partition_count ==
+              4,
+          "every file-backed local arc refresh buffer must be mapped");
+  require(mapped_refresh.last_capacity_refresh_terminal_buffers_file_backed_partition_count ==
+              4,
+          "every file-backed local terminal refresh buffer must be mapped");
+  for (const auto &diagnostic :
+       file_backed.getLocalSolverStorageDiagnostics()) {
+    require(diagnostic.last_capacity_replacement_flow_scratch_file_backed,
+            "scaled flow replacement scratch must be file-backed");
+  }
+
   for (const long step : {100L, 10L, 1L}) {
     resident.runOptimizationScale(1, step, 2, true);
     file_backed.runOptimizationScale(1, step, 2, true);
@@ -2145,6 +2165,90 @@ void fileBackedNativeDdRejectsInvalidStorage() {
             /*npartition=*/4, makeParityFixtureGraph(), options);
       },
       "file-backed DD must reject a missing storage directory");
+}
+
+void nativeDdRecoversGlobalLabelsWithoutPartitionPackages() {
+  auto package_options = makeParityDualOptions(/*use_momentum=*/true);
+  package_options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  package_options.emit_partition_packages = true;
+  package_options.retain_local_to_global_mapping = true;
+  auto direct_options = package_options;
+  direct_options.emit_partition_packages = false;
+
+  mcpd3::DualDecomposition packaged(
+      /*npartition=*/4, makeParityFixtureGraph(), package_options);
+  mcpd3::DualDecomposition direct(
+      /*npartition=*/4, makeParityFixtureGraph(), direct_options);
+  packaged.solve();
+  direct.solve();
+
+  require(direct.getLastDisagreementCount() == 0,
+          "package-free native DD must solve to agreement");
+  require(direct.getAgreedGlobalLabels() == packaged.getAgreedGlobalLabels(),
+          "package-free label recovery must match package-backed recovery");
+  requireThrows([&] { (void)direct.getPartitionPackages(); },
+                "disabled package export must remain inaccessible");
+}
+
+void fileBackedNativeDdBacksPersistentGlobalMetadata() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-native-global-file-backed-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+
+  auto options = makeParityDualOptions(/*use_momentum=*/true);
+  options.emit_partition_packages = false;
+  options.track_primal_upper_bound = true;
+  options.track_arc_flow_updates = true;
+  options.materialize_all_partition_nodes = true;
+  options.retain_local_to_global_mapping = true;
+  options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  options.solver_storage.mode =
+      mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  options.solver_storage.directory = scratch.string();
+
+  if constexpr (!fileBackedNativeDdSupported()) {
+    requireThrows(
+        [&] {
+          mcpd3::DualDecomposition unsupported(
+              /*npartition=*/4, makeParityFixtureGraph(), options);
+        },
+        "file-backed global metadata must reject nontrivial capacity types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  mcpd3::DualDecomposition decomposition(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+  const auto diagnostics = decomposition.getGlobalStorageDiagnostics();
+  require(diagnostics.original_topology_file_backed,
+          "retained global topology must use file-backed storage");
+  require(diagnostics.original_capacities_file_backed,
+          "retained global capacities must use file-backed storage");
+  require(diagnostics.partition_labels_file_backed,
+          "partition labels must use file-backed storage");
+  require(diagnostics.arc_locations_file_backed,
+          "arc locations must use file-backed storage");
+  require(diagnostics.terminal_locations_file_backed,
+          "terminal locations must use file-backed storage");
+  require(diagnostics.local_to_global_file_backed_partition_count == 4,
+          "every retained local-to-global map must be file-backed");
+  require(diagnostics.global_to_local_file_backed_partition_count == 4,
+          "every retained construction lookup must be file-backed");
+  require(diagnostics.local_graph_construction_file_backed_partition_count ==
+              4,
+          "every local graph must be constructed directly in file-backed "
+          "storage");
+  require(diagnostics.file_backed_bytes > 0,
+          "global metadata must report mapped bytes");
+
+  decomposition.solve();
+  require(decomposition.getAgreedGlobalLabels().size() == 8,
+          "file-backed metadata must support global label recovery");
+  std::filesystem::remove_all(scratch);
 }
 
 void directedStreamingDimacsMatchesGeneralReaderValue() {
@@ -6230,10 +6334,50 @@ void metisWeightedPartitionCutsLowActivityEdges() {
 }
 #endif
 
+void nativeAndCoordinatorUseTheSameProductionDefaults() {
+  const mcpd3::DualDecompositionOptions native;
+  const mcpd3::PartitionWorkerCoordinatorOptions distributed;
+  require(native.objective_scale == distributed.objective_scale,
+          "native and coordinator neutral objective scale defaults must match");
+  require(native.initial_step_size == distributed.initial_step_size,
+          "native and coordinator initial step defaults must match");
+  require(native.num_optimization_scales ==
+              distributed.num_optimization_scales,
+          "native and coordinator scale-count defaults must match");
+  require(native.patience == distributed.patience,
+          "native and coordinator patience defaults must match");
+  require(native.use_momentum == distributed.use_momentum,
+          "native and coordinator momentum defaults must match");
+  require(native.enable_group_stopping == distributed.enable_group_stopping,
+          "native and coordinator group stopping defaults must match");
+  require(native.regularization_scheme == distributed.regularization_scheme,
+          "native and coordinator regularization defaults must match");
+  require(native.scaled_epsilon_max_step_size ==
+              distributed.scaled_epsilon_max_step_size,
+          "native and coordinator regularization cutoffs must match");
+  require(native.scaled_epsilon_strength_cap ==
+              distributed.scaled_epsilon_strength_cap,
+          "native and coordinator regularization caps must match");
+  require(native.exhaust_scale_iterations ==
+              distributed.exhaust_scale_iterations &&
+              native.exhaust_regularized_scale_iterations ==
+                  distributed.exhaust_regularized_scale_iterations,
+          "native and coordinator exhaustion defaults must match");
+  require(native.max_objective_scale_promotions ==
+              distributed.max_objective_scale_promotions,
+          "native and coordinator promotion defaults must match");
+  require(mcpd3::kDefaultObjectiveScale == 500 &&
+              mcpd3::kDefaultInitialStepSize == 5000 &&
+              mcpd3::kDefaultScaledEpsilonMaxStepSize == 12 &&
+              mcpd3::kDefaultScaledEpsilonStrengthCap == 2,
+          "the shared product policy must preserve the validated profile");
+}
+
 } // namespace
 
 int main() {
   try {
+    nativeAndCoordinatorUseTheSameProductionDefaults();
     haloDepthOneRetainsLegacyOwnerLayout();
     finiteHaloLayoutUsesBfsMembershipAndExactMultiplicity();
     haloObjectiveMultiplierUsesNodeAndEdgeLcm();
@@ -6265,6 +6409,8 @@ int main() {
     fileBackedNativeDdMatchesResidentStateExactly();
     fileBackedNativeDdPreservesPersistentFlowExactly();
     fileBackedNativeDdRejectsInvalidStorage();
+    nativeDdRecoversGlobalLabelsWithoutPartitionPackages();
+    fileBackedNativeDdBacksPersistentGlobalMetadata();
     directedStreamingDimacsMatchesGeneralReaderValue();
     dualDecompositionRegularizationSchemeControlsLowScaleStrength();
     disagreementPlateauTrackerRequiresAFullFlatWindow();

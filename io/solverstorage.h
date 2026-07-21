@@ -85,6 +85,11 @@ public:
     std::fill(begin(), end(), value);
   }
 
+  SolverArray(std::size_t count, const SolverStorageOptions &options,
+              const std::string &kind) {
+    initialize(count, options, kind);
+  }
+
   SolverArray(std::vector<T> values, const SolverStorageOptions &options,
               const std::string &kind) {
     if (options.mode == SolverStorageMode::RESIDENT) {
@@ -151,9 +156,26 @@ public:
     std::move(values.begin(), values.end(), begin());
   }
 
+  template <typename Container> void replaceFrom(const Container &values) {
+    requireSameSize(values.size());
+    std::copy(values.begin(), values.end(), begin());
+  }
+
   bool equals(const std::vector<T> &values) const {
     return values.size() == size_ &&
            std::equal(begin(), end(), values.begin());
+  }
+
+  bool equals(const SolverArray &values) const {
+    return values.size() == size_ &&
+           std::equal(begin(), end(), values.begin());
+  }
+
+  SolverArray clone(const SolverStorageOptions &options,
+                    const std::string &kind) const {
+    SolverArray copy(size_, options, kind);
+    std::copy(begin(), end(), copy.begin());
+    return copy;
   }
 
 private:

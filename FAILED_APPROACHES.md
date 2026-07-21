@@ -159,3 +159,9 @@
   PU solves read the configured initial step on the next cut; leaving it stale
   causes native and distributed trajectories to diverge after the first
   promotion even when the current cut happens to finish correctly.
+## 2026-07-20 - Product tuning as a low-level default
+
+- Do not change generic `DualDecompositionOptions` objective scale from 1 to
+  the product profile's 500. Halo/objective normalization tests and library
+  users require neutral defaults. Product tuning belongs in a named entry-point
+  policy, shared by MCPD3-N and MCPD4.

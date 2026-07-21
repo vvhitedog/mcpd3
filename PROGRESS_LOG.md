@@ -453,3 +453,18 @@
 - Added branch and trajectory tests for policy propagation, promotion,
   retries, capacity replacement, and complete mmap backing. The focused
   partition-worker suite passes.
+## 2026-07-20 21:35 PDT - File-backed global state and parity diagnostics
+
+- Converted global graph arrays, partition labels, arc/terminal locations,
+  local/global maps, direct local graph construction, capacity-refresh scratch,
+  and flow-rescale scratch to `SolverArray`, honoring resident or file-backed
+  storage without changing DD rounds or local graph ordering.
+- Added package-free agreeing-label recovery so native mmap mode no longer
+  retains a second package copy solely to decode the primal labels.
+- Added diagnostics and branch tests proving mapped storage is used for each
+  significant allocation and that resident/file-backed results remain exact.
+- Added shared product-profile constants while retaining neutral generic API
+  defaults. Native and coordinator common defaults are asserted equal.
+- Corrected native plateau iteration telemetry to report the regularization
+  used by the completed solve, and made coordinator progress retain global
+  best bounds across schedule levels. The full `partition_worker_test` passes.

@@ -43,6 +43,7 @@
 #include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
 #include <decomp/regularization_schedule.h>
+#include <decomp/solver_policy.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
@@ -120,6 +121,7 @@ struct DualDecompositionOptions {
   bool emit_partition_packages = true;
   bool construct_solvers = true;
   bool materialize_all_partition_nodes = false;
+  bool retain_local_to_global_mapping = false;
   bool saturate_capacity_overflow = false;
   bool verbose = true;
   long min_step_size = 1;
@@ -154,21 +156,14 @@ struct DualDecompositionOptions {
 
 class DualDecomposition {
 public:
-  DualDecomposition(int npartition, int nnode, int narc, std::vector<int> arcs,
-                    std::vector<Capacity> arc_capacities,
-                    std::vector<Capacity> terminal_capacities,
+  DualDecomposition(int npartition, int nnode, int narc,
+                    SolverArray<int> arcs,
+                    SolverArray<Capacity> arc_capacities,
+                    SolverArray<Capacity> terminal_capacities,
                     DualDecompositionOptions options = {})
       : npartition_(npartition), nnode_(nnode), narc_(narc),
         arcs_(std::move(arcs)), arc_capacities_(std::move(arc_capacities)),
         terminal_capacities_(std::move(terminal_capacities)),
-        original_arcs_(options.track_primal_upper_bound ? arcs_
-                                                        : std::vector<int>()),
-        original_arc_capacities_(options.track_primal_upper_bound
-                                     ? arc_capacities_
-                                     : std::vector<Capacity>()),
-        original_terminal_capacities_(options.track_primal_upper_bound
-                                          ? terminal_capacities_
-                                          : std::vector<Capacity>()),
         min_cut_sub_graphs_(npartition_),
         partition_packages_(options.emit_partition_packages ? npartition_ : 0),
         primal_solution_(nnode_), scale_(1),
@@ -197,8 +192,36 @@ public:
         halo_objective_multiplier_(1),
         warned_regularization_budget_exceeded_(false) {
     validateOptions();
+    if (options_.track_primal_upper_bound) {
+      original_arcs_ = SolverArray<int>(
+          arcs_.copyToVector(), options_.solver_storage,
+          "global_original_arcs");
+      original_arc_capacities_ = SolverArray<Capacity>(
+          arc_capacities_.copyToVector(), options_.solver_storage,
+          "global_original_arc_capacities");
+      original_terminal_capacities_ = SolverArray<Capacity>(
+          terminal_capacities_.copyToVector(), options_.solver_storage,
+          "global_original_terminal_capacities");
+    }
     initializeDecomposition();
   }
+
+  DualDecomposition(int npartition, int nnode, int narc,
+                    std::vector<int> arcs,
+                    std::vector<Capacity> arc_capacities,
+                    std::vector<Capacity> terminal_capacities,
+                    DualDecompositionOptions options = {})
+      : DualDecomposition(
+            npartition, nnode, narc,
+            SolverArray<int>(std::move(arcs), options.solver_storage,
+                             "global_input_arcs"),
+            SolverArray<Capacity>(std::move(arc_capacities),
+                                  options.solver_storage,
+                                  "global_input_arc_capacities"),
+            SolverArray<Capacity>(std::move(terminal_capacities),
+                                  options.solver_storage,
+                                  "global_input_terminal_capacities"),
+            options) {}
 
   template <typename InputCapacity,
             std::enable_if_t<!std::is_same_v<InputCapacity, Capacity>, int> = 0>
@@ -317,9 +340,94 @@ public:
   long getHaloObjectiveMultiplier() const {
     return halo_objective_multiplier_;
   }
-  const std::vector<int> &getPartitionLabels() const {
-    return partition_labels_.empty() ? options_.partition_labels
-                                     : partition_labels_;
+  std::vector<int> getPartitionLabels() const {
+    return partition_labels_.copyToVector();
+  }
+
+  struct GlobalStorageDiagnostics {
+    bool partition_labels_file_backed = false;
+    bool original_topology_file_backed = false;
+    bool original_capacities_file_backed = false;
+    bool arc_locations_file_backed = false;
+    bool terminal_locations_file_backed = false;
+    std::size_t local_to_global_file_backed_partition_count = 0;
+    std::size_t global_to_local_file_backed_partition_count = 0;
+    std::size_t
+        last_capacity_refresh_arc_buffers_file_backed_partition_count = 0;
+    std::size_t
+        last_capacity_refresh_terminal_buffers_file_backed_partition_count = 0;
+    std::size_t local_graph_construction_file_backed_partition_count = 0;
+    std::size_t file_backed_bytes = 0;
+  };
+
+  GlobalStorageDiagnostics getGlobalStorageDiagnostics() const {
+    GlobalStorageDiagnostics diagnostics;
+    diagnostics.partition_labels_file_backed =
+        partition_labels_.isFileBacked();
+    diagnostics.original_topology_file_backed = original_arcs_.isFileBacked();
+    diagnostics.original_capacities_file_backed =
+        original_arc_capacities_.isFileBacked() &&
+        original_terminal_capacities_.isFileBacked();
+    diagnostics.arc_locations_file_backed = arc_locations_.isFileBacked();
+    diagnostics.terminal_locations_file_backed =
+        terminal_locations_.isFileBacked();
+    diagnostics.last_capacity_refresh_arc_buffers_file_backed_partition_count =
+        last_capacity_refresh_arc_buffers_file_backed_partition_count_;
+    diagnostics
+        .last_capacity_refresh_terminal_buffers_file_backed_partition_count =
+        last_capacity_refresh_terminal_buffers_file_backed_partition_count_;
+    diagnostics.local_graph_construction_file_backed_partition_count =
+        local_graph_construction_file_backed_partition_count_;
+    diagnostics.file_backed_bytes = original_arcs_.fileBackedBytes() +
+                                    original_arc_capacities_.fileBackedBytes() +
+                                    original_terminal_capacities_.fileBackedBytes() +
+                                    partition_labels_.fileBackedBytes() +
+                                    arc_locations_.fileBackedBytes() +
+                                    terminal_locations_.fileBackedBytes();
+    for (const auto &subgraph : min_cut_sub_graphs_) {
+      if (subgraph.local_to_global.isFileBacked()) {
+        ++diagnostics.local_to_global_file_backed_partition_count;
+      }
+      diagnostics.file_backed_bytes +=
+          subgraph.local_to_global.fileBackedBytes();
+      if (subgraph.global_to_local_map.isFileBacked()) {
+        ++diagnostics.global_to_local_file_backed_partition_count;
+      }
+      diagnostics.file_backed_bytes +=
+          subgraph.global_to_local_map.fileBackedBytes();
+    }
+    return diagnostics;
+  }
+
+  std::vector<int> getAgreedGlobalLabels() const {
+    requireConstructedSolvers("getAgreedGlobalLabels");
+    if (last_disagreement_count_ != 0) {
+      throw std::runtime_error(
+          "global labels require partition agreement");
+    }
+    std::vector<int> labels(static_cast<size_t>(nnode_), -1);
+    for (size_t partition = 0; partition < min_cut_sub_graphs_.size();
+         ++partition) {
+      const auto &local_to_global =
+          min_cut_sub_graphs_[partition].local_to_global;
+      if (local_to_global.empty()) {
+        throw std::runtime_error(
+            "global label recovery requires retained local-to-global maps");
+      }
+      for (size_t local = 0; local < local_to_global.size(); ++local) {
+        const int global = local_to_global[local];
+        const int label = solvers_[partition]->getMinCutSolution(
+            static_cast<int>(local));
+        int &assigned = labels[static_cast<size_t>(global)];
+        if (assigned != -1 && assigned != label) {
+          throw std::runtime_error(
+              "partition labels disagree during global recovery");
+        }
+        assigned = label;
+      }
+    }
+    std::replace(labels.begin(), labels.end(), -1, 0);
+    return labels;
   }
   std::vector<std::uint64_t> getArcFlowUpdateCounts() const {
     requireConstructedSolvers("getArcFlowUpdateCounts");
@@ -517,9 +625,10 @@ public:
     }
   }
 
-  void replaceProblemCapacities(
-      const std::vector<Capacity> &arc_capacities,
-      const std::vector<Capacity> &terminal_capacities,
+  template <typename ArcCapacityContainer, typename TerminalCapacityContainer>
+  void replaceProblemCapacitiesFrom(
+      const ArcCapacityContainer &arc_capacities,
+      const TerminalCapacityContainer &terminal_capacities,
       bool preserve_alpha_state = true,
       bool preserve_flow_state = true,
       const Objective &flow_scale_numerator = 1,
@@ -539,14 +648,29 @@ public:
       }
     }
 
-    std::vector<std::vector<Capacity>> local_arc_capacities(solvers_.size());
-    std::vector<std::vector<Capacity>> local_terminal_capacities(
-        solvers_.size());
+    std::vector<SolverArray<Capacity>> local_arc_capacities;
+    std::vector<SolverArray<Capacity>> local_terminal_capacities;
+    local_arc_capacities.reserve(solvers_.size());
+    local_terminal_capacities.reserve(solvers_.size());
+    last_capacity_refresh_arc_buffers_file_backed_partition_count_ = 0;
+    last_capacity_refresh_terminal_buffers_file_backed_partition_count_ = 0;
     for (size_t partition = 0; partition < solvers_.size(); ++partition) {
-      local_arc_capacities[partition].assign(
-          static_cast<size_t>(2 * local_arc_counts_[partition]), 0);
-      local_terminal_capacities[partition].assign(
-          static_cast<size_t>(local_node_counts_[partition]), 0);
+      local_arc_capacities.emplace_back(
+          static_cast<size_t>(2 * local_arc_counts_[partition]),
+          options_.solver_storage,
+          "partition_" + std::to_string(partition) +
+              "_capacity_refresh_arcs");
+      local_terminal_capacities.emplace_back(
+          static_cast<size_t>(local_node_counts_[partition]),
+          options_.solver_storage,
+          "partition_" + std::to_string(partition) +
+              "_capacity_refresh_terminals");
+      if (local_arc_capacities.back().isFileBacked()) {
+        ++last_capacity_refresh_arc_buffers_file_backed_partition_count_;
+      }
+      if (local_terminal_capacities.back().isFileBacked()) {
+        ++last_capacity_refresh_terminal_buffers_file_backed_partition_count_;
+      }
     }
     for (int arc = 0; arc < narc_; ++arc) {
       const Capacity input_forward = arc_capacities[2 * arc];
@@ -623,10 +747,12 @@ public:
           local_terminal_capacities[partition], preserve_flow_state,
           flow_scale_numerator, flow_scale_denominator);
       if (options_.emit_partition_packages) {
-        partition_packages_[partition].arc_capacities =
-            local_arc_capacities[partition];
-        partition_packages_[partition].terminal_capacities =
-            local_terminal_capacities[partition];
+        partition_packages_[partition].arc_capacities.assign(
+            local_arc_capacities[partition].begin(),
+            local_arc_capacities[partition].end());
+        partition_packages_[partition].terminal_capacities.assign(
+            local_terminal_capacities[partition].begin(),
+            local_terminal_capacities[partition].end());
       }
     }
 
@@ -642,19 +768,15 @@ public:
     }
 
     if (options_.track_primal_upper_bound) {
-      original_arc_capacities_.clear();
-      original_arc_capacities_.reserve(arc_capacities.size());
-      for (const Capacity &capacity : arc_capacities) {
-        original_arc_capacities_.push_back(checked_scale_capacity(
-            capacity, halo_objective_multiplier_,
-            options_.saturate_capacity_overflow));
+      for (size_t index = 0; index < arc_capacities.size(); ++index) {
+        original_arc_capacities_[index] = checked_scale_capacity(
+            arc_capacities[index], halo_objective_multiplier_,
+            options_.saturate_capacity_overflow);
       }
-      original_terminal_capacities_.clear();
-      original_terminal_capacities_.reserve(terminal_capacities.size());
-      for (const Capacity &capacity : terminal_capacities) {
-        original_terminal_capacities_.push_back(checked_scale_capacity(
-            capacity, halo_objective_multiplier_,
-            options_.saturate_capacity_overflow));
+      for (size_t index = 0; index < terminal_capacities.size(); ++index) {
+        original_terminal_capacities_[index] = checked_scale_capacity(
+            terminal_capacities[index], halo_objective_multiplier_,
+            options_.saturate_capacity_overflow);
       }
     }
     solve_loop_time_ = 0;
@@ -681,6 +803,30 @@ public:
     objective_scale_promotion_count_ = 0;
     warned_regularization_budget_exceeded_ = false;
     disagreeing_global_indices_.clear();
+  }
+
+  void replaceProblemCapacities(
+      const std::vector<Capacity> &arc_capacities,
+      const std::vector<Capacity> &terminal_capacities,
+      bool preserve_alpha_state = true,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
+    replaceProblemCapacitiesFrom(
+        arc_capacities, terminal_capacities, preserve_alpha_state,
+        preserve_flow_state, flow_scale_numerator, flow_scale_denominator);
+  }
+
+  void replaceProblemCapacities(
+      const SolverArray<Capacity> &arc_capacities,
+      const SolverArray<Capacity> &terminal_capacities,
+      bool preserve_alpha_state = true,
+      bool preserve_flow_state = true,
+      const Objective &flow_scale_numerator = 1,
+      const Objective &flow_scale_denominator = 1) {
+    replaceProblemCapacitiesFrom(
+        arc_capacities, terminal_capacities, preserve_alpha_state,
+        preserve_flow_state, flow_scale_numerator, flow_scale_denominator);
   }
 
   template <typename InputCapacity,
@@ -915,6 +1061,7 @@ public:
         break;
       }
       ++total_optimization_iterations_;
+      const int round_regularization_strength = regularization_strength;
 
       std::vector<Objective> lower_bound_terms(solvers_.size(), 0);
       std::vector<Objective> regularization_budget_terms(solvers_.size(), 0);
@@ -1114,7 +1261,7 @@ public:
                       scale_,
             static_cast<long>(disagreeing_global_indices_.size()),
             update_stats.disagreement_norm_sq, step_size,
-            update_stats.effective_step_size, regularization_strength,
+            update_stats.effective_step_size, round_regularization_strength,
             integer_to_double(last_regularization_budget_) / scale_,
             integer_to_double(last_regularization_contribution_) / scale_,
             last_regularization_anchor_sink_count_,
@@ -1135,8 +1282,8 @@ public:
                    : integer_to_double(current_upper_bound_ - lower_bound) /
                          scale_,
                disagreeing_global_indices_.size(),
-               update_stats.disagreement_norm_sq, update_stats.effective_step_size,
-               regularization_strength,
+               update_stats.disagreement_norm_sq, step_size,
+               round_regularization_strength,
                integer_to_double(last_regularization_budget_) / scale_,
                integer_to_double(last_regularization_contribution_) / scale_,
                last_regularization_anchor_sink_count_,
@@ -1169,7 +1316,7 @@ public:
             regularized_objective,
             update_stats.disagreement_count,
             update_stats.disagreement_norm_sq,
-            regularization_strength,
+            round_regularization_strength,
             last_regularization_budget_,
             last_regularization_contribution_,
             solve_loop_time.count(),
@@ -1758,7 +1905,8 @@ private:
     return upper_bound;
   }
 
-  void validateAndReportPartition(const std::vector<int> &partitions) const {
+  template <typename PartitionContainer>
+  void validateAndReportPartition(const PartitionContainer &partitions) const {
     if (static_cast<int>(partitions.size()) != nnode_) {
       throw std::runtime_error("partition vector size does not match node count");
     }
@@ -1856,11 +2004,17 @@ private:
         options_.partition_edge_weights.empty()
             ? nullptr
             : &options_.partition_edge_weights;
-    partition_labels_ = options_.partition_labels.empty()
-                            ? configured_graph_partition(
-                                  npartition_, narc_, nnode_, arcs_,
-                                  &arc_capacities_, partition_edge_weights)
-                            : options_.partition_labels;
+    retain_partition_labels_ = !options_.partition_labels.empty();
+    auto partition_labels = options_.partition_labels.empty()
+                                ? configured_graph_partition(
+                                      npartition_, narc_, nnode_, arcs_,
+                                      &arc_capacities_, partition_edge_weights)
+                                : options_.partition_labels;
+    partition_labels_ = SolverArray<int>(
+        std::move(partition_labels), options_.solver_storage,
+        "global_partition_labels");
+    options_.partition_labels.clear();
+    options_.partition_labels.shrink_to_fit();
     const auto &partitions_ = partition_labels_;
     validateAndReportPartition(partitions_);
     HaloPartitionLayout halo_layout;
@@ -1892,7 +2046,8 @@ private:
     auto mapping_start = std::chrono::steady_clock::now();
     int mapping_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
-      min_cut_sub_graph.initializeMapping(nnode_);
+      min_cut_sub_graph.initializeMapping(nnode_, options_.solver_storage,
+                                          mapping_done);
       ++mapping_done;
       dualdecomp_progress_report("dd_initialize_mapping", mapping_done,
                                  npartition_, mapping_start);
@@ -1900,24 +2055,22 @@ private:
     /** step 1: distribute arcs into their local halo subgraphs. */
     auto arc_start = std::chrono::steady_clock::now();
     if (options_.halo_depth == 1) {
-      arc_locations_.resize(static_cast<size_t>(narc_));
+      arc_locations_ = SolverArray<ArcLocation>(
+          static_cast<size_t>(narc_), options_.solver_storage,
+          "global_arc_locations");
       for (int i = 0; i < narc_; ++i) {
         int s = arcs_[2 * i + 0];
         int t = arcs_[2 * i + 1];
-        Capacity forward_capacity = arc_capacities_[2 * i + 0];
-        Capacity backward_capacity = arc_capacities_[2 * i + 1];
         bool swapped = false;
         if (s > t) {
           std::swap(s, t);
-          std::swap(forward_capacity, backward_capacity);
           swapped = true;
         }
         const int arc_partition = partitions_[s];
         auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+        const int local_arc = min_cut_sub_graph.registerArc(s, t);
         arc_locations_[static_cast<size_t>(i)] = ArcLocation{
-            arc_partition, min_cut_sub_graph.graph.narc, swapped};
-        min_cut_sub_graph.insertArc(s, t, forward_capacity,
-                                    backward_capacity);
+            arc_partition, local_arc, swapped};
         if (partitions_[t] != arc_partition) {
           constrained_nodes[t].insert(arc_partition);
         }
@@ -1932,12 +2085,9 @@ private:
       for (int i = 0; i < narc_; ++i) {
         int s = arcs_[2 * i + 0];
         int t = arcs_[2 * i + 1];
-        Capacity forward_capacity = arc_capacities_[2 * i + 0];
-        Capacity backward_capacity = arc_capacities_[2 * i + 1];
         bool swapped = false;
         if (s > t) {
           std::swap(s, t);
-          std::swap(forward_capacity, backward_capacity);
           swapped = true;
         }
         const auto &arc_partitions =
@@ -1948,14 +2098,9 @@ private:
         halo_arc_objective_factors_[static_cast<size_t>(i)] = objective_factor;
         for (const int arc_partition : arc_partitions) {
           auto &min_cut_sub_graph = min_cut_sub_graphs_[arc_partition];
+          const int local_arc = min_cut_sub_graph.registerArc(s, t);
           halo_arc_locations_[static_cast<size_t>(i)].push_back(ArcLocation{
-              arc_partition, min_cut_sub_graph.graph.narc, swapped});
-          min_cut_sub_graph.insertArc(
-              s, t,
-              checked_scale_capacity(forward_capacity, objective_factor,
-                                     options_.saturate_capacity_overflow),
-              checked_scale_capacity(backward_capacity, objective_factor,
-                                     options_.saturate_capacity_overflow));
+              arc_partition, local_arc, swapped});
         }
         if (report_progress && (i + 1) % progress_interval == 0) {
           dualdecomp_progress_report("dd_distribute_arcs", i + 1, narc_,
@@ -1964,14 +2109,12 @@ private:
       }
     }
     dualdecomp_progress_report("dd_distribute_arcs", narc_, narc_, arc_start);
-    arcs_.clear();
-    arcs_.shrink_to_fit();
-    arc_capacities_.clear();
-    arc_capacities_.shrink_to_fit();
     /** step 2: distribute node unaries and materialize halo copies. */
     auto terminal_start = std::chrono::steady_clock::now();
     if (options_.halo_depth == 1) {
-      terminal_locations_.resize(static_cast<size_t>(nnode_));
+      terminal_locations_ = SolverArray<TerminalLocation>(
+          static_cast<size_t>(nnode_), TerminalLocation{},
+          options_.solver_storage, "global_terminal_locations");
       if (options_.materialize_all_partition_nodes) {
         for (int node = 0; node < nnode_; ++node) {
           min_cut_sub_graphs_[partitions_[node]].getOrInsertNode(node);
@@ -1979,8 +2122,7 @@ private:
       }
       for (int i = 0; i < nnode_; ++i) {
         if (terminal_capacities_[i] != 0) {
-          min_cut_sub_graphs_[partitions_[i]].insertTerminal(
-              i, terminal_capacities_[i]);
+          min_cut_sub_graphs_[partitions_[i]].getOrInsertNode(i);
         }
         if (report_progress && (i + 1) % progress_interval == 0) {
           dualdecomp_progress_report("dd_distribute_terminals", i + 1,
@@ -1998,9 +2140,9 @@ private:
         const auto &global_to_local =
             min_cut_sub_graphs_[partition].global_to_local_map;
         if (node < static_cast<int>(global_to_local.size()) &&
-            global_to_local[node] >= 0) {
+            global_to_local[node] != 0) {
           terminal_locations_[static_cast<size_t>(node)] =
-              TerminalLocation{partition, global_to_local[node]};
+              TerminalLocation{partition, global_to_local[node] - 1};
         }
       }
     } else {
@@ -2023,12 +2165,6 @@ private:
               min_cut_sub_graphs_[partition].getOrInsertNode(node);
           halo_terminal_locations_[static_cast<size_t>(node)].push_back(
               TerminalLocation{partition, local_node});
-          if (terminal_capacities_[node] != 0) {
-            min_cut_sub_graphs_[partition].insertTerminal(
-                node, checked_scale_capacity(
-                          terminal_capacities_[node], objective_factor,
-                          options_.saturate_capacity_overflow));
-          }
         }
         if (report_progress && (node + 1) % progress_interval == 0) {
           dualdecomp_progress_report("dd_distribute_terminals", node + 1,
@@ -2038,10 +2174,82 @@ private:
     }
     dualdecomp_progress_report("dd_distribute_terminals", nnode_, nnode_,
                                terminal_start);
+
+    local_graph_construction_file_backed_partition_count_ = 0;
+    for (int partition = 0; partition < npartition_; ++partition) {
+      auto &subgraph = min_cut_sub_graphs_[static_cast<size_t>(partition)];
+      subgraph.allocateGraph(options_.solver_storage, partition);
+      if (subgraph.graph.isFileBacked()) {
+        ++local_graph_construction_file_backed_partition_count_;
+      }
+    }
+
+    auto graph_fill_start = std::chrono::steady_clock::now();
+    for (int i = 0; i < narc_; ++i) {
+      int source = arcs_[static_cast<size_t>(2 * i)];
+      int target = arcs_[static_cast<size_t>(2 * i + 1)];
+      Capacity forward = arc_capacities_[static_cast<size_t>(2 * i)];
+      Capacity backward = arc_capacities_[static_cast<size_t>(2 * i + 1)];
+      if (source > target) {
+        std::swap(source, target);
+        std::swap(forward, backward);
+      }
+      if (options_.halo_depth == 1) {
+        const auto &location = arc_locations_[static_cast<size_t>(i)];
+        min_cut_sub_graphs_[static_cast<size_t>(location.partition)].writeArc(
+            location.local_arc, source, target, forward, backward);
+      } else {
+        const long objective_factor =
+            halo_arc_objective_factors_[static_cast<size_t>(i)];
+        const Capacity local_forward = checked_scale_capacity(
+            forward, objective_factor, options_.saturate_capacity_overflow);
+        const Capacity local_backward = checked_scale_capacity(
+            backward, objective_factor, options_.saturate_capacity_overflow);
+        for (const auto &location :
+             halo_arc_locations_[static_cast<size_t>(i)]) {
+          min_cut_sub_graphs_[static_cast<size_t>(location.partition)]
+              .writeArc(location.local_arc, source, target, local_forward,
+                        local_backward);
+        }
+      }
+      if (report_progress && (i + 1) % progress_interval == 0) {
+        dualdecomp_progress_report("dd_fill_local_arcs", i + 1, narc_,
+                                   graph_fill_start);
+      }
+    }
+    dualdecomp_progress_report("dd_fill_local_arcs", narc_, narc_,
+                               graph_fill_start);
+
+    for (int node = 0; node < nnode_; ++node) {
+      const Capacity terminal = terminal_capacities_[static_cast<size_t>(node)];
+      if (terminal == 0) {
+        continue;
+      }
+      if (options_.halo_depth == 1) {
+        const auto &location = terminal_locations_[static_cast<size_t>(node)];
+        min_cut_sub_graphs_[static_cast<size_t>(location.partition)]
+            .writeTerminal(node, terminal);
+      } else {
+        const Capacity local_terminal = checked_scale_capacity(
+            terminal,
+            halo_terminal_objective_factors_[static_cast<size_t>(node)],
+            options_.saturate_capacity_overflow);
+        for (const auto &location :
+             halo_terminal_locations_[static_cast<size_t>(node)]) {
+          min_cut_sub_graphs_[static_cast<size_t>(location.partition)]
+              .writeTerminal(node, local_terminal);
+        }
+      }
+    }
+    arcs_ = SolverArray<int>();
+    arc_capacities_ = SolverArray<Capacity>();
+    terminal_capacities_ = SolverArray<Capacity>();
+
     auto finalize_start = std::chrono::steady_clock::now();
     int finalize_done = 0;
     for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
-      min_cut_sub_graph.finalizeTerminals();
+      min_cut_sub_graph.finalizeLocalToGlobal(options_.solver_storage,
+                                              finalize_done);
       ++finalize_done;
       dualdecomp_progress_report("dd_finalize_terminals", finalize_done,
                                  npartition_, finalize_start);
@@ -2052,8 +2260,6 @@ private:
       local_arc_counts_.push_back(min_cut_sub_graph.graph.narc);
       local_node_counts_.push_back(min_cut_sub_graph.graph.nnode);
     }
-    terminal_capacities_.clear();
-    terminal_capacities_.shrink_to_fit();
     /**
      * step 3: create solvers
      */
@@ -2081,27 +2287,27 @@ private:
                 options_.reference_cut_labels[static_cast<size_t>(global_node)]);
           }
         }
-        if (options_.construct_solvers) {
-          package.arcs = min_cut_sub_graph.graph.arcs;
-          package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
-          package.terminal_capacities =
-              min_cut_sub_graph.graph.terminal_capacities;
-          package.local_to_global = min_cut_sub_graph.local_to_global;
-        } else {
-          package.arcs = std::move(min_cut_sub_graph.graph.arcs);
-          package.arc_capacities =
-              std::move(min_cut_sub_graph.graph.arc_capacities);
-          package.terminal_capacities =
-              std::move(min_cut_sub_graph.graph.terminal_capacities);
-          package.local_to_global =
-              std::move(min_cut_sub_graph.local_to_global);
-        }
+        package.arcs.assign(min_cut_sub_graph.graph.arcs.begin(),
+                            min_cut_sub_graph.graph.arcs.end());
+        package.arc_capacities.assign(
+            min_cut_sub_graph.graph.arc_capacities.begin(),
+            min_cut_sub_graph.graph.arc_capacities.end());
+        package.terminal_capacities.assign(
+            min_cut_sub_graph.graph.terminal_capacities.begin(),
+            min_cut_sub_graph.graph.terminal_capacities.end());
+        package.local_to_global.assign(
+            min_cut_sub_graph.local_to_global.begin(),
+            min_cut_sub_graph.local_to_global.end());
         package.constraint_endpoints.clear();
       }
 
       if (options_.construct_solvers) {
         auto solver = std::make_unique<PrimalDualMinCutSolver>(
-            std::move(min_cut_sub_graph.graph), options_.solver_storage);
+            min_cut_sub_graph.graph.nnode, min_cut_sub_graph.graph.narc,
+            std::move(min_cut_sub_graph.graph.arcs),
+            std::move(min_cut_sub_graph.graph.arc_capacities),
+            std::move(min_cut_sub_graph.graph.terminal_capacities),
+            options_.solver_storage);
         solver->setTrackArcFlowUpdates(options_.track_arc_flow_updates);
         solver->setCanonicalCutSelection(options_.canonical_cut_selection);
         if (!options_.reference_cut_labels.empty()) {
@@ -2218,16 +2424,17 @@ private:
       auto release_start = std::chrono::steady_clock::now();
       int release_done = 0;
       for (auto &min_cut_sub_graph : min_cut_sub_graphs_) {
-        min_cut_sub_graph.releaseConstructionMaps();
+        min_cut_sub_graph.releaseConstructionMaps(
+            options_.retain_local_to_global_mapping);
         ++release_done;
         dualdecomp_progress_report("dd_release_construction_maps",
                                    release_done, npartition_, release_start);
       }
     }
     if (!options_.track_arc_flow_updates &&
-        options_.partition_edge_weights.empty()) {
-      partition_labels_.clear();
-      partition_labels_.shrink_to_fit();
+        options_.partition_edge_weights.empty() &&
+        !retain_partition_labels_) {
+      partition_labels_ = SolverArray<int>();
     }
     if (!options_.construct_solvers) {
       constraint_arc_map_.clear();
@@ -2272,13 +2479,14 @@ private:
   int npartition_;
   int nnode_;
   int narc_;
-  std::vector<int> arcs_;
-  std::vector<Capacity> arc_capacities_;
-  std::vector<Capacity> terminal_capacities_;
-  std::vector<int> original_arcs_;
-  std::vector<Capacity> original_arc_capacities_;
-  std::vector<Capacity> original_terminal_capacities_;
-  std::vector<int> partition_labels_;
+  SolverArray<int> arcs_;
+  SolverArray<Capacity> arc_capacities_;
+  SolverArray<Capacity> terminal_capacities_;
+  SolverArray<int> original_arcs_;
+  SolverArray<Capacity> original_arc_capacities_;
+  SolverArray<Capacity> original_terminal_capacities_;
+  SolverArray<int> partition_labels_;
+  bool retain_partition_labels_ = false;
 
   struct ArcLocation {
     int partition = -1;
@@ -2289,8 +2497,13 @@ private:
     int partition = -1;
     int local_node = -1;
   };
-  std::vector<ArcLocation> arc_locations_;
-  std::vector<TerminalLocation> terminal_locations_;
+  SolverArray<ArcLocation> arc_locations_;
+  SolverArray<TerminalLocation> terminal_locations_;
+  std::size_t
+      last_capacity_refresh_arc_buffers_file_backed_partition_count_ = 0;
+  std::size_t
+      last_capacity_refresh_terminal_buffers_file_backed_partition_count_ = 0;
+  std::size_t local_graph_construction_file_backed_partition_count_ = 0;
   std::vector<std::vector<ArcLocation>> halo_arc_locations_;
   std::vector<std::vector<TerminalLocation>> halo_terminal_locations_;
   std::vector<long> halo_arc_objective_factors_;
@@ -2310,18 +2523,56 @@ private:
       primal_solver_; // only used to evaluate primal value
 
   struct MinCutSubGraph {
-    MinCutGraph graph;
-    std::vector</*local_index -> global_index*/ int> local_to_global;
-    std::vector</*global_index -> local_index*/ int> global_to_local_map;
+    struct LocalGraph {
+      int nnode = 0;
+      int narc = 0;
+      SolverArray<int> arcs;
+      SolverArray<Capacity> arc_capacities;
+      SolverArray<Capacity> terminal_capacities;
 
-    MinCutSubGraph() {
-      graph.nnode = 0;
-      graph.narc = 0;
-    }
+      void allocate(const SolverStorageOptions &storage, int partition) {
+        arcs = SolverArray<int>(
+            static_cast<size_t>(2 * narc), storage,
+            "partition_" + std::to_string(partition) + "_topology");
+        arc_capacities = SolverArray<Capacity>(
+            static_cast<size_t>(2 * narc), storage,
+            "partition_" + std::to_string(partition) + "_arc_capacities");
+        terminal_capacities = SolverArray<Capacity>(
+            static_cast<size_t>(nnode), storage,
+            "partition_" + std::to_string(partition) +
+                "_terminal_capacities");
+      }
 
-    void initializeMapping(int global_node_count) {
-      global_to_local_map.assign(global_node_count, -1);
-      local_to_global.clear();
+      bool isFileBacked() const {
+        return arcs.isFileBacked() && arc_capacities.isFileBacked() &&
+               terminal_capacities.isFileBacked();
+      }
+    } graph;
+    std::vector</*local_index -> global_index*/ int>
+        resident_construction_local_to_global;
+    SolverArray</*local_index -> global_index*/ int>
+        mapped_construction_local_to_global;
+    SolverArray</*local_index -> global_index*/ int> local_to_global;
+    SolverArray</*global_index -> local_index plus one*/ int>
+        global_to_local_map;
+
+    MinCutSubGraph() = default;
+
+    void initializeMapping(int global_node_count,
+                           const SolverStorageOptions &storage,
+                           int partition) {
+      global_to_local_map = SolverArray<int>(
+          static_cast<size_t>(global_node_count), storage,
+          "partition_" + std::to_string(partition) + "_global_to_local");
+      resident_construction_local_to_global.clear();
+      if (storage.mode == SolverStorageMode::RESIDENT) {
+        mapped_construction_local_to_global = SolverArray<int>();
+      } else {
+        mapped_construction_local_to_global = SolverArray<int>(
+            static_cast<size_t>(global_node_count), storage,
+            "partition_" + std::to_string(partition) +
+                "_construction_local_to_global");
+      }
     }
 
     int getOrInsertNode(int global_index) {
@@ -2329,52 +2580,79 @@ private:
           global_index >= static_cast<int>(global_to_local_map.size())) {
         throw std::runtime_error("global node index out of range");
       }
-      int &local_index = global_to_local_map[global_index];
-      if (local_index < 0) {
-        local_index = graph.nnode++;
-        local_to_global.push_back(global_index);
+      int &encoded_local_index = global_to_local_map[global_index];
+      if (encoded_local_index == 0) {
+        const int local_index = graph.nnode++;
+        encoded_local_index = local_index + 1;
+        if (mapped_construction_local_to_global.empty()) {
+          resident_construction_local_to_global.push_back(global_index);
+        } else {
+          mapped_construction_local_to_global[static_cast<size_t>(local_index)] =
+              global_index;
+        }
       }
-      return local_index;
+      return encoded_local_index - 1;
     }
 
     int getNode(int global_index) const {
       if (global_index < 0 ||
           global_index >= static_cast<int>(global_to_local_map.size()) ||
-          global_to_local_map[global_index] < 0) {
+          global_to_local_map[global_index] == 0) {
         throw std::runtime_error("Node not found");
       }
-      return global_to_local_map[global_index];
+      return global_to_local_map[global_index] - 1;
     }
 
-    void insertArc(int global_source_index, int global_target_index,
-                   const Capacity &forward_capacity,
-                   const Capacity &backward_capacity) {
-      int s = getOrInsertNode(global_source_index);
-      int t = getOrInsertNode(global_target_index);
-      graph.arc_capacities.push_back(forward_capacity);
-      graph.arc_capacities.push_back(backward_capacity);
-      graph.arcs.push_back(s);
-      graph.arcs.push_back(t);
-      graph.narc++;
+    int registerArc(int global_source_index, int global_target_index) {
+      getOrInsertNode(global_source_index);
+      getOrInsertNode(global_target_index);
+      return graph.narc++;
     }
 
-    void insertTerminal(int global_index, const Capacity &terminal_capacity) {
-      int s = getOrInsertNode(global_index);
-      if (static_cast<int>(graph.terminal_capacities.size()) < graph.nnode) {
-        graph.terminal_capacities.resize(graph.nnode, 0);
+    void allocateGraph(const SolverStorageOptions &storage, int partition) {
+      graph.allocate(storage, partition);
+    }
+
+    void writeArc(int local_arc, int global_source_index,
+                  int global_target_index, const Capacity &forward_capacity,
+                  const Capacity &backward_capacity) {
+      const int source = getNode(global_source_index);
+      const int target = getNode(global_target_index);
+      graph.arcs[static_cast<size_t>(2 * local_arc)] = source;
+      graph.arcs[static_cast<size_t>(2 * local_arc + 1)] = target;
+      graph.arc_capacities[static_cast<size_t>(2 * local_arc)] =
+          forward_capacity;
+      graph.arc_capacities[static_cast<size_t>(2 * local_arc + 1)] =
+          backward_capacity;
+    }
+
+    void writeTerminal(int global_index,
+                       const Capacity &terminal_capacity) {
+      graph.terminal_capacities[static_cast<size_t>(getNode(global_index))] =
+          terminal_capacity;
+    }
+
+    void finalizeLocalToGlobal(const SolverStorageOptions &storage,
+                               int partition) {
+      if (mapped_construction_local_to_global.empty()) {
+        local_to_global = SolverArray<int>(
+            std::move(resident_construction_local_to_global), storage,
+            "partition_" + std::to_string(partition) + "_local_to_global");
+      } else {
+        local_to_global = SolverArray<int>(
+            static_cast<size_t>(graph.nnode), storage,
+            "partition_" + std::to_string(partition) + "_local_to_global");
+        std::copy_n(mapped_construction_local_to_global.begin(), graph.nnode,
+                    local_to_global.begin());
+        mapped_construction_local_to_global = SolverArray<int>();
       }
-      graph.terminal_capacities[s] = terminal_capacity;
     }
 
-    void finalizeTerminals() {
-      graph.terminal_capacities.resize(graph.nnode, 0);
-    }
-
-    void releaseConstructionMaps() {
-      local_to_global.clear();
-      local_to_global.shrink_to_fit();
-      global_to_local_map.clear();
-      global_to_local_map.shrink_to_fit();
+    void releaseConstructionMaps(bool retain_local_to_global) {
+      global_to_local_map = SolverArray<int>();
+      if (!retain_local_to_global) {
+        local_to_global = SolverArray<int>();
+      }
     }
   };
 
