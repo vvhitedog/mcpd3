@@ -498,3 +498,14 @@
   and package order into one configurable `SolverArray<NodeLabel>`.
 - Added mapped-result, exact-content, count, null-destination, and unknown-ID
   branch tests. MCPD3 passes both CTest targets in Release mode.
+
+## 2026-07-21 02:17 PDT - Partition-scoped objective promotion
+
+- Extended the worker contract so a coordinator promotes only the partitions
+  assigned to that coordinator, while retaining the historical all-partition
+  operation for dedicated workers.
+- In-process and historical streaming workers validate every selected ID
+  before changing state, preventing duplicate or unknown requests from
+  partially scaling a shared worker.
+- Added selected, unselected, duplicate, and unknown-ID regressions. MCPD3
+  passes both CTest targets in Release mode.

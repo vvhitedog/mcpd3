@@ -450,6 +450,60 @@ void streamingWorkerScalesEvictedDiskPayload() {
           "streaming scaled reload should persist the evicted resident state");
 }
 
+void inProcessWorkerScopesObjectiveScalingToSelectedPartitions() {
+  auto package0 = makeStreamingPackage(/*partition_id=*/0,
+                                       /*constraint_id=*/30,
+                                       /*terminal_capacity=*/3);
+  auto package1 = makeStreamingPackage(/*partition_id=*/1,
+                                       /*constraint_id=*/31,
+                                       /*terminal_capacity=*/5);
+
+  mcpd3::InProcessPartitionWorker shared;
+  shared.loadPartition(package0);
+  shared.loadPartition(package1);
+
+  mcpd3::InProcessPartitionWorker scaled_reference;
+  scaled_reference.loadPartition(package0);
+  scaled_reference.scaleObjective(/*factor=*/2);
+  mcpd3::InProcessPartitionWorker unchanged_reference;
+  unchanged_reference.loadPartition(package1);
+
+  bool duplicate_threw = false;
+  try {
+    shared.scaleObjectivePartitions({0, 0}, /*factor=*/2);
+  } catch (const std::runtime_error &) {
+    duplicate_threw = true;
+  }
+  require(duplicate_threw,
+          "scoped objective scaling must reject duplicate partition ids");
+
+  bool unknown_threw = false;
+  try {
+    shared.scaleObjectivePartitions({0, 99}, /*factor=*/2);
+  } catch (const std::runtime_error &) {
+    unknown_threw = true;
+  }
+  require(unknown_threw,
+          "scoped objective scaling must reject unknown partition ids");
+
+  shared.scaleObjectivePartitions({0}, /*factor=*/2);
+
+  mcpd3::PartitionSolveRequest request0;
+  request0.round_id = 1;
+  request0.partition_id = 0;
+  requireSolveResultsMatch(shared.solveRound(request0),
+                           scaled_reference.solveRound(request0),
+                           "selected partition objective scaling");
+
+  mcpd3::PartitionSolveRequest request1;
+  request1.round_id = 2;
+  request1.partition_id = 1;
+  requireSolveResultsMatch(shared.solveRound(request1),
+                           unchanged_reference.solveRound(request1),
+                           "unselected partition objective scaling");
+
+}
+
 struct DirectSolverResult {
   mcpd3::Objective lower_bound;
   int constrained_label;
@@ -6542,6 +6596,7 @@ int main() {
     solverMemoryEstimateReportsBkAndVectorBytes();
     streamingWorkerMatchesInProcessAcrossEviction();
     streamingWorkerScalesEvictedDiskPayload();
+    inProcessWorkerScopesObjectiveScalingToSelectedPartitions();
     inProcessPartitionWorkerMatchesDirectSolverAcrossAlphaUpdate();
     inProcessPartitionWorkerReturnsFullLabelsOnRequest();
     exportedPartitionPackagesMatchDualDecompositionRound();

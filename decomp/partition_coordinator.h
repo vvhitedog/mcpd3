@@ -1526,8 +1526,13 @@ private:
           constraint.last_alpha, factor, "lagrange scale promotion overflow");
     }
     for (const auto worker_index : active_worker_indices_) {
-      workers_[worker_index]->scaleObjective(
-          factor, options_.saturate_capacity_overflow);
+      std::vector<int> partition_ids;
+      partition_ids.reserve(packages_by_worker_[worker_index].size());
+      for (const auto package_index : packages_by_worker_[worker_index]) {
+        partition_ids.push_back(packages_[package_index].partition_id);
+      }
+      workers_[worker_index]->scaleObjectivePartitions(
+          partition_ids, factor, options_.saturate_capacity_overflow);
     }
     warned_regularization_budget_exceeded_ = false;
   }

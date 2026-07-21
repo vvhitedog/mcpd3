@@ -218,6 +218,15 @@ public:
   }
   virtual void scaleObjective(long factor,
                               bool saturate_capacity_overflow = false) = 0;
+  virtual void scaleObjectivePartitions(
+      const std::vector<int> &partition_ids, long factor,
+      bool saturate_capacity_overflow = false) {
+    if (partition_ids.empty()) {
+      throw std::runtime_error(
+          "objective scaling requires at least one partition id");
+    }
+    scaleObjective(factor, saturate_capacity_overflow);
+  }
   virtual void replacePartitionCapacities(
       const PartitionCapacityUpdate &update) {
     (void)update;
@@ -357,6 +366,37 @@ public:
             checkedScaleWorkerLagrange(constraint_arc.last_alpha, factor);
       }
       loaded.solver->scaleProblem(factor, saturate_capacity_overflow);
+    }
+  }
+
+  void scaleObjectivePartitions(
+      const std::vector<int> &partition_ids, long factor,
+      bool saturate_capacity_overflow = false) override {
+    if (partition_ids.empty()) {
+      throw std::runtime_error(
+          "objective scaling requires at least one partition id");
+    }
+    if (factor <= 0) {
+      throw std::runtime_error("objective scale factor must be positive");
+    }
+    std::unordered_set<int> seen;
+    std::vector<LoadedPartition *> loaded_partitions;
+    loaded_partitions.reserve(partition_ids.size());
+    for (const int partition_id : partition_ids) {
+      if (!seen.insert(partition_id).second) {
+        throw std::runtime_error("duplicate objective scale partition id " +
+                                 std::to_string(partition_id));
+      }
+      loaded_partitions.push_back(&loadedPartitionById(partition_id));
+    }
+    for (auto *loaded : loaded_partitions) {
+      for (auto &constraint_arc : loaded->constraint_arcs) {
+        constraint_arc.alpha =
+            checkedScaleWorkerLagrange(constraint_arc.alpha, factor);
+        constraint_arc.last_alpha =
+            checkedScaleWorkerLagrange(constraint_arc.last_alpha, factor);
+      }
+      loaded->solver->scaleProblem(factor, saturate_capacity_overflow);
     }
   }
 
@@ -733,6 +773,58 @@ public:
       if (stored.resident_worker) {
         stored.resident_worker->scaleObjective(factor,
                                                saturate_capacity_overflow);
+      } else {
+        invalidateWarmState(&stored);
+      }
+    }
+  }
+
+  void scaleObjectivePartitions(
+      const std::vector<int> &partition_ids, long factor,
+      bool saturate_capacity_overflow = false) override {
+    if (partition_ids.empty()) {
+      throw std::runtime_error(
+          "objective scaling requires at least one partition id");
+    }
+    if (factor <= 0) {
+      throw std::runtime_error("objective scale factor must be positive");
+    }
+    std::unordered_set<int> seen;
+    std::vector<StoredPartition *> stored_partitions;
+    stored_partitions.reserve(partition_ids.size());
+    for (const int partition_id : partition_ids) {
+      if (!seen.insert(partition_id).second) {
+        throw std::runtime_error("duplicate objective scale partition id " +
+                                 std::to_string(partition_id));
+      }
+      auto find_iter = partitions_.find(partition_id);
+      if (find_iter == partitions_.end()) {
+        throw std::runtime_error("unknown partition id " +
+                                 std::to_string(partition_id));
+      }
+      stored_partitions.push_back(&find_iter->second);
+    }
+    for (auto *stored_ptr : stored_partitions) {
+      auto &stored = *stored_ptr;
+      const int partition_id = stored.partition_id;
+      for (auto &binding : stored.constraint_endpoints) {
+        binding.alpha = checkedScaleWorkerLagrange(binding.alpha, factor);
+        binding.last_alpha =
+            checkedScaleWorkerLagrange(binding.last_alpha, factor);
+      }
+      auto package = readPackagePayload(stored);
+      for (auto &capacity : package.arc_capacities) {
+        capacity = checkedScaleWorkerCapacity(
+            capacity, factor, saturate_capacity_overflow);
+      }
+      for (auto &capacity : package.terminal_capacities) {
+        capacity = checkedScaleWorkerCapacity(
+            capacity, factor, saturate_capacity_overflow);
+      }
+      writePackagePayload(stored.path, package);
+      if (stored.resident_worker) {
+        stored.resident_worker->scaleObjectivePartitions(
+            {partition_id}, factor, saturate_capacity_overflow);
       } else {
         invalidateWarmState(&stored);
       }
