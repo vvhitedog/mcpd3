@@ -583,6 +583,28 @@ void inProcessPartitionWorkerReturnsFullLabelsOnRequest() {
   require(full_result.full_labels[0].label == worker.minCutSolution(3)[0] &&
               full_result.full_labels[1].label == worker.minCutSolution(3)[1],
           "full labels should match the worker min-cut solution");
+
+  std::vector<mcpd3::NodeLabel> copied_labels(2);
+  worker.copyFullLabels(package.partition_id, copied_labels.data(),
+                        copied_labels.size());
+  require(copied_labels[0].global_node_id == 10 &&
+              copied_labels[0].local_index == 0 &&
+              copied_labels[0].label == full_result.full_labels[0].label &&
+              copied_labels[1].global_node_id == 20 &&
+              copied_labels[1].local_index == 1 &&
+              copied_labels[1].label == full_result.full_labels[1].label,
+          "bounded label recovery should copy the current solved labeling");
+  requireThrows(
+      [&] {
+        worker.copyFullLabels(package.partition_id, copied_labels.data(), 1);
+      },
+      "bounded label recovery should reject a wrong destination count");
+  requireThrows(
+      [&] { worker.copyFullLabels(package.partition_id, nullptr, 2); },
+      "bounded label recovery should reject a null destination");
+  requireThrows(
+      [&] { worker.copyFullLabels(/*partition_id=*/999, nullptr, 0); },
+      "bounded label recovery should reject an unknown partition");
 }
 
 long countWorkerDisagreements(
@@ -3226,6 +3248,13 @@ std::vector<mcpd3::PartitionPackage> makeCoordinatorPackages() {
 }
 
 void coordinatorCollectsFinalLabelsWhenRequested() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-coordinator-label-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
   std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
   workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
   workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
@@ -3238,6 +3267,9 @@ void coordinatorCollectsFinalLabelsWhenRequested() {
   options.enable_group_stopping = false;
   options.use_momentum = false;
   options.collect_final_labels = true;
+  options.final_label_storage.mode =
+      mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  options.final_label_storage.directory = scratch.string();
 
   mcpd3::PartitionWorkerCoordinator coordinator(
       makeCoordinatorPackages(), std::move(workers), options);
@@ -3247,6 +3279,8 @@ void coordinatorCollectsFinalLabelsWhenRequested() {
           "coordinator should solve the agreeing toy problem");
   require(result.final_labels.size() == 2,
           "coordinator should collect one full label per local node copy");
+  require(result.final_labels.isFileBacked(),
+          "coordinator final labels should honor mapped result storage");
   require(result.final_labels[0].global_node_id == 11 &&
               result.final_labels[1].global_node_id == 11,
           "coordinator final labels should preserve global node ids");
@@ -3255,6 +3289,7 @@ void coordinatorCollectsFinalLabelsWhenRequested() {
           "coordinator final labels should preserve local indices");
   require(result.final_labels[0].label == result.final_labels[1].label,
           "coordinator final labels should agree at convergence");
+  std::filesystem::remove_all(scratch);
 }
 
 mcpd3::PartitionWorkerResourceEstimate makeWorkerResources(int cpu_count,

@@ -174,3 +174,12 @@
 - Do not assume moving a resident package into a file-backed worker applies the
   worker storage policy. The worker must explicitly rehome arrays whose backing
   mode differs, while adopting already mapped arrays without a copy.
+
+## 2026-07-20 - Resident final-label aggregation
+
+- Do not recover a large final cut by asking every partition solve to return a
+  resident full-label vector and concatenating those vectors. This creates
+  partition-sized worker results plus a duplicate aggregate allocation.
+- Recover the already-solved labels through bounded worker copies into the
+  coordinator's final mapped destination. The recovery API must not trigger a
+  different solve or reconstruct local state.

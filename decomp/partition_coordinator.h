@@ -93,6 +93,7 @@ struct PartitionWorkerCoordinatorOptions {
   unsigned int initial_alpha_random_seed = 0;
   int progress_report_interval = 0;
   bool collect_final_labels = false;
+  SolverStorageOptions final_label_storage;
   std::function<void(const PartitionWorkerProgressRecord &)> progress_callback;
 };
 
@@ -191,7 +192,7 @@ struct PartitionWorkerCoordinatorSolveResult {
   bool has_best_lower_bound = false;
   bool has_best_certified_lower_bound = false;
   bool has_best_regularized_objective = false;
-  std::vector<NodeLabel> final_labels;
+  SolverArray<NodeLabel> final_labels;
   std::vector<PartitionWorkerProgressRecord> progress_records;
   std::vector<PartitionWorkerScaleResult> scale_results;
   PartitionWorkerCoordinatorTimingStats timing;
@@ -253,6 +254,7 @@ public:
       PartitionPackage coordinator_package;
       coordinator_package.partition_id = partition_id;
       coordinator_package.constraint_endpoints = package.constraint_endpoints;
+      package_local_node_counts_.push_back(package.local_node_count);
       packages_by_worker_[worker_index].push_back(packages_.size());
       packages_.push_back(std::move(coordinator_package));
       workers_[worker_index]->loadPartition(std::move(packages[i]));
@@ -301,15 +303,47 @@ public:
     return snapshots;
   }
 
-  std::vector<NodeLabel> collectFullLabels(long round_id, long scale,
-                                           const Capacity &regularization_strength) {
-    const auto results =
-        solvePartitions(round_id, scale, regularization_strength,
-                        /*return_full_labels=*/true);
-    std::vector<NodeLabel> labels;
-    for (const auto &result : results) {
-      labels.insert(labels.end(), result.full_labels.begin(),
-                    result.full_labels.end());
+  SolverArray<NodeLabel> collectFullLabels(
+      long round_id, long scale,
+      const Capacity &regularization_strength) {
+    (void)solvePartitions(round_id, scale, regularization_strength,
+                          /*return_full_labels=*/false);
+    std::vector<std::size_t> offsets(packages_.size() + 1, 0);
+    for (std::size_t i = 0; i < packages_.size(); ++i) {
+      const auto count = static_cast<std::size_t>(package_local_node_counts_[i]);
+      if (count > std::numeric_limits<std::size_t>::max() - offsets[i]) {
+        throw std::overflow_error("full label count overflow");
+      }
+      offsets[i + 1] = offsets[i] + count;
+    }
+    SolverArray<NodeLabel> labels(offsets.back(),
+                                 options_.final_label_storage,
+                                 "coordinator_final_labels");
+    std::mutex exception_mutex;
+    std::exception_ptr first_exception;
+    for (const auto worker_index : active_worker_indices_) {
+      thread_pool_.push([&, worker_index] {
+        try {
+          for (const auto package_index :
+               packages_by_worker_[worker_index]) {
+            const auto count = static_cast<std::size_t>(
+                package_local_node_counts_[package_index]);
+            workers_[worker_index]->copyFullLabels(
+                packages_[package_index].partition_id,
+                count == 0 ? nullptr : labels.begin() + offsets[package_index],
+                count);
+          }
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(exception_mutex);
+          if (!first_exception) {
+            first_exception = std::current_exception();
+          }
+        }
+      });
+    }
+    thread_pool_.wait();
+    if (first_exception) {
+      std::rethrow_exception(first_exception);
     }
     return labels;
   }
@@ -1527,6 +1561,7 @@ private:
 
   static constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();
   std::vector<PartitionPackage> packages_;
+  std::vector<int> package_local_node_counts_;
   std::vector<std::unique_ptr<PartitionWorker>> workers_;
   PartitionWorkerCoordinatorOptions options_;
   ThreadPool<void> thread_pool_;

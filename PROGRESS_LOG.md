@@ -486,3 +486,14 @@
 - Added tests for direct mapped label generation, zero-copy package transfer,
   mapped package payloads, and exact resident/file-backed worker behavior.
   MCPD3 passes 2/2 CTest targets.
+
+## 2026-07-20 23:44 PDT - Backing-preserving final-label recovery
+
+- Added a shared worker contract that copies the current solved partition
+  labeling into a caller-provided bounded destination. It does not solve again,
+  reconstruct the worker, or allocate a partition-sized result vector.
+- Final coordinator recovery still performs the same local solve at the final
+  alpha and regularization state, then copies worker-owned labels in parallel
+  and package order into one configurable `SolverArray<NodeLabel>`.
+- Added mapped-result, exact-content, count, null-destination, and unknown-ID
+  branch tests. MCPD3 passes both CTest targets in Release mode.

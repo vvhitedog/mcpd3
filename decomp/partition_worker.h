@@ -224,6 +224,14 @@ public:
     throw std::runtime_error(
         "partition worker does not support capacity replacement");
   }
+  virtual void copyFullLabels(int partition_id, NodeLabel *destination,
+                              std::size_t count) {
+    (void)partition_id;
+    (void)destination;
+    (void)count;
+    throw std::runtime_error(
+        "partition worker does not support bounded label recovery");
+  }
 };
 
 class InProcessPartitionWorker final : public PartitionWorker {
@@ -353,6 +361,26 @@ public:
         update.arc_capacities, update.terminal_capacities,
         update.preserve_flow_state, update.flow_scale_numerator,
         update.flow_scale_denominator);
+  }
+
+  void copyFullLabels(int partition_id, NodeLabel *destination,
+                      std::size_t count) override {
+    const auto &loaded = loadedPartitionById(partition_id);
+    if (count != static_cast<std::size_t>(loaded.local_node_count)) {
+      throw std::runtime_error("full label destination count mismatch");
+    }
+    if (count != 0 && destination == nullptr) {
+      throw std::runtime_error("full label destination must not be null");
+    }
+    for (std::size_t local_index = 0; local_index < count; ++local_index) {
+      const int global_node_id =
+          loaded.local_to_global.empty()
+              ? static_cast<int>(local_index)
+              : loaded.local_to_global[local_index];
+      destination[local_index] = NodeLabel{
+          global_node_id, static_cast<int>(local_index),
+          loaded.solver->getMinCutSolution(static_cast<int>(local_index))};
+    }
   }
 
 private:
@@ -717,6 +745,19 @@ public:
     stored.has_warm_state = false;
     std::error_code error;
     std::filesystem::remove(stored.warm_state_path, error);
+  }
+
+  void copyFullLabels(int partition_id, NodeLabel *destination,
+                      std::size_t count) override {
+    auto find_iter = partitions_.find(partition_id);
+    if (find_iter == partitions_.end()) {
+      throw std::runtime_error("unknown partition id " +
+                               std::to_string(partition_id));
+    }
+    auto &stored = find_iter->second;
+    auto *worker = materializePartition(&stored);
+    worker->copyFullLabels(partition_id, destination, count);
+    stored.last_used = ++use_clock_;
   }
 
   std::uint64_t residentBytesForTesting() const { return resident_bytes_; }
