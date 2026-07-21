@@ -75,6 +75,13 @@ struct PartitionPackage {
   std::vector<int> local_to_global;
   std::vector<ConstraintEndpointBinding> constraint_endpoints;
   long objective_multiplier = 1;
+  CanonicalCutSelection canonical_cut_selection =
+      CanonicalCutSelection::SOLVER_DEFAULT;
+  bool force_full_mincut_recompute = false;
+  std::vector<int> reference_cut_labels;
+  ReferenceCutSelection reference_cut_selection =
+      ReferenceCutSelection::CLOSEST_EXACT;
+  long reference_cut_check_interval = 1;
 };
 
 struct PartitionSolveRequest {
@@ -96,6 +103,15 @@ struct PartitionSolveResult {
   long regularization_active_sink_count = 0;
   std::vector<ConstraintLabel> constrained_labels;
   std::vector<NodeLabel> full_labels;
+};
+
+struct PartitionCapacityUpdate {
+  int partition_id = -1;
+  std::vector<Capacity> arc_capacities;
+  std::vector<Capacity> terminal_capacities;
+  bool preserve_flow_state = true;
+  Objective flow_scale_numerator = 1;
+  Objective flow_scale_denominator = 1;
 };
 
 struct PartitionWorkerResourceEstimate {
@@ -161,6 +177,15 @@ inline void validatePartitionPackage(const PartitionPackage &package) {
           "constraint endpoint is outside local node range");
     }
   }
+  if (!package.reference_cut_labels.empty() &&
+      package.reference_cut_labels.size() !=
+          static_cast<size_t>(package.local_node_count)) {
+    throw std::runtime_error(
+        "reference cut label count must match local node count");
+  }
+  if (package.reference_cut_check_interval <= 0) {
+    throw std::runtime_error("reference cut check interval must be positive");
+  }
 }
 
 class PartitionWorker {
@@ -186,10 +211,20 @@ public:
   }
   virtual void scaleObjective(long factor,
                               bool saturate_capacity_overflow = false) = 0;
+  virtual void replacePartitionCapacities(
+      const PartitionCapacityUpdate &update) {
+    (void)update;
+    throw std::runtime_error(
+        "partition worker does not support capacity replacement");
+  }
 };
 
 class InProcessPartitionWorker final : public PartitionWorker {
 public:
+  InProcessPartitionWorker() = default;
+  explicit InProcessPartitionWorker(SolverStorageOptions storage_options)
+      : storage_options_(std::move(storage_options)) {}
+
   void loadPartition(const PartitionPackage &package) override {
     PartitionPackage copy = package;
     loadPartition(std::move(copy));
@@ -214,7 +249,18 @@ public:
     loaded.solver = std::make_unique<PrimalDualMinCutSolver>(
         local_node_count, arc_count, std::move(package.arcs),
         std::move(package.arc_capacities),
-        std::move(package.terminal_capacities));
+        std::move(package.terminal_capacities), storage_options_);
+    loaded.solver->setCanonicalCutSelection(package.canonical_cut_selection);
+    loaded.solver->setForceFullMinCutRecompute(
+        package.force_full_mincut_recompute);
+    if (!package.reference_cut_labels.empty()) {
+      loaded.solver->setReferenceCutLabels(
+          std::move(package.reference_cut_labels));
+      loaded.solver->setReferenceCutSelection(
+          package.reference_cut_selection);
+      loaded.solver->setReferenceCutCheckInterval(
+          package.reference_cut_check_interval);
+    }
 
     for (const auto &binding : loaded.constraint_endpoints) {
       addConstraintEndpoint(&loaded, binding);
@@ -292,6 +338,15 @@ public:
     }
   }
 
+  void replacePartitionCapacities(
+      const PartitionCapacityUpdate &update) override {
+    auto &loaded = loadedPartitionById(update.partition_id);
+    loaded.solver->replaceProblemCapacities(
+        update.arc_capacities, update.terminal_capacities,
+        update.preserve_flow_state, update.flow_scale_numerator,
+        update.flow_scale_denominator);
+  }
+
 private:
   struct LoadedPartition {
     int partition_id = -1;
@@ -327,6 +382,11 @@ public:
   PrimalDualMinCutSolver::WarmState warmState(int partition_id) const {
     const auto &loaded = loadedPartitionById(partition_id);
     return loaded.solver->captureWarmState();
+  }
+
+  PrimalDualMinCutSolver::StorageDiagnostics
+  storageDiagnostics(int partition_id) const {
+    return loadedPartitionById(partition_id).solver->getStorageDiagnostics();
   }
 
   void restoreWarmState(int partition_id,
@@ -477,6 +537,7 @@ private:
     return result;
   }
 
+  SolverStorageOptions storage_options_;
   std::unordered_map<int, LoadedPartition> partitions_;
 };
 
@@ -486,6 +547,7 @@ public:
     std::string storage_directory;
     std::uint64_t resident_byte_limit = 0;
     bool remove_storage_on_destroy = true;
+    SolverStorageOptions solver_storage;
   };
 
   StreamingPartitionWorker() : StreamingPartitionWorker(Options{}) {}
@@ -626,6 +688,27 @@ public:
         invalidateWarmState(&stored);
       }
     }
+  }
+
+  void replacePartitionCapacities(
+      const PartitionCapacityUpdate &update) override {
+    auto find_iter = partitions_.find(update.partition_id);
+    if (find_iter == partitions_.end()) {
+      throw std::runtime_error("unknown partition id " +
+                               std::to_string(update.partition_id));
+    }
+    auto &stored = find_iter->second;
+    auto *worker = materializePartition(&stored);
+    worker->replacePartitionCapacities(update);
+    auto package = readPackagePayload(stored);
+    package.arc_capacities = update.arc_capacities;
+    package.terminal_capacities = update.terminal_capacities;
+    writePackagePayload(stored.path, package);
+    stored.last_solution = worker->minCutSolution(stored.partition_id);
+    stored.has_solution = true;
+    stored.has_warm_state = false;
+    std::error_code error;
+    std::filesystem::remove(stored.warm_state_path, error);
   }
 
   std::uint64_t residentBytesForTesting() const { return resident_bytes_; }
@@ -835,7 +918,7 @@ private:
                                path.string());
     }
     const std::uint32_t magic = 0x4d435033;
-    const std::uint32_t version = 3;
+    const std::uint32_t version = 4;
     writeScalar(out, magic, "package magic");
     writeScalar(out, version, "package version");
     writeScalar(out, package.partition_id, "partition id");
@@ -845,6 +928,21 @@ private:
     writeIntegerVector(out, package.terminal_capacities,
                        "terminal capacities");
     writeIntVector(out, package.local_to_global, "local to global");
+    writeScalar(out, package.objective_multiplier, "objective multiplier");
+    writeScalar(out,
+                static_cast<std::uint32_t>(package.canonical_cut_selection),
+                "canonical cut selection");
+    writeScalar(out,
+                static_cast<std::uint8_t>(
+                    package.force_full_mincut_recompute ? 1 : 0),
+                "force full mincut recompute");
+    writeIntVector(out, package.reference_cut_labels,
+                   "reference cut labels");
+    writeScalar(out,
+                static_cast<std::uint32_t>(package.reference_cut_selection),
+                "reference cut selection");
+    writeScalar(out, package.reference_cut_check_interval,
+                "reference cut check interval");
     out.close();
     if (!out) {
       throw std::runtime_error("failed to flush streaming package file " +
@@ -1004,7 +1102,7 @@ private:
     }
     const auto magic = readScalar<std::uint32_t>(in, "package magic");
     const auto version = readScalar<std::uint32_t>(in, "package version");
-    if (magic != 0x4d435033 || version != 3) {
+    if (magic != 0x4d435033 || (version != 3 && version != 4)) {
       throw std::runtime_error("invalid streaming package file " +
                                stored.path.string());
     }
@@ -1018,6 +1116,35 @@ private:
     package.terminal_capacities = readIntegerVector<Capacity>(
         in, "terminal capacities", parse_capacity);
     package.local_to_global = readIntVector(in, "local to global");
+    if (version >= 4) {
+      package.objective_multiplier =
+          readScalar<long>(in, "objective multiplier");
+      const auto canonical_selection =
+          readScalar<std::uint32_t>(in, "canonical cut selection");
+      if (canonical_selection > static_cast<std::uint32_t>(
+                                    CanonicalCutSelection::MAXIMUM_LABELS)) {
+        throw std::runtime_error(
+            "invalid streaming canonical cut selection");
+      }
+      package.canonical_cut_selection =
+          static_cast<CanonicalCutSelection>(canonical_selection);
+      package.force_full_mincut_recompute =
+          readScalar<std::uint8_t>(in, "force full mincut recompute") != 0;
+      package.reference_cut_labels =
+          readIntVector(in, "reference cut labels");
+      const auto reference_selection =
+          readScalar<std::uint32_t>(in, "reference cut selection");
+      if (reference_selection >
+          static_cast<std::uint32_t>(
+              ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL)) {
+        throw std::runtime_error(
+            "invalid streaming reference cut selection");
+      }
+      package.reference_cut_selection =
+          static_cast<ReferenceCutSelection>(reference_selection);
+      package.reference_cut_check_interval =
+          readScalar<long>(in, "reference cut check interval");
+    }
     package.constraint_endpoints = stored.constraint_endpoints;
     validatePartitionPackage(package);
     return package;
@@ -1077,7 +1204,8 @@ private:
     }
     evictUntilFits(stored->resident_bytes);
     auto package = readPackagePayload(*stored);
-    stored->resident_worker = std::make_unique<InProcessPartitionWorker>();
+    stored->resident_worker =
+        std::make_unique<InProcessPartitionWorker>(options_.solver_storage);
     stored->resident_worker->loadPartition(std::move(package));
     if (stored->has_warm_state) {
       stored->resident_worker->restoreWarmState(

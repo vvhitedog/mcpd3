@@ -149,3 +149,13 @@
 - Native out-of-core mode must execute the existing `DualDecomposition` object
   and differ only in allocation backing. Large persistent arrays, including
   flow and BK residual state, belong in file-backed mappings that remain live.
+
+## 2026-07-20 - Partial worker parity and stale promoted schedules
+
+- Do not treat BK's mmap environment setting as complete worker backing. It
+  leaves the enclosing primal-dual topology, capacities, flow, labels, and
+  change arrays resident, which is enough to OOM before BK paging can help.
+- Do not update only the current objective scale during promotion. Persistent
+  PU solves read the configured initial step on the next cut; leaving it stale
+  causes native and distributed trajectories to diverge after the first
+  promotion even when the current cut happens to finish correctly.

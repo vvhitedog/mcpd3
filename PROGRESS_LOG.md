@@ -431,3 +431,25 @@
   invalid/missing file-backed directory branches. The 32-bit and 64-bit CTest
   suites pass 2/2. The 128-bit suite also passes while explicitly verifying
   that its nontrivial widened objective type rejects raw file-backed storage.
+
+## 2026-07-20 20:17 PDT - Shared native/distributed policy and complete worker backing
+
+- Extracted the regularization scheme, scaled-epsilon strength calculation,
+  and disagreement-plateau tracker into one policy header used by both native
+  `DualDecomposition` and `PartitionWorkerCoordinator`.
+- Added the missing distributed coordinator controls for total iteration
+  limits, plateau activation, epsilon cutoff/cap, and the final unit-step
+  no-momentum retry. Promotion now persists the promoted objective scale as
+  the next solve's configured initial step, matching native continuation.
+- Added exact flow-preserving partition-capacity replacement so persistent
+  workers can continue across PU cuts and quantum changes without rebuilding
+  their local solver or discarding alpha, flow, or BK residual state.
+- Extended `PartitionPackage` with every local-solve policy that affects
+  behavior: objective multiplier, canonical selection, full recomputation,
+  and reference-label selection/check controls.
+- Made in-process and streaming workers pass one storage policy through the
+  complete local solver. File-backed mode now covers topology, capacities,
+  primal-dual flow, labels, change markers, and BK node/residual-arc state.
+- Added branch and trajectory tests for policy propagation, promotion,
+  retries, capacity replacement, and complete mmap backing. The focused
+  partition-worker suite passes.

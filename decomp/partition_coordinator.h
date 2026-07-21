@@ -28,6 +28,7 @@
 #include <decomp/lower_bound_certificate.h>
 #include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
+#include <decomp/regularization_schedule.h>
 #include <multithread/threadpool.h>
 
 namespace mcpd3 {
@@ -50,11 +51,6 @@ enum class PartitionWorkerStopReason {
   REGULARIZATION_BUDGET_EXCEEDED
 };
 
-enum class PartitionWorkerRegularizationScheme {
-  SCALED_EPSILON,
-  NONE
-};
-
 struct PartitionWorkerProgressRecord;
 
 struct PartitionWorkerCoordinatorTimingStats {
@@ -71,8 +67,10 @@ struct PartitionWorkerCoordinatorTimingStats {
 struct PartitionWorkerCoordinatorOptions {
   int num_optimization_scales = 5;
   int max_iteration_count = 10000;
+  long max_total_iteration_count = 0;
   long initial_step_size = 10000;
   int patience = 10;
+  int disagreement_patience = 10;
   bool legacy_patience = false;
   bool exhaust_scale_iterations = false;
   bool exhaust_regularized_scale_iterations = false;
@@ -83,9 +81,12 @@ struct PartitionWorkerCoordinatorOptions {
   bool saturate_capacity_overflow = false;
   PartitionWorkerRegularizationScheme regularization_scheme =
       PartitionWorkerRegularizationScheme::SCALED_EPSILON;
+  int scaled_epsilon_max_step_size = 10;
+  int scaled_epsilon_strength_cap = 0;
   Objective regularization_budget_limit = 0;
   bool promote_objective_scale_on_overbudget = true;
   int max_objective_scale_promotions = 4;
+  bool retry_unit_step_without_momentum = false;
   bool randomize_initial_alphas = false;
   long initial_alpha_random_radius = 0;
   unsigned int initial_alpha_random_seed = 0;
@@ -184,6 +185,8 @@ struct PartitionWorkerCoordinatorSolveResult {
   long final_regularization_anchor_sink_count = 0;
   long final_regularization_active_sink_count = 0;
   long objective_scale_promotion_count = 0;
+  long unit_step_no_momentum_retry_count = 0;
+  long disagreement_plateau_activation_count = 0;
   bool has_best_lower_bound = false;
   bool has_best_certified_lower_bound = false;
   bool has_best_regularized_objective = false;
@@ -261,7 +264,8 @@ public:
   PartitionWorkerRoundStats runRound(long round_id, long scale, long step_size,
                                      const Capacity &regularization_strength) {
     return runRoundInternal(round_id, scale, step_size, regularization_strength,
-                            /*return_full_labels=*/false)
+                            /*return_full_labels=*/false,
+                            options_.use_momentum)
         .stats;
   }
 
@@ -269,7 +273,8 @@ public:
                                               long step_size,
                                               const Capacity &regularization_strength) {
     return runRoundInternal(round_id, scale, step_size, regularization_strength,
-                            /*return_full_labels=*/true);
+                            /*return_full_labels=*/true,
+                            options_.use_momentum);
   }
 
   std::vector<DualDecompositionConstraintSnapshot>
@@ -312,6 +317,61 @@ public:
     return timing_stats_;
   }
 
+  long objectiveScale() const { return options_.objective_scale; }
+  long configuredInitialStepSize() const {
+    return options_.initial_step_size;
+  }
+
+  void configureOptimizationSchedule(
+      int num_optimization_scales, long initial_step_size,
+      bool exhaust_regularized_scale_iterations) {
+    if (num_optimization_scales <= 0) {
+      throw std::invalid_argument(
+          "optimization scale count must be positive");
+    }
+    if (initial_step_size <= 0) {
+      throw std::invalid_argument("initial step size must be positive");
+    }
+    options_.num_optimization_scales = num_optimization_scales;
+    options_.initial_step_size = initial_step_size;
+    options_.exhaust_regularized_scale_iterations =
+        exhaust_regularized_scale_iterations;
+  }
+
+  void replacePartitionCapacities(
+      const std::vector<PartitionCapacityUpdate> &updates,
+      bool preserve_alpha_state = true) {
+    if (updates.size() != packages_.size()) {
+      throw std::runtime_error(
+          "capacity update count must match loaded partition count");
+    }
+    std::vector<bool> updated(packages_.size(), false);
+    for (const auto &update : updates) {
+      const size_t package_index =
+          packageIndexForPartition(update.partition_id);
+      if (updated[package_index]) {
+        throw std::runtime_error("duplicate capacity update partition id " +
+                                 std::to_string(update.partition_id));
+      }
+      workers_[workerIndexForPartition(update.partition_id)]
+          ->replacePartitionCapacities(update);
+      updated[package_index] = true;
+    }
+    if (std::find(updated.begin(), updated.end(), false) != updated.end()) {
+      throw std::runtime_error("capacity update omitted a loaded partition");
+    }
+    if (!preserve_alpha_state) {
+      for (auto &constraint : constraints_) {
+        constraint.alpha = 0;
+        constraint.last_alpha = 0;
+        constraint.alpha_momentum = 0;
+        constraint.needs_sync = true;
+      }
+    }
+    warned_regularization_budget_exceeded_ = false;
+    timing_stats_ = {};
+  }
+
 private:
   static std::uint64_t elapsedUs(std::chrono::steady_clock::time_point start) {
     return static_cast<std::uint64_t>(
@@ -323,7 +383,8 @@ private:
   PartitionWorkerRoundTrace runRoundInternal(long round_id, long scale,
                                              long step_size,
                                              const Capacity &regularization_strength,
-                                             bool return_full_labels) {
+                                             bool return_full_labels,
+                                             bool use_momentum) {
     PartitionWorkerRoundTrace trace;
     const auto solve_partitions_start = std::chrono::steady_clock::now();
     trace.partition_results =
@@ -344,7 +405,8 @@ private:
     updateConstraintsFromLabels(
         trace.partition_results, &trace.stats,
         !isRegularizationBudgetExceeded(trace.stats.regularization_budget,
-                                        regularization_strength));
+                                        regularization_strength),
+        use_momentum);
     if (trace.stats.disagreement_count == 0 &&
         trace.stats.regularization_budget < Objective(options_.objective_scale)) {
       // Agreement makes the local solution globally feasible. With a total
@@ -455,13 +517,17 @@ public:
     long schedule_scale = options_.initial_step_size;
     long step_size = options_.initial_step_size;
     int scale_index = 0;
+    bool unit_step_no_momentum_retry_attempted = false;
     int schedule_level_count = options_.num_optimization_scales;
     while (scale_index < schedule_level_count && step_size >= 1) {
-      auto scale_result =
-          runOptimizationScale(schedule_scale, step_size, &result);
+      auto scale_result = runOptimizationScale(
+          schedule_scale, step_size, options_.use_momentum, &result);
       result.scale_results.push_back(scale_result);
       result.status = scale_result.status;
       result.stop_reason = scale_result.stop_reason;
+      if (totalIterationBudgetExhausted(result)) {
+        break;
+      }
       if (scale_result.status ==
               PartitionWorkerOptimizationStatus::REGULARIZATION_BUDGET_EXCEEDED &&
           tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale, &step_size,
@@ -469,6 +535,7 @@ public:
         schedule_level_count = std::max(
             schedule_level_count, optimizationScheduleLevelCount(step_size));
         scale_index = 0;
+        unit_step_no_momentum_retry_attempted = false;
         continue;
       }
       if (scale_result.status == PartitionWorkerOptimizationStatus::OPTIMAL) {
@@ -479,12 +546,46 @@ public:
         }
         break;
       }
+      if (step_size == 1 && options_.use_momentum &&
+          options_.retry_unit_step_without_momentum &&
+          !unit_step_no_momentum_retry_attempted) {
+        unit_step_no_momentum_retry_attempted = true;
+        ++result.unit_step_no_momentum_retry_count;
+        auto retry_result = runOptimizationScale(
+            schedule_scale, /*step_size=*/1, /*use_momentum=*/false, &result);
+        result.scale_results.push_back(retry_result);
+        result.status = retry_result.status;
+        result.stop_reason = retry_result.stop_reason;
+        if (retry_result.status ==
+            PartitionWorkerOptimizationStatus::OPTIMAL) {
+          if (options_.collect_final_labels) {
+            result.final_labels = collectFullLabels(
+                result.total_iterations + 1, schedule_scale,
+                localRegularizationStrength(/*step_size=*/1));
+          }
+          break;
+        }
+        if (totalIterationBudgetExhausted(result)) {
+          break;
+        }
+        if (retry_result.status == PartitionWorkerOptimizationStatus::
+                                       REGULARIZATION_BUDGET_EXCEEDED &&
+            tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale,
+                                     &step_size, &result)) {
+          schedule_level_count = std::max(
+              schedule_level_count, optimizationScheduleLevelCount(step_size));
+          scale_index = 0;
+          unit_step_no_momentum_retry_attempted = false;
+          continue;
+        }
+      }
       if (step_size == 1 &&
           tryPromoteObjectiveScale(/*factor=*/10, &schedule_scale, &step_size,
                                    &result)) {
         schedule_level_count = std::max(
             schedule_level_count, optimizationScheduleLevelCount(step_size));
         scale_index = 0;
+        unit_step_no_momentum_retry_attempted = false;
         continue;
       }
       schedule_scale = nextOptimizationScheduleValue(schedule_scale);
@@ -560,6 +661,24 @@ private:
     if (options_.max_objective_scale_promotions < 0) {
       throw std::runtime_error(
           "max objective scale promotions must be non-negative");
+    }
+    if (options_.max_total_iteration_count < 0) {
+      throw std::runtime_error(
+          "maximum total iteration count must be non-negative");
+    }
+    if (options_.scaled_epsilon_max_step_size <= 0) {
+      throw std::runtime_error(
+          "scaled epsilon maximum step size must be positive");
+    }
+    if (options_.scaled_epsilon_strength_cap < 0) {
+      throw std::runtime_error(
+          "scaled epsilon strength cap must be non-negative");
+    }
+    if (options_.regularization_scheme ==
+            PartitionWorkerRegularizationScheme::
+                DISAGREEMENT_PLATEAU_EPSILON &&
+        options_.disagreement_patience <= 0) {
+      throw std::runtime_error("disagreement patience must be positive");
     }
     if (options_.progress_report_interval < 0) {
       throw std::runtime_error(
@@ -637,7 +756,8 @@ private:
   };
 
   PartitionWorkerScaleResult runOptimizationScale(
-      long scale, long step_size, PartitionWorkerCoordinatorSolveResult *result) {
+      long scale, long step_size, bool use_momentum,
+      PartitionWorkerCoordinatorSolveResult *result) {
     PartitionWorkerScaleResult scale_result;
     scale_result.scale = scale;
     scale_result.step_size = step_size;
@@ -647,6 +767,17 @@ private:
     Objective scale_best_lower_bound = 0;
     bool has_scale_best_lower_bound = false;
     int last_improvement_iter = 0;
+    const bool disagreement_plateau_mode =
+        options_.regularization_scheme ==
+        PartitionWorkerRegularizationScheme::DISAGREEMENT_PLATEAU_EPSILON;
+    std::unique_ptr<DisagreementPlateauRegularizationTracker>
+        disagreement_plateau_tracker;
+    if (disagreement_plateau_mode) {
+      disagreement_plateau_tracker =
+          std::make_unique<DisagreementPlateauRegularizationTracker>(
+              options_.disagreement_patience);
+    }
+    Capacity regularization_strength = localRegularizationStrength(step_size);
     auto record_round =
         [&](int iteration, const Capacity &regularization_strength,
             const PartitionWorkerRoundStats &round_stats) {
@@ -757,14 +888,17 @@ private:
         };
 
     for (int i = 0; i < options_.max_iteration_count; ++i) {
+      if (totalIterationBudgetExhausted(*result)) {
+        break;
+      }
       ++result->total_iterations;
       ++scale_result.iterations;
 
-      const Capacity regularization_strength =
-          localRegularizationStrength(step_size);
       const auto round_stats =
-          runRound(result->total_iterations, scale, step_size,
-                   regularization_strength);
+          runRoundInternal(result->total_iterations, scale, step_size,
+                           regularization_strength,
+                           /*return_full_labels=*/false, use_momentum)
+              .stats;
 
       if (isRegularizationBudgetExceeded(round_stats.regularization_budget,
                                          regularization_strength)) {
@@ -781,11 +915,30 @@ private:
 
       record_round(i, regularization_strength, round_stats);
 
+      const bool plateau_was_active =
+          disagreement_plateau_mode && disagreement_plateau_tracker->active();
+      const bool plateau_regularization_pulse_now =
+          disagreement_plateau_mode && round_stats.disagreement_count > 0 &&
+          disagreement_plateau_tracker->observe(
+              i, round_stats.disagreement_count);
+      const bool plateau_activated_now =
+          plateau_regularization_pulse_now && !plateau_was_active;
+      if (plateau_regularization_pulse_now) {
+        regularization_strength = capacity_from_integer(1);
+        last_improvement_iter = i;
+        if (plateau_activated_now) {
+          ++result->disagreement_plateau_activation_count;
+        }
+      }
+      const bool standard_early_exit_enabled =
+          !disagreement_plateau_mode || disagreement_plateau_tracker->active();
+
       if (!has_scale_best_lower_bound ||
           round_stats.lower_bound > scale_best_lower_bound) {
         scale_best_lower_bound = round_stats.lower_bound;
         has_scale_best_lower_bound = true;
-        if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+        if (standard_early_exit_enabled &&
+            !shouldSuppressEarlyScaleExit(regularization_strength) &&
             options_.legacy_patience &&
             i - last_improvement_iter >= options_.patience) {
           scale_result.status =
@@ -795,7 +948,8 @@ private:
           return scale_result;
         }
         last_improvement_iter = i;
-      } else if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+      } else if (standard_early_exit_enabled &&
+                 !shouldSuppressEarlyScaleExit(regularization_strength) &&
                  !options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
         scale_result.status =
@@ -805,8 +959,11 @@ private:
         return scale_result;
       }
 
-      lower_bound_group_stats.addValue(round_stats.lower_bound);
-      if (!shouldSuppressEarlyScaleExit(regularization_strength) &&
+      if (standard_early_exit_enabled && !plateau_activated_now) {
+        lower_bound_group_stats.addValue(round_stats.lower_bound);
+      }
+      if (standard_early_exit_enabled && !plateau_activated_now &&
+          !shouldSuppressEarlyScaleExit(regularization_strength) &&
           options_.enable_group_stopping &&
           lower_bound_group_stats.areGroupsPopulated()) {
         auto [first_group_max, second_group_max] =
@@ -831,6 +988,12 @@ private:
               PartitionWorkerStopReason::REGULARIZED_NO_DISAGREEMENT;
         }
         return scale_result;
+      }
+
+      if (disagreement_plateau_mode &&
+          disagreement_plateau_tracker->active() &&
+          !plateau_regularization_pulse_now && regularization_strength != 0) {
+        regularization_strength = 0;
       }
     }
 
@@ -1130,7 +1293,8 @@ private:
 
   void updateConstraintsFromLabels(
       const std::vector<PartitionSolveResult> &results,
-      PartitionWorkerRoundStats *stats, bool update_alpha = true) {
+      PartitionWorkerRoundStats *stats, bool update_alpha = true,
+      bool use_momentum = true) {
     std::vector<ConstraintLabels> labels(constraints_.size());
     for (const auto &result : results) {
       for (const auto &label : result.constrained_labels) {
@@ -1182,7 +1346,7 @@ private:
         }
         continue;
       }
-      if (options_.use_momentum) {
+      if (use_momentum) {
         const double beta = .85;
         const int momentum_scale = 10;
         constraint.alpha_momentum =
@@ -1293,6 +1457,7 @@ private:
   void scaleObjectiveState(long factor,
                            PartitionWorkerCoordinatorSolveResult *result) {
     options_.objective_scale = checkedScaleLong(options_.objective_scale, factor);
+    options_.initial_step_size = options_.objective_scale;
     result->scale = options_.objective_scale;
     result->final_objective_raw =
         checked_scale(result->final_objective_raw, factor);
@@ -1349,11 +1514,14 @@ private:
   }
 
   Capacity localRegularizationStrength(long step_size) const {
-    if (options_.regularization_scheme !=
-        PartitionWorkerRegularizationScheme::SCALED_EPSILON) {
-      return 0;
-    }
-    return step_size <= 10 ? capacity_from_integer(step_size) : Capacity(0);
+    return capacity_from_integer(
+        scaledEpsilonStrengthForStepSize(options_, step_size));
+  }
+
+  bool totalIterationBudgetExhausted(
+      const PartitionWorkerCoordinatorSolveResult &result) const {
+    return options_.max_total_iteration_count > 0 &&
+           result.total_iterations >= options_.max_total_iteration_count;
   }
 
   static constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();

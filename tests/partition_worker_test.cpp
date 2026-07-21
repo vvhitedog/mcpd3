@@ -609,6 +609,9 @@ void exportedPartitionPackagesMatchDualDecompositionRound() {
   options.track_primal_upper_bound = false;
   options.verbose = false;
   options.thread_count = 1;
+  options.canonical_cut_selection =
+      mcpd3::CanonicalCutSelection::MAXIMUM_LABELS;
+  options.force_full_mincut_recompute = true;
 
   mcpd3::DualDecomposition dual_decomp(
       /*npartition=*/2,
@@ -756,6 +759,17 @@ void requirePackagesEqual(const mcpd3::PartitionPackage &lhs,
           "package local_to_global differs");
   require(lhs.objective_multiplier == rhs.objective_multiplier,
           "package objective multiplier differs");
+  require(lhs.canonical_cut_selection == rhs.canonical_cut_selection,
+          "package canonical cut selection differs");
+  require(lhs.force_full_mincut_recompute == rhs.force_full_mincut_recompute,
+          "package full recompute policy differs");
+  require(lhs.reference_cut_labels == rhs.reference_cut_labels,
+          "package reference cut labels differ");
+  require(lhs.reference_cut_selection == rhs.reference_cut_selection,
+          "package reference cut selection differs");
+  require(lhs.reference_cut_check_interval ==
+              rhs.reference_cut_check_interval,
+          "package reference cut interval differs");
   require(lhs.constraint_endpoints.size() ==
               rhs.constraint_endpoints.size(),
           "constraint endpoint count differs");
@@ -1241,6 +1255,11 @@ void packageOnlyExportMatchesSolverBackedExport() {
   options.emit_partition_packages = true;
   options.use_momentum = false;
   options.enable_group_stopping = false;
+  options.force_full_mincut_recompute = true;
+  options.reference_cut_labels = {1, 0};
+  options.reference_cut_selection =
+      mcpd3::ReferenceCutSelection::EXACT_REFERENCE_IF_OPTIMAL;
+  options.reference_cut_check_interval = 2;
 
   mcpd3::DualDecomposition solver_backed(
       /*npartition=*/2,
@@ -1591,6 +1610,240 @@ void partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds() {
       /*use_momentum=*/false);
   partitionWorkerCoordinatorMatchesDualDecompositionParityFixture(
       /*use_momentum=*/true);
+}
+
+void requireLocalWarmStatesEqual(
+    const std::vector<mcpd3::PrimalDualMinCutSolver::WarmState> &actual,
+    const std::vector<mcpd3::PrimalDualMinCutSolver::WarmState> &expected,
+    const std::string &context);
+constexpr bool fileBackedNativeDdSupported();
+
+void partitionWorkerCoordinatorCapacityRefreshMatchesNativeState() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  auto options = makeParityDualOptions(/*use_momentum=*/true);
+  options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  auto initial_graph = makeParityFixtureGraph();
+  mcpd3::DualDecomposition reference(
+      /*npartition=*/4, initial_graph, options);
+
+  auto worker = std::make_unique<mcpd3::InProcessPartitionWorker>();
+  auto *worker_ptr = worker.get();
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::move(worker));
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      reference.getPartitionPackages(), std::move(workers),
+      makeParityCoordinatorOptions(options));
+
+  for (long round = 1; round <= 3; ++round) {
+    const auto trace = coordinator.runRoundWithTrace(
+        round, options.objective_scale, /*step_size=*/100,
+        reference.regularizationStrengthForStepSize(100));
+    reference.runOptimizationScale(/*nstep=*/1, /*step_size=*/100,
+                                   /*max_cycle_count=*/2,
+                                   /*use_momentum=*/true);
+    requireRoundTraceMatchesReference(
+        trace, reference, "capacity refresh prefix round " +
+                              std::to_string(round));
+  }
+
+  auto replacement_graph = initial_graph;
+  for (auto &capacity : replacement_graph.arc_capacities) {
+    capacity *= 2;
+  }
+  for (auto &capacity : replacement_graph.terminal_capacities) {
+    capacity *= 2;
+  }
+
+  auto package_options = options;
+  package_options.construct_solvers = false;
+  mcpd3::DualDecomposition replacement_packages(
+      /*npartition=*/4, replacement_graph, package_options);
+  std::vector<mcpd3::PartitionCapacityUpdate> updates;
+  for (const auto &package : replacement_packages.getPartitionPackages()) {
+    updates.push_back(mcpd3::PartitionCapacityUpdate{
+        package.partition_id,
+        package.arc_capacities,
+        package.terminal_capacities,
+        /*preserve_flow_state=*/true,
+        /*flow_scale_numerator=*/2,
+        /*flow_scale_denominator=*/1});
+  }
+
+  reference.replaceProblemCapacities(
+      replacement_graph.arc_capacities,
+      replacement_graph.terminal_capacities,
+      /*preserve_alpha_state=*/true, /*preserve_flow_state=*/true,
+      /*flow_scale_numerator=*/2, /*flow_scale_denominator=*/1);
+  coordinator.replacePartitionCapacities(
+      updates, /*preserve_alpha_state=*/true);
+
+  std::vector<mcpd3::PrimalDualMinCutSolver::WarmState> worker_states;
+  for (const auto &package : replacement_packages.getPartitionPackages()) {
+    worker_states.push_back(worker_ptr->warmState(package.partition_id));
+  }
+  requireLocalWarmStatesEqual(worker_states,
+                              reference.captureLocalSolverWarmStates(),
+                              "capacity refresh immediate state");
+  requireConstraintSnapshotsEqual(
+      coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+      "capacity refresh preserved alpha");
+
+  for (long round = 4; round <= 8; ++round) {
+    const long step_size = round < 7 ? 10 : 1;
+    const int regularization_strength =
+        reference.regularizationStrengthForStepSize(step_size);
+    const auto trace = coordinator.runRoundWithTrace(
+        round, options.objective_scale, step_size, regularization_strength);
+    reference.runOptimizationScale(/*nstep=*/1, step_size,
+                                   /*max_cycle_count=*/2,
+                                   /*use_momentum=*/true);
+    const std::string context =
+        "capacity refresh suffix round " + std::to_string(round);
+    requireRoundTraceMatchesReference(trace, reference, context);
+    requireConstraintSnapshotsEqual(
+        coordinator.getConstraintSnapshots(), reference.getConstraintSnapshots(),
+        context);
+    requirePartitionSnapshotsEqual(partitionSnapshotsFromTrace(trace),
+                                   reference.getPartitionSnapshots(), context);
+  }
+
+  auto same_capacity_updates = updates;
+  for (auto &update : same_capacity_updates) {
+    update.flow_scale_numerator = 1;
+    update.flow_scale_denominator = 1;
+  }
+  coordinator.replacePartitionCapacities(
+      same_capacity_updates, /*preserve_alpha_state=*/false);
+  const auto reset_constraints = coordinator.getConstraintSnapshots();
+  for (const auto &constraint : reset_constraints) {
+    require(constraint.alpha == 0 && constraint.last_alpha == 0 &&
+                constraint.alpha_momentum == 0,
+            "capacity refresh alpha reset must clear all multiplier state");
+  }
+
+  requireThrows(
+      [&] {
+        auto missing = updates;
+        missing.pop_back();
+        coordinator.replacePartitionCapacities(missing);
+      },
+      "capacity refresh must reject a missing partition");
+  requireThrows(
+      [&] {
+        auto duplicate = updates;
+        duplicate.back().partition_id = duplicate.front().partition_id;
+        coordinator.replacePartitionCapacities(duplicate);
+      },
+      "capacity refresh must reject a duplicate partition");
+}
+
+void coordinatorReconfiguresOnlyThePerSolveSchedule() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+  auto dual_options = makeParityDualOptions(/*use_momentum=*/false);
+  dual_options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
+  mcpd3::DualDecomposition reference(
+      /*npartition=*/4, makeParityFixtureGraph(), dual_options);
+  std::vector<std::unique_ptr<mcpd3::PartitionWorker>> workers;
+  workers.push_back(std::make_unique<mcpd3::InProcessPartitionWorker>());
+  auto options = makeParityCoordinatorOptions(dual_options);
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.initial_step_size = 1000;
+  options.enable_group_stopping = false;
+  options.promote_objective_scale_on_overbudget = false;
+  options.regularization_scheme =
+      mcpd3::PartitionWorkerRegularizationScheme::NONE;
+  mcpd3::PartitionWorkerCoordinator coordinator(
+      reference.getPartitionPackages(), std::move(workers), options);
+
+  coordinator.configureOptimizationSchedule(
+      /*num_optimization_scales=*/3, /*initial_step_size=*/100,
+      /*exhaust_regularized_scale_iterations=*/true);
+  const auto result = coordinator.solve();
+  require(!result.scale_results.empty(),
+          "reconfigured coordinator should execute a scale");
+  require(result.scale_results.front().step_size == 100,
+          "reconfigured coordinator should use the new initial step");
+  require(coordinator.objectiveScale() == options.objective_scale,
+          "schedule reconfiguration must not alter objective scale");
+  requireThrows(
+      [&] { coordinator.configureOptimizationSchedule(0, 1, false); },
+      "schedule reconfiguration must reject zero scale count");
+  requireThrows(
+      [&] { coordinator.configureOptimizationSchedule(1, 0, false); },
+      "schedule reconfiguration must reject zero initial step");
+}
+
+void inProcessWorkerFileBacksEveryPersistentSolverArray() {
+  const auto scratch =
+      std::filesystem::temp_directory_path() /
+      ("mcpd3-worker-file-backed-test-" +
+       std::to_string(std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count()));
+  std::filesystem::create_directories(scratch);
+
+  mcpd3::PartitionPackage package;
+  package.partition_id = 3;
+  package.local_node_count = 2;
+  package.arcs = {0, 1};
+  package.arc_capacities = {7, 7};
+  package.terminal_capacities = {11, -11};
+  package.local_to_global = {4, 5};
+
+  mcpd3::SolverStorageOptions storage;
+  storage.mode = mcpd3::SolverStorageMode::FILE_BACKED_MMAP;
+  storage.directory = scratch.string();
+  if constexpr (!(mcpd3::solver_storage_mmap_compatible_v<mcpd3::Capacity> &&
+                  mcpd3::solver_storage_mmap_compatible_v<mcpd3::NodeFlow> &&
+                  mcpd3::solver_storage_mmap_compatible_v<
+                      mcpd3::TerminalResidual> &&
+                  mcpd3::solver_storage_mmap_compatible_v<mcpd3::Objective>)) {
+    requireThrows(
+        [&] {
+          mcpd3::InProcessPartitionWorker unsupported(storage);
+          unsupported.loadPartition(package);
+        },
+        "file-backed worker must reject nontrivial solver types");
+    std::filesystem::remove_all(scratch);
+    return;
+  }
+
+  mcpd3::InProcessPartitionWorker resident;
+  mcpd3::InProcessPartitionWorker file_backed(storage);
+  resident.loadPartition(package);
+  file_backed.loadPartition(package);
+  const auto diagnostics = file_backed.storageDiagnostics(3);
+  require(diagnostics.topology_file_backed,
+          "worker topology must be file-backed");
+  require(diagnostics.capacity_file_backed,
+          "worker capacities must be file-backed");
+  require(diagnostics.flow_file_backed,
+          "worker flow must be file-backed");
+  require(diagnostics.labels_file_backed,
+          "worker labels must be file-backed");
+  require(diagnostics.bk_nodes_file_backed &&
+              diagnostics.bk_arcs_file_backed,
+          "worker BK state must be file-backed");
+  require(diagnostics.file_backed_bytes > 0,
+          "worker must report file-backed bytes");
+
+  mcpd3::PartitionSolveRequest request;
+  request.round_id = 1;
+  request.partition_id = 3;
+  request.return_full_labels = true;
+  const auto expected = resident.solveRound(request);
+  const auto actual = file_backed.solveRound(request);
+  require(actual.lower_bound == expected.lower_bound,
+          "file-backed worker lower bound must match resident");
+  require(actual.full_labels.size() == expected.full_labels.size(),
+          "file-backed worker label count must match resident");
+  for (size_t index = 0; index < actual.full_labels.size(); ++index) {
+    require(actual.full_labels[index].label == expected.full_labels[index].label,
+            "file-backed worker labels must match resident");
+  }
+  std::filesystem::remove_all(scratch);
 }
 
 void requireFlowWarmStartsEqual(
@@ -2902,6 +3155,162 @@ mcpd3::PartitionWorkerCoordinator makeScriptedCoordinator(
                                            std::move(workers), options);
 }
 
+void coordinatorScaledEpsilonControlsMatchNativeSchedule() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 12;
+  options.max_iteration_count = 2;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 100;
+  options.scaled_epsilon_max_step_size = 12;
+  options.scaled_epsilon_strength_cap = 3;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 0}}, options,
+      &source_worker);
+  const auto result = coordinator.solve();
+
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "custom scaled-epsilon coordinator schedule should agree");
+  require(source_worker->requests().size() == 2,
+          "custom scaled-epsilon schedule should run two rounds");
+  for (const auto &request : source_worker->requests()) {
+    require(request.regularization_strength == 3,
+            "coordinator must apply the configured scaled-epsilon cap");
+  }
+
+  options.scaled_epsilon_max_step_size = 11;
+  ScriptedPartitionWorker *disabled_source_worker = nullptr;
+  auto disabled = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {11, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {21, 0}}, options,
+      &disabled_source_worker);
+  (void)disabled.solve();
+  for (const auto &request : disabled_source_worker->requests()) {
+    require(request.regularization_strength == 0,
+            "coordinator must honor the configured scaled-epsilon cutoff");
+  }
+}
+
+void coordinatorDisagreementPlateauMatchesNativePulses() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 6;
+  options.max_total_iteration_count = 6;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.disagreement_patience = 2;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.objective_scale = 1000;
+  options.regularization_scheme =
+      mcpd3::PartitionWorkerRegularizationScheme::
+          DISAGREEMENT_PLATEAU_EPSILON;
+
+  ScriptedPartitionWorker *source_worker = nullptr;
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}, {10, 0}, {10, 0},
+                                {10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}, {20, 1}, {20, 1},
+                                {20, 1}, {20, 0}},
+      options, &source_worker);
+  const auto result = coordinator.solve();
+
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "plateau regularization fixture should eventually agree");
+  require(result.disagreement_plateau_activation_count == 1,
+          "persistent disagreement should activate plateau mode once");
+  const std::vector<mcpd3::Capacity> expected_strengths{0, 0, 0, 1, 0, 1};
+  require(source_worker->requests().size() == expected_strengths.size(),
+          "plateau fixture request count mismatch");
+  for (size_t i = 0; i < expected_strengths.size(); ++i) {
+    require(source_worker->requests()[i].regularization_strength ==
+                expected_strengths[i],
+            "plateau regularization must pulse only after each complete flat "
+            "window");
+  }
+}
+
+void coordinatorHonorsTotalIterationBudget() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 100;
+  options.max_iteration_count = 10;
+  options.max_total_iteration_count = 2;
+  options.num_optimization_scales = 3;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.promote_objective_scale_on_overbudget = false;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 1}}, options);
+  const auto result = coordinator.solve();
+  require(result.total_iterations == 2,
+          "coordinator must stop at the global iteration budget");
+  require(result.status ==
+              mcpd3::PartitionWorkerOptimizationStatus::
+                  ITERATION_COUNT_EXCEEDED,
+          "global iteration exhaustion must not report optimality");
+}
+
+void coordinatorCanRetryUnitStepWithoutMomentum() {
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.initial_step_size = 1;
+  options.max_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = true;
+  options.retry_unit_step_without_momentum = true;
+  options.promote_objective_scale_on_overbudget = false;
+
+  auto coordinator = makeScriptedCoordinator(
+      std::deque<ScriptedRound>{{10, 0}, {10, 0}},
+      std::deque<ScriptedRound>{{20, 1}, {20, 0}}, options);
+  const auto result = coordinator.solve();
+  require(result.status == mcpd3::PartitionWorkerOptimizationStatus::OPTIMAL,
+          "unit-step no-momentum retry should reach agreement");
+  require(result.unit_step_no_momentum_retry_count == 1,
+          "coordinator should perform exactly one unit-step cleanup retry");
+  require(result.total_iterations == 2,
+          "unit-step cleanup retry should add one solve round");
+}
+
+void coordinatorRejectsInvalidNativeScheduleControls() {
+  auto require_invalid = [](const mcpd3::PartitionWorkerCoordinatorOptions &opts,
+                            const std::string &message) {
+    requireThrows(
+        [&] {
+          auto coordinator = makeScriptedCoordinator(
+              std::deque<ScriptedRound>{{10, 0}},
+              std::deque<ScriptedRound>{{20, 0}}, opts);
+          (void)coordinator;
+        },
+        message);
+  };
+
+  mcpd3::PartitionWorkerCoordinatorOptions options;
+  options.max_total_iteration_count = -1;
+  require_invalid(options, "negative global iteration budget must be rejected");
+  options.max_total_iteration_count = 0;
+  options.scaled_epsilon_max_step_size = 0;
+  require_invalid(options, "zero scaled-epsilon cutoff must be rejected");
+  options.scaled_epsilon_max_step_size = 10;
+  options.scaled_epsilon_strength_cap = -1;
+  require_invalid(options, "negative scaled-epsilon cap must be rejected");
+  options.scaled_epsilon_strength_cap = 0;
+  options.regularization_scheme =
+      mcpd3::PartitionWorkerRegularizationScheme::
+          DISAGREEMENT_PLATEAU_EPSILON;
+  options.disagreement_patience = 0;
+  require_invalid(options, "zero plateau patience must be rejected");
+}
+
 void coordinatorRunRoundReportsCertifiedRegularizedLowerBound() {
   mcpd3::PartitionWorkerCoordinatorOptions options;
   options.use_momentum = false;
@@ -4191,6 +4600,8 @@ void inProcessCoordinatorPromotesObjectiveScaleOnOverBudget() {
           "in-process coordinator should promote objective scale");
   require(result.scale == 100,
           "in-process coordinator should finish at promoted scale");
+  require(coordinator.configuredInitialStepSize() == result.scale,
+          "promotion must retain its restart step for a persistent solve");
   require(result.best_lower_bound_raw == 100,
           "promoted in-process solve should preserve the exact bound: got " +
               mcpd3::integer_to_string(result.best_lower_bound_raw) +
@@ -5848,6 +6259,9 @@ int main() {
     haloFlowHeatAggregatesEveryLocalEdgeCopy();
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
+    partitionWorkerCoordinatorCapacityRefreshMatchesNativeState();
+    coordinatorReconfiguresOnlyThePerSolveSchedule();
+    inProcessWorkerFileBacksEveryPersistentSolverArray();
     fileBackedNativeDdMatchesResidentStateExactly();
     fileBackedNativeDdPreservesPersistentFlowExactly();
     fileBackedNativeDdRejectsInvalidStorage();
@@ -5866,6 +6280,11 @@ int main() {
     dualDecompositionPromotesObjectiveScaleOnOverBudget();
     dualDecompositionPromotesAfterUnitScaleExhaustion();
     dualDecompositionCanRetryUnitStepWithoutMomentum();
+    coordinatorScaledEpsilonControlsMatchNativeSchedule();
+    coordinatorDisagreementPlateauMatchesNativePulses();
+    coordinatorHonorsTotalIterationBudget();
+    coordinatorCanRetryUnitStepWithoutMomentum();
+    coordinatorRejectsInvalidNativeScheduleControls();
     coordinatorRunRoundReportsCertifiedRegularizedLowerBound();
     coordinatorRunRoundStrengthensCertificateAtAgreement();
     coordinatorRunRoundLeavesUnregularizedLowerBoundUnchanged();

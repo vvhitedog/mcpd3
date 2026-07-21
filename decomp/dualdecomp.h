@@ -42,6 +42,7 @@
 #include <decomp/lower_bound_certificate.h>
 #include <decomp/optimization_schedule.h>
 #include <decomp/partition_worker.h>
+#include <decomp/regularization_schedule.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
@@ -84,12 +85,6 @@ inline void dualdecomp_progress_message(const std::string &message) {
   std::fflush(stderr);
 }
 
-enum class DualDecompositionRegularizationScheme {
-  SCALED_EPSILON,
-  DISAGREEMENT_PLATEAU_EPSILON,
-  NONE
-};
-
 struct DualDecompositionIterationRecord {
   long total_iteration = 0;
   int scale_iteration = 0;
@@ -106,67 +101,6 @@ struct DualDecompositionIterationRecord {
   Objective regularization_contribution = 0;
   long solve_loop_microseconds = 0;
   long lagrange_update_microseconds = 0;
-};
-
-class DisagreementPlateauRegularizationTracker {
-public:
-  explicit DisagreementPlateauRegularizationTracker(int patience)
-      : patience_(patience) {
-    if (patience_ <= 0) {
-      throw std::runtime_error("disagreement patience must be positive");
-    }
-    reset();
-  }
-
-  void reset() {
-    active_ = false;
-    has_observation_ = false;
-    has_regularization_pulse_ = false;
-    best_disagreement_count_ = std::numeric_limits<long>::max();
-    last_improvement_iteration_ = 0;
-    last_regularization_pulse_iteration_ = 0;
-  }
-
-  bool observe(int iteration, long disagreement_count) {
-    if (iteration < 0 || disagreement_count < 0) {
-      throw std::runtime_error(
-          "disagreement plateau observations must be non-negative");
-    }
-    if (!has_observation_ ||
-        disagreement_count < best_disagreement_count_) {
-      has_observation_ = true;
-      best_disagreement_count_ = disagreement_count;
-      last_improvement_iteration_ = iteration;
-      return false;
-    }
-    const int window_start =
-        has_regularization_pulse_
-            ? std::max(last_improvement_iteration_,
-                       last_regularization_pulse_iteration_)
-            : last_improvement_iteration_;
-    if (iteration - window_start >= patience_) {
-      active_ = true;
-      has_regularization_pulse_ = true;
-      last_regularization_pulse_iteration_ = iteration;
-      return true;
-    }
-    return false;
-  }
-
-  bool active() const { return active_; }
-  long bestDisagreementCount() const { return best_disagreement_count_; }
-  int iterationsSinceImprovement(int iteration) const {
-    return has_observation_ ? iteration - last_improvement_iteration_ : 0;
-  }
-
-private:
-  int patience_;
-  bool active_ = false;
-  bool has_observation_ = false;
-  bool has_regularization_pulse_ = false;
-  long best_disagreement_count_ = std::numeric_limits<long>::max();
-  int last_improvement_iteration_ = 0;
-  int last_regularization_pulse_iteration_ = 0;
 };
 
 struct DualDecompositionOptions {
@@ -764,17 +698,8 @@ public:
   }
 
   int regularizationStrengthForStepSize(long step_size) const {
-    if (options_.regularization_scheme !=
-        DualDecompositionRegularizationScheme::SCALED_EPSILON) {
-      return 0;
-    }
-    if (step_size > options_.scaled_epsilon_max_step_size) {
-      return 0;
-    }
-    const int step_strength = static_cast<int>(step_size);
-    return options_.scaled_epsilon_strength_cap > 0
-               ? std::min(step_strength, options_.scaled_epsilon_strength_cap)
-               : step_strength;
+    return static_cast<int>(
+        scaledEpsilonStrengthForStepSize(options_, step_size));
   }
 
   int plateauRegularizationStrength() const { return 1; }
@@ -2141,6 +2066,21 @@ private:
         package.partition_id = partition;
         package.local_node_count = min_cut_sub_graph.graph.nnode;
         package.objective_multiplier = halo_objective_multiplier_;
+        package.canonical_cut_selection = options_.canonical_cut_selection;
+        package.force_full_mincut_recompute =
+            options_.force_full_mincut_recompute;
+        package.reference_cut_selection = options_.reference_cut_selection;
+        package.reference_cut_check_interval =
+            options_.reference_cut_check_interval;
+        package.reference_cut_labels.clear();
+        if (!options_.reference_cut_labels.empty()) {
+          package.reference_cut_labels.reserve(
+              min_cut_sub_graph.local_to_global.size());
+          for (const int global_node : min_cut_sub_graph.local_to_global) {
+            package.reference_cut_labels.push_back(
+                options_.reference_cut_labels[static_cast<size_t>(global_node)]);
+          }
+        }
         if (options_.construct_solvers) {
           package.arcs = min_cut_sub_graph.graph.arcs;
           package.arc_capacities = min_cut_sub_graph.graph.arc_capacities;
