@@ -97,12 +97,73 @@ struct DualDecompositionIterationRecord {
   Objective regularized_objective_raw = 0;
   long disagreement_count = 0;
   double disagreement_norm_sq = 0;
+  long positive_disagreement_count = 0;
+  long negative_disagreement_count = 0;
+  long disagreement_entered_count = 0;
+  long disagreement_exited_count = 0;
+  long disagreement_flipped_count = 0;
+  int coherent_disagreement_direction = 0;
+  double coherent_disagreement_fraction = 0.0;
   Capacity regularization_strength = 0;
   Objective regularization_budget = 0;
   Objective regularization_contribution = 0;
   long solve_loop_microseconds = 0;
   long lagrange_update_microseconds = 0;
 };
+
+enum class DualDecompositionStepPolicy {
+  FixedScaleSchedule,
+  PolyakUpperBoundGap,
+  CoherentBoundaryBisection,
+};
+
+inline int coherent_boundary_direction(long positive_count,
+                                       long negative_count,
+                                       long constraint_count,
+                                       double dominance_fraction) {
+  if (constraint_count <= 0) {
+    return 0;
+  }
+  const double threshold =
+      dominance_fraction * static_cast<double>(constraint_count);
+  if (static_cast<double>(positive_count) >= threshold &&
+      positive_count > negative_count) {
+    return 1;
+  }
+  if (static_cast<double>(negative_count) >= threshold &&
+      negative_count > positive_count) {
+    return -1;
+  }
+  return 0;
+}
+
+inline long coherent_boundary_bisection_step(long current_step,
+                                              long minimum_step,
+                                              int previous_direction,
+                                              int current_direction) {
+  if (previous_direction == 0 || current_direction == 0 ||
+      previous_direction == current_direction) {
+    return std::max(current_step, minimum_step);
+  }
+  return std::max(minimum_step, current_step / 2);
+}
+
+enum class DisagreementTransition { Unchanged, Entered, Exited, Flipped };
+
+inline DisagreementTransition classify_disagreement_transition(int previous,
+                                                               int current) {
+  if (previous == 0 && current != 0) {
+    return DisagreementTransition::Entered;
+  }
+  if (previous != 0 && current == 0) {
+    return DisagreementTransition::Exited;
+  }
+  if ((previous < 0 && current > 0) ||
+      (previous > 0 && current < 0)) {
+    return DisagreementTransition::Flipped;
+  }
+  return DisagreementTransition::Unchanged;
+}
 
 struct DualDecompositionOptions {
   int num_optimization_scales = 5;
@@ -126,6 +187,10 @@ struct DualDecompositionOptions {
   bool verbose = true;
   long min_step_size = 1;
   long objective_scale = 1;
+  DualDecompositionStepPolicy step_policy =
+      DualDecompositionStepPolicy::FixedScaleSchedule;
+  double polyak_step_theta = 1.0;
+  double coherent_boundary_dominance_fraction = 0.8;
   size_t thread_count = 0;
   DualDecompositionRegularizationScheme regularization_scheme =
       DualDecompositionRegularizationScheme::SCALED_EPSILON;
@@ -268,6 +333,16 @@ public:
   }
   Objective getCurrentUpperBoundRaw() const { return current_upper_bound_; }
   bool hasCurrentUpperBound() const { return has_current_upper_bound_; }
+  void setKnownPrimalUpperBoundRaw(const Objective &upper_bound) {
+    if (upper_bound < Objective{0}) {
+      throw std::runtime_error(
+          "known primal upper bound must be non-negative");
+    }
+    best_upper_bound_ = upper_bound;
+    current_upper_bound_ = upper_bound;
+    has_best_upper_bound_ = true;
+    has_current_upper_bound_ = true;
+  }
   Objective getLastOriginalObjectiveRaw() const {
     return last_original_objective_raw_;
   }
@@ -969,6 +1044,11 @@ public:
     total_optimization_iterations_ = 0;
     unit_step_no_momentum_retry_count_ = 0;
     disagreement_plateau_activation_count_ = 0;
+    previous_disagreement_diffs_.clear();
+    has_previous_disagreement_diffs_ = false;
+    coherent_boundary_bisection_step_ = 0;
+    coherent_boundary_bisection_scheduled_step_ = 0;
+    previous_coherent_boundary_direction_ = 0;
     int iscale = 0;
     bool unit_step_no_momentum_retry_attempted = false;
     int schedule_level_count = options_.num_optimization_scales;
@@ -1058,6 +1138,14 @@ public:
     std::list<int> disagreeing_global_indices;
     long disagreement_count = 0;
     double disagreement_norm_sq = 0;
+    long positive_disagreement_count = 0;
+    long negative_disagreement_count = 0;
+    long disagreement_entered_count = 0;
+    long disagreement_exited_count = 0;
+    long disagreement_flipped_count = 0;
+    long constraint_count = 0;
+    int coherent_disagreement_direction = 0;
+    double coherent_disagreement_fraction = 0.0;
     long effective_step_size = 0;
   };
 
@@ -1388,6 +1476,13 @@ public:
             regularized_objective,
             update_stats.disagreement_count,
             update_stats.disagreement_norm_sq,
+            update_stats.positive_disagreement_count,
+            update_stats.negative_disagreement_count,
+            update_stats.disagreement_entered_count,
+            update_stats.disagreement_exited_count,
+            update_stats.disagreement_flipped_count,
+            update_stats.coherent_disagreement_direction,
+            update_stats.coherent_disagreement_fraction,
             round_regularization_strength,
             last_regularization_budget_,
             last_regularization_contribution_,
@@ -1661,10 +1756,69 @@ private:
     return hash;
   }
 
+  long effectiveLagrangeStep(long scheduled_step,
+                             const Objective &lower_bound,
+                             const LagrangeUpdateStats &stats) {
+    const long fallback = std::max(scheduled_step, options_.min_step_size);
+    if (options_.step_policy ==
+        DualDecompositionStepPolicy::CoherentBoundaryBisection) {
+      if (coherent_boundary_bisection_scheduled_step_ != scheduled_step) {
+        coherent_boundary_bisection_scheduled_step_ = scheduled_step;
+        coherent_boundary_bisection_step_ =
+            coherent_boundary_bisection_step_ <= 0
+                ? fallback
+                : std::min(coherent_boundary_bisection_step_, fallback);
+      }
+      coherent_boundary_bisection_step_ = coherent_boundary_bisection_step(
+          coherent_boundary_bisection_step_, options_.min_step_size,
+          previous_coherent_boundary_direction_,
+          stats.coherent_disagreement_direction);
+      if (stats.coherent_disagreement_direction != 0) {
+        previous_coherent_boundary_direction_ =
+            stats.coherent_disagreement_direction;
+      }
+      return coherent_boundary_bisection_step_;
+    }
+    if (options_.step_policy !=
+            DualDecompositionStepPolicy::PolyakUpperBoundGap ||
+        !has_best_upper_bound_ || stats.disagreement_norm_sq <= 0.0) {
+      return fallback;
+    }
+    if (best_upper_bound_ <= lower_bound) {
+      return options_.min_step_size;
+    }
+    const double raw_step =
+        options_.polyak_step_theta *
+        integer_to_double(best_upper_bound_ - lower_bound) /
+        stats.disagreement_norm_sq;
+    if (!std::isfinite(raw_step)) {
+      return fallback;
+    }
+    if (raw_step <= static_cast<double>(options_.min_step_size)) {
+      return options_.min_step_size;
+    }
+    if (raw_step >= static_cast<double>(fallback)) {
+      return fallback;
+    }
+    return std::max(options_.min_step_size,
+                    static_cast<long>(std::llround(raw_step)));
+  }
+
   LagrangeUpdateStats runLagrangeMultipliersUpdateStep(long step_size,
                                                        bool use_momentum,
                                                        const Objective &lower_bound) {
     LagrangeUpdateStats stats;
+    size_t constraint_count = 0;
+    for (const auto &[global_index, constraints] : constraint_arc_map_) {
+      (void)global_index;
+      constraint_count += constraints.size();
+    }
+    stats.constraint_count = static_cast<long>(constraint_count);
+    if (previous_disagreement_diffs_.size() != constraint_count) {
+      previous_disagreement_diffs_.assign(constraint_count, 0);
+      has_previous_disagreement_diffs_ = false;
+    }
+    size_t constraint_index = 0;
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
       for (auto &constraint : constraints) {
@@ -1677,15 +1831,58 @@ private:
           disagreement_exists = true;
           stats.disagreement_count += std::abs(diff);
           stats.disagreement_norm_sq += static_cast<double>(diff * diff);
+          if (diff > 0) {
+            stats.positive_disagreement_count += diff;
+          } else {
+            stats.negative_disagreement_count -= diff;
+          }
         }
+        if (has_previous_disagreement_diffs_) {
+          const int previous = previous_disagreement_diffs_[constraint_index];
+          switch (classify_disagreement_transition(previous, diff)) {
+          case DisagreementTransition::Entered:
+            ++stats.disagreement_entered_count;
+            break;
+          case DisagreementTransition::Exited:
+            ++stats.disagreement_exited_count;
+            break;
+          case DisagreementTransition::Flipped:
+            ++stats.disagreement_flipped_count;
+            break;
+          case DisagreementTransition::Unchanged:
+            break;
+          }
+        }
+        previous_disagreement_diffs_[constraint_index] =
+            static_cast<std::int8_t>(diff);
+        ++constraint_index;
       }
       if (disagreement_exists) {
         stats.disagreeing_global_indices.emplace_back(global_index);
       }
     }
-    (void)lower_bound;
-    stats.effective_step_size = std::max(step_size, options_.min_step_size);
+    has_previous_disagreement_diffs_ = true;
+    const long dominant_count =
+        std::max(stats.positive_disagreement_count,
+                 stats.negative_disagreement_count);
+    if (stats.constraint_count > 0) {
+      stats.coherent_disagreement_fraction =
+          static_cast<double>(dominant_count) /
+          static_cast<double>(stats.constraint_count);
+    }
+    if (npartition_ == 2) {
+      stats.coherent_disagreement_direction = coherent_boundary_direction(
+          stats.positive_disagreement_count,
+          stats.negative_disagreement_count, stats.constraint_count,
+          options_.coherent_boundary_dominance_fraction);
+    }
+    stats.effective_step_size =
+        effectiveLagrangeStep(step_size, lower_bound, stats);
 
+    const bool coherent_boundary_update =
+        options_.step_policy ==
+            DualDecompositionStepPolicy::CoherentBoundaryBisection &&
+        stats.coherent_disagreement_direction != 0;
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       for (auto &constraint : constraints) {
         constraint.last_alpha = constraint.alpha; // record alpha before update
@@ -1694,12 +1891,16 @@ private:
                 constraint.local_index_target) -
             solvers_[constraint.partition_index_source]->getMinCutSolution(
                 constraint.local_index_source);
-        if (diff != 0) {
-          if (use_momentum) {
+        const int update_diff = coherent_boundary_update
+                                    ? stats.coherent_disagreement_direction
+                                    : diff;
+        if (update_diff != 0) {
+          if (use_momentum && !coherent_boundary_update) {
             const double beta = .85;
             const int momentum_scale = 10;
             constraint.alpha_momentum =
-                beta * constraint.alpha_momentum * beta + (1 - beta) * diff;
+                beta * constraint.alpha_momentum * beta +
+                (1 - beta) * update_diff;
             const long alpha_update =
                 stats.effective_step_size *
                 static_cast<int>(momentum_scale * constraint.alpha_momentum);
@@ -1709,7 +1910,8 @@ private:
           } else {
             constraint.alpha = checked_add(
                 constraint.alpha,
-                lagrange_from_integer(stats.effective_step_size * diff),
+                lagrange_from_integer(stats.effective_step_size *
+                                      update_diff),
                 "lagrange multiplier overflow");
           }
         }
@@ -1721,6 +1923,16 @@ private:
   void validateOptions() const {
     if (options_.objective_scale <= 0) {
       throw std::runtime_error("objective scale must be positive");
+    }
+    if (!std::isfinite(options_.polyak_step_theta) ||
+        options_.polyak_step_theta <= 0.0) {
+      throw std::runtime_error("Polyak step theta must be positive and finite");
+    }
+    if (!std::isfinite(options_.coherent_boundary_dominance_fraction) ||
+        options_.coherent_boundary_dominance_fraction <= 0.5 ||
+        options_.coherent_boundary_dominance_fraction > 1.0) {
+      throw std::runtime_error(
+          "coherent boundary dominance fraction must be in (0.5, 1]");
     }
     if (options_.halo_depth != kInfiniteHaloDepth &&
         options_.halo_depth < 1) {
@@ -2802,6 +3014,11 @@ private:
   std::size_t partition_package_zero_copy_transfer_count_ = 0;
   long halo_objective_multiplier_;
   long disagreement_plateau_activation_count_ = 0;
+  std::vector<std::int8_t> previous_disagreement_diffs_;
+  bool has_previous_disagreement_diffs_ = false;
+  long coherent_boundary_bisection_step_ = 0;
+  long coherent_boundary_bisection_scheduled_step_ = 0;
+  int previous_coherent_boundary_direction_ = 0;
   bool warned_regularization_budget_exceeded_;
   std::list<int> disagreeing_global_indices_;
 

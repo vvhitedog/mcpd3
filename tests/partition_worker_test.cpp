@@ -2999,6 +2999,139 @@ void dualDecompositionObjectiveScaleIsIndependentOfStepSize() {
   require(threw, "nonpositive dual decomposition objective scale should fail");
 }
 
+void dualDecompositionPolyakStepUsesPrimalDualGap() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 1;
+  options.initial_step_size = 10000;
+  options.max_iteration_count = 100;
+  options.max_total_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.patience = 99;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.step_policy =
+      mcpd3::DualDecompositionStepPolicy::PolyakUpperBoundGap;
+  options.polyak_step_theta = 1.0;
+
+  std::vector<mcpd3::DualDecompositionIterationRecord> records;
+  options.iteration_callback =
+      [&](const mcpd3::DualDecompositionIterationRecord &record) {
+        records.push_back(record);
+      };
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+  bool rejected_negative_upper_bound = false;
+  try {
+    dual_decomp.setKnownPrimalUpperBoundRaw(mcpd3::Objective{-1});
+  } catch (const std::runtime_error &) {
+    rejected_negative_upper_bound = true;
+  }
+  require(rejected_negative_upper_bound,
+          "a known primal upper bound must be nonnegative");
+  dual_decomp.setKnownPrimalUpperBoundRaw(mcpd3::Objective{1000});
+  dual_decomp.solve();
+
+  require(records.size() == 1,
+          "Polyak probe should report exactly one DD iteration");
+  const auto &record = records.front();
+  require(record.disagreement_norm_sq > 0.0,
+          "Polyak fixture must produce a nonzero subgradient");
+  require(record.positive_disagreement_count +
+                  record.negative_disagreement_count ==
+              record.disagreement_count,
+          "signed disagreement counts must cover every disagreement");
+  require(record.disagreement_entered_count == 0 &&
+              record.disagreement_exited_count == 0 &&
+              record.disagreement_flipped_count == 0,
+          "the first DD round must not report disagreement-set churn");
+  require(dual_decomp.hasCurrentUpperBound(),
+          "Polyak step requires a feasible primal upper bound");
+  const auto gap = dual_decomp.getCurrentUpperBoundRaw() -
+                   record.certified_lower_bound_raw;
+  require(gap > 0, "Polyak fixture must have a positive primal-dual gap");
+  const long expected = std::clamp(
+      static_cast<long>(std::llround(
+          mcpd3::integer_to_double(gap) / record.disagreement_norm_sq)),
+      options.min_step_size, options.initial_step_size);
+  require(record.effective_step_size == expected,
+          "Polyak step must equal the rounded gap over subgradient norm");
+  require(record.effective_step_size < record.step_size,
+          "Polyak fixture should reduce the scheduled alpha step");
+}
+
+void coherentBoundaryDirectionRequiresDominantPartitionMode() {
+  require(mcpd3::coherent_boundary_direction(
+              /*positive_count=*/80, /*negative_count=*/0,
+              /*constraint_count=*/100, /*dominance_fraction=*/0.8) == 1,
+          "a dominant positive partition mode should be detected");
+  require(mcpd3::coherent_boundary_direction(
+              /*positive_count=*/0, /*negative_count=*/80,
+              /*constraint_count=*/100, /*dominance_fraction=*/0.8) == -1,
+          "a dominant negative partition mode should be detected");
+  require(mcpd3::coherent_boundary_direction(
+              /*positive_count=*/79, /*negative_count=*/0,
+              /*constraint_count=*/100, /*dominance_fraction=*/0.8) == 0,
+          "a minority partition mode must not be classified as coherent");
+  require(mcpd3::coherent_boundary_direction(
+              /*positive_count=*/0, /*negative_count=*/0,
+              /*constraint_count=*/0, /*dominance_fraction=*/0.8) == 0,
+          "an empty boundary must not have a coherent direction");
+  require(mcpd3::coherent_boundary_bisection_step(
+              /*current_step=*/100, /*minimum_step=*/1,
+              /*previous_direction=*/-1, /*current_direction=*/1) == 50,
+          "a coherent direction reversal must bisect the alpha step");
+  require(mcpd3::coherent_boundary_bisection_step(
+              /*current_step=*/100, /*minimum_step=*/1,
+              /*previous_direction=*/1, /*current_direction=*/1) == 100,
+          "a persistent coherent direction must preserve the alpha step");
+  require(mcpd3::coherent_boundary_bisection_step(
+              /*current_step=*/1, /*minimum_step=*/1,
+              /*previous_direction=*/-1, /*current_direction=*/1) == 1,
+          "coherent bisection must respect the minimum alpha step");
+
+  for (const double invalid_fraction : {0.5, 1.01}) {
+    mcpd3::DualDecompositionOptions options;
+    options.coherent_boundary_dominance_fraction = invalid_fraction;
+    bool rejected = false;
+    try {
+      mcpd3::DualDecomposition invalid(
+          /*npartition=*/1, /*nnode=*/1, /*narc=*/0,
+          /*arcs=*/std::vector<int>{},
+          /*arc_capacities=*/std::vector<int>{},
+          /*terminal_capacities=*/std::vector<int>{0}, options);
+    } catch (const std::runtime_error &) {
+      rejected = true;
+    }
+    require(rejected,
+            "coherent boundary dominance must stay in (0.5, 1]");
+  }
+}
+
+void disagreementTransitionClassificationCoversEveryStateChange() {
+  require(mcpd3::classify_disagreement_transition(0, 1) ==
+              mcpd3::DisagreementTransition::Entered,
+          "zero-to-active disagreement should enter");
+  require(mcpd3::classify_disagreement_transition(-1, 0) ==
+              mcpd3::DisagreementTransition::Exited,
+          "active-to-zero disagreement should exit");
+  require(mcpd3::classify_disagreement_transition(-1, 1) ==
+              mcpd3::DisagreementTransition::Flipped,
+          "opposite active signs should flip");
+  require(mcpd3::classify_disagreement_transition(1, 1) ==
+              mcpd3::DisagreementTransition::Unchanged,
+          "a persistent sign should remain unchanged");
+  require(mcpd3::classify_disagreement_transition(0, 0) ==
+              mcpd3::DisagreementTransition::Unchanged,
+          "persistent agreement should remain unchanged");
+}
+
 void dualDecompositionProbeHonorsTotalIterationBudget() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
 
@@ -6830,6 +6963,9 @@ int main() {
     disagreementPlateauModeActivatesOnARealDdPlateau();
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
+    dualDecompositionPolyakStepUsesPrimalDualGap();
+    coherentBoundaryDirectionRequiresDominantPartitionMode();
+    disagreementTransitionClassificationCoversEveryStateChange();
     dualDecompositionProbeHonorsTotalIterationBudget();
     dualDecompositionRejectsNegativeTotalIterationBudget();
     dualDecompositionUsesExplicitPartitionLabels();
