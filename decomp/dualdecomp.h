@@ -44,6 +44,7 @@
 #include <decomp/partition_worker.h>
 #include <decomp/regularization_schedule.h>
 #include <decomp/solver_policy.h>
+#include <decomp/speculative_cycle_replay.h>
 #include <graph/cycle.h>
 #include <graph/partition.h>
 #include <multithread/threadpool.h>
@@ -216,6 +217,11 @@ struct DualDecompositionOptions {
   bool force_full_mincut_recompute = false;
   bool track_arc_flow_updates = false;
   bool track_maxflow_work_telemetry = false;
+  int speculative_cycle_replay_iterations = 0;
+  int speculative_cycle_max_period = 8;
+  int speculative_cycle_min_repetitions = 2;
+  int speculative_cycle_max_probes_per_scale = 1;
+  Objective speculative_cycle_rollback_tolerance = 0;
   int halo_depth = 1;
   std::vector<std::uint64_t> partition_edge_weights;
   std::vector<int> partition_labels;
@@ -420,6 +426,18 @@ public:
   }
   long getUnitStepNoMomentumRetryCount() const {
     return unit_step_no_momentum_retry_count_;
+  }
+  long getSpeculativeCycleDetectionCount() const {
+    return speculative_cycle_detection_count_;
+  }
+  long getSpeculativeCycleProbeAcceptedCount() const {
+    return speculative_cycle_probe_accepted_count_;
+  }
+  long getSpeculativeCycleProbeRejectedCount() const {
+    return speculative_cycle_probe_rejected_count_;
+  }
+  long getSpeculativeCycleVirtualIterationCount() const {
+    return speculative_cycle_virtual_iteration_count_;
   }
   long getHaloObjectiveMultiplier() const {
     return halo_objective_multiplier_;
@@ -1052,6 +1070,10 @@ public:
     scale_ = options_.objective_scale;
     total_optimization_iterations_ = 0;
     unit_step_no_momentum_retry_count_ = 0;
+    speculative_cycle_detection_count_ = 0;
+    speculative_cycle_probe_accepted_count_ = 0;
+    speculative_cycle_probe_rejected_count_ = 0;
+    speculative_cycle_virtual_iteration_count_ = 0;
     disagreement_plateau_activation_count_ = 0;
     previous_disagreement_diffs_.clear();
     has_previous_disagreement_diffs_ = false;
@@ -1145,6 +1167,8 @@ public:
 
   struct LagrangeUpdateStats {
     std::list<int> disagreeing_global_indices;
+    std::vector<std::uint8_t> boundary_labels;
+    std::uint64_t boundary_state_hash = 0;
     long disagreement_count = 0;
     double disagreement_norm_sq = 0;
     long positive_disagreement_count = 0;
@@ -1183,6 +1207,43 @@ public:
           std::make_unique<DisagreementPlateauRegularizationTracker>(
               options_.disagreement_patience);
     }
+    struct PendingSpeculativeCycleProbe {
+      bool active = false;
+      Objective baseline_lower_bound = 0;
+      std::vector<DualDecompositionConstraintSnapshot> constraints;
+      std::vector<PrimalDualMinCutSolver::WarmState> local_solver_states;
+      std::vector<std::int8_t> previous_disagreement_diffs;
+      bool has_previous_disagreement_diffs = false;
+      std::list<int> disagreeing_global_indices;
+      long disagreement_count = 0;
+      double disagreement_norm_sq = 0.0;
+      long positive_disagreement_count = 0;
+      long negative_disagreement_count = 0;
+      long disagreement_entered_count = 0;
+      long disagreement_exited_count = 0;
+      long disagreement_flipped_count = 0;
+      int coherent_disagreement_direction = 0;
+      double coherent_disagreement_fraction = 0.0;
+      long effective_step_size = 0;
+      Objective original_objective = 0;
+      Objective regularized_objective = 0;
+      Objective certified_lower_bound = 0;
+      Objective regularization_budget = 0;
+      Objective regularization_contribution = 0;
+      long regularization_anchor_sink_count = 0;
+      long regularization_active_sink_count = 0;
+      std::size_t period = 0;
+      int virtual_iterations = 0;
+    };
+    PendingSpeculativeCycleProbe pending_cycle_probe;
+    std::unique_ptr<ExactBoundaryCycleDetector> cycle_detector;
+    if (options_.speculative_cycle_replay_iterations > 0) {
+      cycle_detector = std::make_unique<ExactBoundaryCycleDetector>(
+          static_cast<std::size_t>(options_.speculative_cycle_max_period),
+          static_cast<std::size_t>(
+              options_.speculative_cycle_min_repetitions));
+    }
+    int speculative_cycle_probes_at_scale = 0;
     int regularization_strength =
         regularizationStrengthForStepSize(step_size);
     for (auto &solver_uptr : solvers_) {
@@ -1200,11 +1261,12 @@ public:
       std::vector<Objective> regularization_contribution_terms(solvers_.size(), 0);
       std::vector<long> regularization_anchor_count_terms(solvers_.size(), 0);
       std::vector<long> regularization_active_count_terms(solvers_.size(), 0);
-      std::vector<DualDecompositionPartitionSolveRecord>
-          partition_solve_records;
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+      std::vector<DualDecompositionPartitionSolveRecord> partition_solve_records;
       if (options_.track_maxflow_work_telemetry) {
         partition_solve_records.resize(solvers_.size());
       }
+#endif
       const long round_objective_scale = scale_;
       const long round_total_iteration = total_optimization_iterations_;
       const size_t round_partition_count = solvers_.size();
@@ -1221,16 +1283,20 @@ public:
               &regularization_anchor_count_terms[solver_index];
           auto *regularization_active_count_result =
               &regularization_active_count_terms[solver_index];
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
           auto *partition_solve_record =
               options_.track_maxflow_work_telemetry
                   ? &partition_solve_records[solver_index]
                   : nullptr;
+#endif
           thread_pool_.push([solver, lower_result,
                              regularization_budget_result,
                              regularization_contribution_result,
                              regularization_anchor_count_result,
                              regularization_active_count_result,
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
                              partition_solve_record,
+#endif
                              report_progress, round_objective_scale,
                              step_size, i, round_total_iteration,
                              solver_index, round_partition_count] {
@@ -1257,6 +1323,7 @@ public:
                 solver->getLastRegularizationAnchorSinkCount();
             *regularization_active_count_result =
                 solver->getLastRegularizationActiveSinkCount();
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
             if (partition_solve_record != nullptr) {
               partition_solve_record->partition_index = solver_index;
               partition_solve_record->local_lower_bound_raw = *lower_result;
@@ -1268,6 +1335,7 @@ public:
               partition_solve_record->work =
                   solver->getLastSolveWorkTelemetry();
             }
+#endif
             if (report_progress) {
               const double elapsed = std::chrono::duration<double>(
                                          std::chrono::steady_clock::now() -
@@ -1316,7 +1384,7 @@ public:
           std::accumulate(regularization_active_count_terms.begin(),
                           regularization_active_count_terms.end(),
                           static_cast<long>(0));
-      const Objective regularized_objective =
+      Objective regularized_objective =
           regularizedObjectiveRaw(original_objective,
                                   last_regularization_contribution_);
       Objective lower_bound = certifiedOriginalLowerBoundRaw(
@@ -1350,27 +1418,117 @@ public:
         has_current_upper_bound_ = true;
       }
 
+      const bool speculative_probe_round = pending_cycle_probe.active;
+      bool speculative_probe_rejected = false;
+      if (speculative_probe_round) {
+        const bool accepted = accept_speculative_cycle_probe(
+            lower_bound, pending_cycle_probe.baseline_lower_bound,
+            options_.speculative_cycle_rollback_tolerance);
+        if (accepted) {
+          ++speculative_cycle_probe_accepted_count_;
+        } else {
+          ++speculative_cycle_probe_rejected_count_;
+          speculative_probe_rejected = true;
+        }
+        if (report_progress) {
+          std::fprintf(
+              stderr,
+              "mcpd3_progress stage=dd_speculative_cycle_probe "
+              "accepted=%d period=%zu virtual_iterations=%d "
+              "candidate_lower_bound=%.6lf baseline_lower_bound=%.6lf\n",
+              accepted ? 1 : 0, pending_cycle_probe.period,
+              pending_cycle_probe.virtual_iterations,
+              integer_to_double(lower_bound) / scale_,
+              integer_to_double(
+                  pending_cycle_probe.baseline_lower_bound) /
+                  scale_);
+          std::fflush(stderr);
+        }
+      }
+
       LagrangeUpdateStats update_stats;
       auto lagrange_update_time = time_lambda([&] {
         update_stats =
             runLagrangeMultipliersUpdateStep(step_size, use_momentum,
-                                             lower_bound);
-        disagreeing_global_indices_ =
-            std::move(update_stats.disagreeing_global_indices);
+                                             lower_bound,
+                                             !speculative_probe_rejected);
+        if (speculative_probe_rejected) {
+          restoreConstraintSnapshots(pending_cycle_probe.constraints);
+          restoreLocalSolverWarmStates(
+              pending_cycle_probe.local_solver_states);
+          previous_disagreement_diffs_ =
+              pending_cycle_probe.previous_disagreement_diffs;
+          has_previous_disagreement_diffs_ =
+              pending_cycle_probe.has_previous_disagreement_diffs;
+          original_objective = pending_cycle_probe.original_objective;
+          regularized_objective =
+              pending_cycle_probe.regularized_objective;
+          lower_bound = pending_cycle_probe.certified_lower_bound;
+          last_original_objective_raw_ = original_objective;
+          last_regularized_objective_raw_ = regularized_objective;
+          last_certified_lower_bound_raw_ = lower_bound;
+          last_regularization_budget_ =
+              pending_cycle_probe.regularization_budget;
+          last_regularization_contribution_ =
+              pending_cycle_probe.regularization_contribution;
+          last_regularization_anchor_sink_count_ =
+              pending_cycle_probe.regularization_anchor_sink_count;
+          last_regularization_active_sink_count_ =
+              pending_cycle_probe.regularization_active_sink_count;
+          update_stats.disagreeing_global_indices =
+              pending_cycle_probe.disagreeing_global_indices;
+          update_stats.disagreement_count =
+              pending_cycle_probe.disagreement_count;
+          update_stats.disagreement_norm_sq =
+              pending_cycle_probe.disagreement_norm_sq;
+          update_stats.positive_disagreement_count =
+              pending_cycle_probe.positive_disagreement_count;
+          update_stats.negative_disagreement_count =
+              pending_cycle_probe.negative_disagreement_count;
+          update_stats.disagreement_entered_count =
+              pending_cycle_probe.disagreement_entered_count;
+          update_stats.disagreement_exited_count =
+              pending_cycle_probe.disagreement_exited_count;
+          update_stats.disagreement_flipped_count =
+              pending_cycle_probe.disagreement_flipped_count;
+          update_stats.coherent_disagreement_direction =
+              pending_cycle_probe.coherent_disagreement_direction;
+          update_stats.coherent_disagreement_fraction =
+              pending_cycle_probe.coherent_disagreement_fraction;
+          update_stats.effective_step_size =
+              pending_cycle_probe.effective_step_size;
+          disagreeing_global_indices_ =
+              update_stats.disagreeing_global_indices;
+        } else {
+          disagreeing_global_indices_ =
+              std::move(update_stats.disagreeing_global_indices);
+        }
           });
       lagrange_update_time_ += lagrange_update_time.count();
-      last_disagreement_count_ = update_stats.disagreement_count;
-      last_disagreement_norm_sq_ = update_stats.disagreement_norm_sq;
-      if (update_stats.disagreement_count == 0 &&
+      last_disagreement_count_ =
+          speculative_probe_rejected
+              ? pending_cycle_probe.disagreement_count
+              : update_stats.disagreement_count;
+      last_disagreement_norm_sq_ =
+          speculative_probe_rejected
+              ? pending_cycle_probe.disagreement_norm_sq
+              : update_stats.disagreement_norm_sq;
+      if (!speculative_probe_rejected &&
+          update_stats.disagreement_count == 0 &&
           last_regularization_budget_ < Objective(options_.objective_scale)) {
         lower_bound = original_objective;
         last_certified_lower_bound_raw_ = lower_bound;
+      }
+      if (speculative_probe_round) {
+        pending_cycle_probe = PendingSpeculativeCycleProbe{};
+        cycle_detector->clear();
       }
 
       const bool plateau_was_active =
           disagreement_plateau_mode && disagreement_plateau_tracker->active();
       const bool plateau_regularization_pulse_now =
-          disagreement_plateau_mode && update_stats.disagreement_count > 0 &&
+          !speculative_probe_rejected && disagreement_plateau_mode &&
+          update_stats.disagreement_count > 0 &&
           disagreement_plateau_tracker->observe(
               i, update_stats.disagreement_count);
       const bool plateau_activated_now =
@@ -1518,10 +1676,15 @@ public:
             last_regularization_contribution_,
             solve_loop_time.count(),
             lagrange_update_time.count(),
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
             std::move(partition_solve_records)});
+#else
+            {}});
+#endif
       }
 
-      if (!has_scale_max_lower_bound || lower_bound > max_lower_bound) {
+      if (!speculative_probe_rejected &&
+          (!has_scale_max_lower_bound || lower_bound > max_lower_bound)) {
         max_lower_bound = lower_bound;
         has_scale_max_lower_bound = true;
         if (standard_early_exit_enabled &&
@@ -1543,7 +1706,8 @@ public:
           break;
         }
         last_improvement_iter = i;
-      } else if (standard_early_exit_enabled &&
+      } else if (!speculative_probe_rejected &&
+                 standard_early_exit_enabled &&
                  !shouldSuppressEarlyScaleExit(regularization_strength) &&
                  !options_.legacy_patience &&
                  i - last_improvement_iter >= options_.patience) {
@@ -1600,10 +1764,12 @@ public:
         break;
       }
 
-      if (standard_early_exit_enabled && !plateau_activated_now) {
+      if (!speculative_probe_rejected &&
+          standard_early_exit_enabled && !plateau_activated_now) {
         lower_bound_group_stats.addValue(integer_to_double(lower_bound));
       }
-      if (standard_early_exit_enabled && !plateau_activated_now &&
+      if (!speculative_probe_rejected &&
+          standard_early_exit_enabled && !plateau_activated_now &&
           !shouldSuppressEarlyScaleExit(regularization_strength) &&
           options_.enable_group_stopping &&
           lower_bound_group_stats.areGroupsPopulated()) {
@@ -1628,7 +1794,8 @@ public:
         }
       }
 
-      if (disagreeing_global_indices_.size() == 0) { // optimality condition
+      if (!speculative_probe_rejected &&
+          disagreeing_global_indices_.size() == 0) { // optimality condition
         if (regularization_strength == 0) {
           if (report_progress) {
             std::fprintf(stderr,
@@ -1663,6 +1830,95 @@ public:
           opt_status = OPTIMAL;
         }
         break;
+      }
+
+      if (cycle_detector != nullptr && !speculative_probe_round &&
+          regularization_strength == 0 &&
+          speculative_cycle_probes_at_scale <
+              options_.speculative_cycle_max_probes_per_scale) {
+        BoundaryCycleSample sample;
+        sample.state_hash = update_stats.boundary_state_hash;
+        sample.labels = std::move(update_stats.boundary_labels);
+        sample.diffs = previous_disagreement_diffs_;
+        const auto cycle = cycle_detector->observe(std::move(sample));
+        if (cycle.has_value()) {
+          pending_cycle_probe.active = true;
+          pending_cycle_probe.baseline_lower_bound = max_lower_bound;
+          pending_cycle_probe.constraints = getConstraintSnapshots();
+          pending_cycle_probe.local_solver_states =
+              captureLocalSolverWarmStates();
+          pending_cycle_probe.previous_disagreement_diffs =
+              previous_disagreement_diffs_;
+          pending_cycle_probe.has_previous_disagreement_diffs =
+              has_previous_disagreement_diffs_;
+          pending_cycle_probe.disagreeing_global_indices =
+              disagreeing_global_indices_;
+          pending_cycle_probe.disagreement_count =
+              last_disagreement_count_;
+          pending_cycle_probe.disagreement_norm_sq =
+              last_disagreement_norm_sq_;
+          pending_cycle_probe.positive_disagreement_count =
+              update_stats.positive_disagreement_count;
+          pending_cycle_probe.negative_disagreement_count =
+              update_stats.negative_disagreement_count;
+          pending_cycle_probe.disagreement_entered_count =
+              update_stats.disagreement_entered_count;
+          pending_cycle_probe.disagreement_exited_count =
+              update_stats.disagreement_exited_count;
+          pending_cycle_probe.disagreement_flipped_count =
+              update_stats.disagreement_flipped_count;
+          pending_cycle_probe.coherent_disagreement_direction =
+              update_stats.coherent_disagreement_direction;
+          pending_cycle_probe.coherent_disagreement_fraction =
+              update_stats.coherent_disagreement_fraction;
+          pending_cycle_probe.effective_step_size =
+              update_stats.effective_step_size;
+          pending_cycle_probe.original_objective =
+              last_original_objective_raw_;
+          pending_cycle_probe.regularized_objective =
+              last_regularized_objective_raw_;
+          pending_cycle_probe.certified_lower_bound =
+              last_certified_lower_bound_raw_;
+          pending_cycle_probe.regularization_budget =
+              last_regularization_budget_;
+          pending_cycle_probe.regularization_contribution =
+              last_regularization_contribution_;
+          pending_cycle_probe.regularization_anchor_sink_count =
+              last_regularization_anchor_sink_count_;
+          pending_cycle_probe.regularization_active_sink_count =
+              last_regularization_active_sink_count_;
+          pending_cycle_probe.period = cycle->period;
+          pending_cycle_probe.virtual_iterations =
+              options_.speculative_cycle_replay_iterations;
+          for (int virtual_iteration = 0;
+               virtual_iteration <
+               options_.speculative_cycle_replay_iterations;
+               ++virtual_iteration) {
+            applyLagrangeMultiplierDiffs(
+                cycle->nextSample(
+                          static_cast<std::size_t>(virtual_iteration))
+                    .diffs,
+                step_size, use_momentum,
+                /*coherent_disagreement_direction=*/0,
+                /*advance_last_alpha=*/false);
+          }
+          ++speculative_cycle_detection_count_;
+          speculative_cycle_virtual_iteration_count_ +=
+              options_.speculative_cycle_replay_iterations;
+          ++speculative_cycle_probes_at_scale;
+          cycle_detector->clear();
+          if (report_progress) {
+            std::fprintf(
+                stderr,
+                "mcpd3_progress stage=dd_speculative_cycle_replay "
+                "period=%zu virtual_iterations=%d "
+                "baseline_lower_bound=%.6lf\n",
+                cycle->period,
+                options_.speculative_cycle_replay_iterations,
+                integer_to_double(max_lower_bound) / scale_);
+            std::fflush(stderr);
+          }
+        }
       }
 
       //dual_cycle_list.addNode(
@@ -1755,6 +2011,51 @@ public:
   }
 
 private:
+  void restoreLocalSolverWarmStates(
+      const std::vector<PrimalDualMinCutSolver::WarmState> &states) {
+    if (states.size() != solvers_.size()) {
+      throw std::runtime_error(
+          "speculative cycle solver-state count mismatch");
+    }
+    for (size_t partition = 0; partition < solvers_.size(); ++partition) {
+      solvers_[partition]->restoreWarmState(states[partition]);
+    }
+  }
+
+  void restoreConstraintSnapshots(
+      const std::vector<DualDecompositionConstraintSnapshot> &snapshots) {
+    size_t constraint_index = 0;
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      for (auto &constraint : constraints) {
+        if (constraint_index >= snapshots.size()) {
+          throw std::runtime_error(
+              "speculative cycle constraint count mismatch");
+        }
+        const auto &snapshot = snapshots[constraint_index];
+        if (snapshot.constraint_id !=
+                static_cast<int>(constraint_index) ||
+            snapshot.global_node_id != global_index ||
+            snapshot.partition_index_source !=
+                constraint.partition_index_source ||
+            snapshot.partition_index_target !=
+                constraint.partition_index_target ||
+            snapshot.local_index_source != constraint.local_index_source ||
+            snapshot.local_index_target != constraint.local_index_target) {
+          throw std::runtime_error(
+              "speculative cycle constraint topology mismatch");
+        }
+        constraint.alpha = snapshot.alpha;
+        constraint.last_alpha = snapshot.last_alpha;
+        constraint.alpha_momentum = snapshot.alpha_momentum;
+        ++constraint_index;
+      }
+    }
+    if (constraint_index != snapshots.size()) {
+      throw std::runtime_error(
+          "speculative cycle constraint count mismatch");
+    }
+  }
+
   static long checkedScaleLong(long value, long scale) {
     if (scale <= 0) {
       throw std::runtime_error("scale factor must be positive");
@@ -1835,9 +2136,58 @@ private:
                     static_cast<long>(std::llround(raw_step)));
   }
 
+  void applyLagrangeMultiplierDiffs(
+      const std::vector<std::int8_t> &diffs, long effective_step_size,
+      bool use_momentum, int coherent_disagreement_direction = 0,
+      bool advance_last_alpha = true) {
+    size_t constraint_index = 0;
+    for (auto &[global_index, constraints] : constraint_arc_map_) {
+      (void)global_index;
+      for (auto &constraint : constraints) {
+        if (constraint_index >= diffs.size()) {
+          throw std::runtime_error(
+              "speculative cycle disagreement count mismatch");
+        }
+        record_lagrange_update_origin(
+            constraint.alpha, constraint.last_alpha, advance_last_alpha);
+        const int diff = diffs[constraint_index++];
+        const int update_diff = coherent_disagreement_direction != 0
+                                    ? coherent_disagreement_direction
+                                    : diff;
+        if (update_diff == 0) {
+          continue;
+        }
+        if (use_momentum && coherent_disagreement_direction == 0) {
+          const double beta = .85;
+          const int momentum_scale = 10;
+          constraint.alpha_momentum =
+              beta * constraint.alpha_momentum * beta +
+              (1 - beta) * update_diff;
+          const long alpha_update =
+              effective_step_size *
+              static_cast<int>(momentum_scale *
+                               constraint.alpha_momentum);
+          constraint.alpha = checked_add(
+              constraint.alpha, lagrange_from_integer(alpha_update),
+              "lagrange multiplier overflow");
+        } else {
+          constraint.alpha = checked_add(
+              constraint.alpha,
+              lagrange_from_integer(effective_step_size * update_diff),
+              "lagrange multiplier overflow");
+        }
+      }
+    }
+    if (constraint_index != diffs.size()) {
+      throw std::runtime_error(
+          "speculative cycle disagreement count mismatch");
+    }
+  }
+
   LagrangeUpdateStats runLagrangeMultipliersUpdateStep(long step_size,
                                                        bool use_momentum,
-                                                       const Objective &lower_bound) {
+                                                       const Objective &lower_bound,
+                                                       bool apply_update = true) {
     LagrangeUpdateStats stats;
     size_t constraint_count = 0;
     for (const auto &[global_index, constraints] : constraint_arc_map_) {
@@ -1849,15 +2199,30 @@ private:
       previous_disagreement_diffs_.assign(constraint_count, 0);
       has_previous_disagreement_diffs_ = false;
     }
+    const bool capture_cycle_state =
+        options_.speculative_cycle_replay_iterations > 0;
+    if (capture_cycle_state) {
+      stats.boundary_labels.reserve(constraint_count);
+      stats.boundary_state_hash = 1469598103934665603ULL;
+    }
     size_t constraint_index = 0;
     for (auto &[global_index, constraints] : constraint_arc_map_) {
       bool disagreement_exists = false;
       for (auto &constraint : constraints) {
-        int diff =
+        const int target_label =
             solvers_[constraint.partition_index_target]->getMinCutSolution(
-                constraint.local_index_target) -
+                constraint.local_index_target);
+        const int source_label =
             solvers_[constraint.partition_index_source]->getMinCutSolution(
                 constraint.local_index_source);
+        const int diff = target_label - source_label;
+        if (capture_cycle_state) {
+          const auto labels = static_cast<std::uint8_t>(
+              (source_label & 1) | ((target_label & 1) << 1));
+          stats.boundary_labels.push_back(labels);
+          stats.boundary_state_hash ^= labels;
+          stats.boundary_state_hash *= 1099511628211ULL;
+        }
         if (diff != 0) {
           disagreement_exists = true;
           stats.disagreement_count += std::abs(diff);
@@ -1914,39 +2279,13 @@ private:
         options_.step_policy ==
             DualDecompositionStepPolicy::CoherentBoundaryBisection &&
         stats.coherent_disagreement_direction != 0;
-    for (auto &[global_index, constraints] : constraint_arc_map_) {
-      for (auto &constraint : constraints) {
-        constraint.last_alpha = constraint.alpha; // record alpha before update
-        int diff =
-            solvers_[constraint.partition_index_target]->getMinCutSolution(
-                constraint.local_index_target) -
-            solvers_[constraint.partition_index_source]->getMinCutSolution(
-                constraint.local_index_source);
-        const int update_diff = coherent_boundary_update
-                                    ? stats.coherent_disagreement_direction
-                                    : diff;
-        if (update_diff != 0) {
-          if (use_momentum && !coherent_boundary_update) {
-            const double beta = .85;
-            const int momentum_scale = 10;
-            constraint.alpha_momentum =
-                beta * constraint.alpha_momentum * beta +
-                (1 - beta) * update_diff;
-            const long alpha_update =
-                stats.effective_step_size *
-                static_cast<int>(momentum_scale * constraint.alpha_momentum);
-            constraint.alpha = checked_add(
-                constraint.alpha, lagrange_from_integer(alpha_update),
-                "lagrange multiplier overflow");
-          } else {
-            constraint.alpha = checked_add(
-                constraint.alpha,
-                lagrange_from_integer(stats.effective_step_size *
-                                      update_diff),
-                "lagrange multiplier overflow");
-          }
-        }
-      }
+    if (apply_update) {
+      applyLagrangeMultiplierDiffs(
+          previous_disagreement_diffs_, stats.effective_step_size,
+          use_momentum,
+          coherent_boundary_update
+              ? stats.coherent_disagreement_direction
+              : 0);
     }
     return stats;
   }
@@ -1999,6 +2338,33 @@ private:
     if (options_.max_total_iteration_count < 0) {
       throw std::runtime_error(
           "maximum total iteration count must be non-negative");
+    }
+    if (options_.speculative_cycle_replay_iterations < 0) {
+      throw std::runtime_error(
+          "speculative cycle replay iterations must be non-negative");
+    }
+    if (options_.speculative_cycle_replay_iterations > 0) {
+      if (options_.speculative_cycle_max_period < 2) {
+        throw std::runtime_error(
+            "speculative cycle maximum period must be at least two");
+      }
+      if (options_.speculative_cycle_min_repetitions < 2) {
+        throw std::runtime_error(
+            "speculative cycle repetitions must be at least two");
+      }
+      if (options_.speculative_cycle_max_probes_per_scale <= 0) {
+        throw std::runtime_error(
+            "speculative cycle maximum probes must be positive");
+      }
+      if (options_.speculative_cycle_rollback_tolerance < 0) {
+        throw std::runtime_error(
+            "speculative cycle rollback tolerance must be non-negative");
+      }
+      if (options_.step_policy !=
+          DualDecompositionStepPolicy::FixedScaleSchedule) {
+        throw std::runtime_error(
+            "speculative cycle replay requires the fixed step schedule");
+      }
     }
     if (options_.solver_storage.mode ==
         SolverStorageMode::FILE_BACKED_MMAP) {
@@ -3041,6 +3407,10 @@ private:
   long total_optimization_iterations_;
   long unit_step_no_momentum_retry_count_ = 0;
   long objective_scale_promotion_count_;
+  long speculative_cycle_detection_count_ = 0;
+  long speculative_cycle_probe_accepted_count_ = 0;
+  long speculative_cycle_probe_rejected_count_ = 0;
+  long speculative_cycle_virtual_iteration_count_ = 0;
   bool partition_labels_generated_in_backing_store_ = false;
   bool partition_label_generation_was_file_backed_ = false;
   bool partition_validation_was_file_backed_ = false;

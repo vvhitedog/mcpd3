@@ -198,6 +198,13 @@ public:
                                std::move(storage_options)) {}
 
   void setTrackArcFlowUpdates(bool enabled) {
+#if !defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    if (enabled) {
+      throw std::runtime_error(
+          "per-edge flow telemetry was not enabled at build time");
+    }
+    return;
+#else
     if (enabled == track_arc_flow_updates_) {
       return;
     }
@@ -208,6 +215,7 @@ public:
       arc_flow_update_counts_.clear();
       arc_flow_update_counts_.shrink_to_fit();
     }
+#endif
   }
 
   void setTrackMaxflowWorkTelemetry(bool enabled) {
@@ -216,7 +224,8 @@ public:
       throw std::runtime_error(
           "maxflow work telemetry was not enabled at build time");
     }
-#endif
+    return;
+#else
     track_maxflow_work_telemetry_ = enabled;
     maxflow_graph_.set_work_telemetry_enabled(enabled);
     if (enabled) {
@@ -226,19 +235,32 @@ public:
       cut_label_one_count_ = 0;
       cut_label_hash_ = 0;
     }
+#endif
   }
 
   const SolveWorkTelemetry &getLastSolveWorkTelemetry() const {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     return last_solve_work_telemetry_;
+#else
+    static const SolveWorkTelemetry empty;
+    return empty;
+#endif
   }
 
   const std::vector<std::uint64_t> &getArcFlowUpdateCounts() const {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     return arc_flow_update_counts_;
+#else
+    static const std::vector<std::uint64_t> empty;
+    return empty;
+#endif
   }
 
   void resetArcFlowUpdateCounts() {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     std::fill(arc_flow_update_counts_.begin(), arc_flow_update_counts_.end(),
               std::uint64_t{0});
+#endif
   }
 
   void decodeNarrowBand(const std::list<int> seeds, int rad) {
@@ -760,9 +782,11 @@ public:
     v_flow_.replace(state.v_flow);
     d_flow_.replace(state.d_flow);
     x_.replace(state.x);
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_) {
       recomputeCutLabelFingerprint();
     }
+#endif
     has_solution_ = true;
   }
 
@@ -953,9 +977,11 @@ public:
     v_flow_.replace(state.v_flow);
     d_flow_.replace(state.d_flow);
     x_.replace(state.x);
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_) {
       recomputeCutLabelFingerprint();
     }
+#endif
     is_first_iteration_ = state.is_first_iteration;
     is_first_iteration_of_new_scale_ = state.is_first_iteration_of_new_scale;
     has_solution_ = state.has_solution;
@@ -984,6 +1010,7 @@ public:
 
 private:
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
   static std::uint64_t cutLabelHashToken(std::size_t index) {
     std::uint64_t value =
         static_cast<std::uint64_t>(index) + 0x9e3779b97f4a7c15ULL;
@@ -1015,6 +1042,7 @@ private:
       }
     }
   }
+#endif
 
   void resetRegularizationDiagnostics() {
     last_regularization_budget_ = 0;
@@ -1338,11 +1366,13 @@ private:
     } else {
       updateMinCutIncremental();
     }
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_ &&
         (check_reference ||
          canonical_cut_selection_ != CanonicalCutSelection::SOLVER_DEFAULT)) {
       recomputeCutLabelFingerprint();
     }
+#endif
     updateRegularizationContribution();
   }
 
@@ -1762,7 +1792,9 @@ private:
       auto [pos, neg] = arcGradients(forward_capacity, backward_capacity, flow);
       Capacity new_flow = checked_subtract(
           maxflow_graph_.get_rcap(a), pos, "arc flow delta overflow");
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
       recordArcFlowUpdate(i, new_flow);
+#endif
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
       d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
@@ -1786,7 +1818,9 @@ private:
       Capacity new_flow = checked_subtract(
           maxflow_graph_.get_rcap(first_arc + 2 * i), pos,
           "arc flow delta overflow");
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
       recordArcFlowUpdate(i, new_flow);
+#endif
       v_flow_[i] = checked_add(v_flow_[i], new_flow, "arc flow overflow");
       d_flow_[s] = checked_add(d_flow_[s], node_flow_from_capacity(new_flow),
                                "node flow balance overflow");
@@ -1803,6 +1837,7 @@ private:
     }
   }
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
   void recordArcFlowUpdate(int arc_index, const Capacity &flow_delta) {
     if (!track_arc_flow_updates_ || flow_delta == 0) {
       return;
@@ -1813,6 +1848,7 @@ private:
     }
     ++count;
   }
+#endif
 
   void computeMaxflow() {
     if (is_first_iteration_) {
@@ -1892,12 +1928,14 @@ private:
    * data structures needed for solving primal dual problem
    */
   SolverArray<Capacity> v_flow_; // flow on the arcs
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
   std::vector<std::uint64_t> arc_flow_update_counts_;
   bool track_arc_flow_updates_ = false;
   bool track_maxflow_work_telemetry_ = false;
   SolveWorkTelemetry last_solve_work_telemetry_;
   std::uint64_t cut_label_one_count_ = 0;
   std::uint64_t cut_label_hash_ = 0;
+#endif
   SolverArray<NodeFlow> d_flow_; // flow balance on the nodes
   SolverArray<int> x_;      // mincut solution
   SolverArray<unsigned char> incremental_changed_node_flags_;

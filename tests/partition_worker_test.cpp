@@ -32,6 +32,7 @@
 #include <decomp/halo_partition.h>
 #include <decomp/partition_coordinator.h>
 #include <decomp/partition_worker.h>
+#include <decomp/speculative_cycle_replay.h>
 #include <graph/dimacs.h>
 #include <primaldual/mcpd3.h>
 
@@ -1474,6 +1475,7 @@ void haloPackageCoordinatorNormalizesTheObjectiveMultiplier() {
       "worker package validation should reject a zero objective multiplier");
 }
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
 void haloFlowHeatAggregatesEveryLocalEdgeCopy() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
   mcpd3::DualDecompositionOptions options;
@@ -1505,6 +1507,7 @@ void haloFlowHeatAggregatesEveryLocalEdgeCopy() {
               std::vector<std::uint64_t>({0, 0, 0}),
           "halo flow-heat reset should clear every local edge copy");
 }
+#endif
 
 void packageOnlyExportMatchesSolverBackedExport() {
   setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
@@ -2483,7 +2486,9 @@ void fileBackedNativeDdBacksPersistentGlobalMetadata() {
   auto options = makeParityDualOptions(/*use_momentum=*/true);
   options.emit_partition_packages = false;
   options.track_primal_upper_bound = true;
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
   options.track_arc_flow_updates = true;
+#endif
   options.materialize_all_partition_nodes = true;
   options.retain_local_to_global_mapping = true;
   options.partition_labels = {0, 0, 1, 1, 2, 2, 3, 3};
@@ -3064,6 +3069,156 @@ void dualDecompositionPolyakStepUsesPrimalDualGap() {
           "Polyak step must equal the rounded gap over subgradient norm");
   require(record.effective_step_size < record.step_size,
           "Polyak fixture should reduce the scheduled alpha step");
+}
+
+void exactBoundaryCycleDetectorRejectsHashOnlyMatches() {
+  mcpd3::ExactBoundaryCycleDetector detector(
+      /*max_period=*/4, /*minimum_repetitions=*/2);
+
+  const auto observe = [&](std::vector<std::uint8_t> labels,
+                           std::vector<std::int8_t> diffs) {
+    return detector.observe(
+        mcpd3::BoundaryCycleSample{/*state_hash=*/17,
+                                   /*labels=*/std::move(labels),
+                                   /*diffs=*/std::move(diffs)});
+  };
+
+  require(!observe({0, 1}, {1}).has_value(),
+          "one state cannot establish a cycle");
+  require(!observe({1, 0}, {-1}).has_value(),
+          "two distinct states cannot establish a repeated cycle");
+  require(!observe({0, 1}, {1}).has_value(),
+          "an incomplete second period cannot establish a cycle");
+  require(!observe({1, 1}, {-1}).has_value(),
+          "matching hashes must not hide an exact-label mismatch");
+}
+
+void exactBoundaryCycleDetectorFindsRepeatedNonconstantSequence() {
+  mcpd3::ExactBoundaryCycleDetector detector(
+      /*max_period=*/4, /*minimum_repetitions=*/2);
+  const mcpd3::BoundaryCycleSample positive{
+      /*state_hash=*/11, /*labels=*/{0, 1, 0}, /*diffs=*/{1, 0}};
+  const mcpd3::BoundaryCycleSample negative{
+      /*state_hash=*/29, /*labels=*/{1, 0, 1}, /*diffs=*/{-1, 0}};
+
+  require(!detector.observe(positive).has_value(),
+          "first positive state cannot establish a cycle");
+  require(!detector.observe(negative).has_value(),
+          "first negative state cannot establish a cycle");
+  require(!detector.observe(positive).has_value(),
+          "partial second period cannot establish a cycle");
+  const auto cycle = detector.observe(negative);
+  require(cycle.has_value(), "two exact periods must establish a cycle");
+  require(cycle->period == 2, "alternating states must have period two");
+  require(cycle->samples.size() == 2,
+          "detected cycle must retain one complete period");
+  require(cycle->samples[0].labels == positive.labels &&
+              cycle->samples[1].labels == negative.labels,
+          "detected cycle must preserve state order");
+  require(cycle->nextSample(0).labels == positive.labels &&
+              cycle->nextSample(1).labels == negative.labels &&
+              cycle->nextSample(2).labels == positive.labels,
+          "cycle replay must wrap in the observed order");
+}
+
+void exactBoundaryCycleDetectorRejectsConstantPlateaus() {
+  mcpd3::ExactBoundaryCycleDetector detector(
+      /*max_period=*/4, /*minimum_repetitions=*/2);
+  const mcpd3::BoundaryCycleSample unchanged{
+      /*state_hash=*/5, /*labels=*/{0, 1}, /*diffs=*/{1}};
+  require(!detector.observe(unchanged).has_value(),
+          "first plateau state cannot establish a cycle");
+  require(!detector.observe(unchanged).has_value(),
+          "a constant plateau must not be treated as a cycle");
+}
+
+void exactBoundaryCycleDetectorHonorsRequiredRepetitions() {
+  mcpd3::ExactBoundaryCycleDetector detector(
+      /*max_period=*/2, /*minimum_repetitions=*/3);
+  const mcpd3::BoundaryCycleSample a{
+      /*state_hash=*/1, /*labels=*/{0}, /*diffs=*/{1}};
+  const mcpd3::BoundaryCycleSample b{
+      /*state_hash=*/2, /*labels=*/{1}, /*diffs=*/{-1}};
+  require(!detector.observe(a).has_value(), "first sample cannot cycle");
+  require(!detector.observe(b).has_value(), "first period cannot cycle");
+  require(!detector.observe(a).has_value(), "second period is incomplete");
+  require(!detector.observe(b).has_value(),
+          "two periods must not satisfy a three-period requirement");
+  require(!detector.observe(a).has_value(), "third period is incomplete");
+  require(detector.observe(b).has_value(),
+          "three complete periods must satisfy the requirement");
+}
+
+void exactBoundaryCycleDetectorRejectsInvalidInputs() {
+  requireThrows(
+      [] {
+        mcpd3::ExactBoundaryCycleDetector detector(
+            /*max_period=*/1, /*minimum_repetitions=*/2);
+      },
+      "cycle detection must reject a period bound below two");
+  requireThrows(
+      [] {
+        mcpd3::ExactBoundaryCycleDetector detector(
+            /*max_period=*/2, /*minimum_repetitions=*/1);
+      },
+      "cycle detection must reject fewer than two repetitions");
+
+  mcpd3::ExactBoundaryCycleDetector detector(
+      /*max_period=*/2, /*minimum_repetitions=*/2);
+  requireThrows(
+      [&] {
+        (void)detector.observe(
+            mcpd3::BoundaryCycleSample{/*state_hash=*/0,
+                                       /*labels=*/{},
+                                       /*diffs=*/{1}});
+      },
+      "cycle detection must reject missing exact labels");
+  requireThrows(
+      [&] {
+        (void)detector.observe(
+            mcpd3::BoundaryCycleSample{/*state_hash=*/0,
+                                       /*labels=*/{1},
+                                       /*diffs=*/{}});
+      },
+      "cycle detection must reject missing replay updates");
+
+  const mcpd3::ExactBoundaryCycle invalid_cycle;
+  requireThrows([&] { (void)invalid_cycle.nextSample(0); },
+                "cycle replay must reject an empty cycle");
+}
+
+void speculativeCycleProbeAcceptanceCoversToleranceBoundary() {
+  require(mcpd3::accept_speculative_cycle_probe(
+              /*candidate_lower_bound=*/101,
+              /*baseline_lower_bound=*/100,
+              /*rollback_tolerance=*/0),
+          "an improving speculative lower bound must be accepted");
+  require(mcpd3::accept_speculative_cycle_probe(100, 100, 0),
+          "an equal speculative lower bound must be accepted");
+  require(!mcpd3::accept_speculative_cycle_probe(99, 100, 0),
+          "a worse speculative lower bound must be rejected");
+  require(mcpd3::accept_speculative_cycle_probe(98, 100, 2),
+          "a candidate at the rollback tolerance must be accepted");
+  require(!mcpd3::accept_speculative_cycle_probe(97, 100, 2),
+          "a candidate outside the rollback tolerance must be rejected");
+  requireThrows(
+      [] { (void)mcpd3::accept_speculative_cycle_probe(1, 1, -1); },
+      "negative speculative rollback tolerance must be rejected");
+}
+
+void speculativeCycleReplayRetainsTheLastSolvedAlpha() {
+  mcpd3::Lagrange last_alpha = mcpd3::lagrange_from_integer(3);
+  mcpd3::record_lagrange_update_origin(
+      mcpd3::lagrange_from_integer(7), last_alpha,
+      /*advance_last_alpha=*/true);
+  require(last_alpha == mcpd3::lagrange_from_integer(7),
+          "a real DD update must record its starting alpha");
+
+  mcpd3::record_lagrange_update_origin(
+      mcpd3::lagrange_from_integer(11), last_alpha,
+      /*advance_last_alpha=*/false);
+  require(last_alpha == mcpd3::lagrange_from_integer(7),
+          "virtual replay must retain the alpha used by the last exact solve");
 }
 
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
@@ -6789,6 +6944,7 @@ void dualDecompositionCapacityRefreshPreservesPersistentState() {
   }
 }
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
 void primalDualTracksOnlyNonzeroArcFlowUpdates() {
   mcpd3::PrimalDualMinCutSolver solver(
       /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
@@ -6869,6 +7025,21 @@ void dualDecompositionFlowHeatMapsBoundaryEdgesExactlyOnce() {
     ::unsetenv("MCPD3_PARTITIONER");
   }
 }
+#else
+void disabledBuildRejectsInspectionTelemetry() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<int>{5, 5}, std::vector<int>{5, -5});
+  requireThrows([&] { solver.setTrackArcFlowUpdates(true); },
+                "default build must reject per-edge flow telemetry");
+  requireThrows([&] { solver.setTrackMaxflowWorkTelemetry(true); },
+                "default build must reject BK work telemetry");
+  require(solver.getArcFlowUpdateCounts().empty(),
+          "default build must expose no per-edge counter storage");
+  require(!solver.getLastSolveWorkTelemetry().enabled,
+          "default build must expose disabled BK telemetry");
+}
+#endif
 
 #ifdef HAVE_METIS
 void metisWeightedPartitionCutsLowActivityEdges() {
@@ -7000,7 +7171,9 @@ int main() {
     haloLocalObjectivesSumToScaledGlobalObjectiveExhaustively();
     haloCapacityReplacementPreservesMultiplicityScaling();
     haloPackageCoordinatorNormalizesTheObjectiveMultiplier();
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     haloFlowHeatAggregatesEveryLocalEdgeCopy();
+#endif
     partitionWorkerCoordinatorMatchesDualDecompositionRounds();
     partitionWorkerCoordinatorMatchesDualDecompositionRegularizedRounds();
     partitionWorkerCoordinatorCapacityRefreshMatchesNativeState();
@@ -7022,6 +7195,13 @@ int main() {
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPolyakStepUsesPrimalDualGap();
+    exactBoundaryCycleDetectorRejectsHashOnlyMatches();
+    exactBoundaryCycleDetectorFindsRepeatedNonconstantSequence();
+    exactBoundaryCycleDetectorRejectsConstantPlateaus();
+    exactBoundaryCycleDetectorHonorsRequiredRepetitions();
+    exactBoundaryCycleDetectorRejectsInvalidInputs();
+    speculativeCycleProbeAcceptanceCoversToleranceBoundary();
+    speculativeCycleReplayRetainsTheLastSolvedAlpha();
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     dualDecompositionReportsPerPartitionMaxflowWork();
 #endif
@@ -7103,8 +7283,12 @@ int main() {
     dualDecompositionPropagatesReferenceCutLabels();
     dualDecompositionWarmStartMatchesColdPromotedSolve();
     dualDecompositionCapacityRefreshPreservesPersistentState();
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     primalDualTracksOnlyNonzeroArcFlowUpdates();
     dualDecompositionFlowHeatMapsBoundaryEdgesExactlyOnce();
+#else
+    disabledBuildRejectsInspectionTelemetry();
+#endif
 #ifdef HAVE_METIS
     metisWeightedPartitionCutsLowActivityEdges();
 #endif

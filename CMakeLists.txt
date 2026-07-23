@@ -49,7 +49,7 @@ option(MCPD_LEGACY_32BIT_DD_REPLAY
   "Replay historical narrow 32-bit DD arithmetic with defined wrapping. Benchmark compatibility only."
   OFF)
 option(MCPD3_MAXFLOW_WORK_TELEMETRY
-  "Instrument BK operation counts for experimental per-partition analysis."
+  "Compile expensive BK, per-edge flow, and per-partition inspection telemetry."
   OFF)
 include(cmake/McpdCapacity.cmake)
 mcpd_configure_capacity(mcpd3_capacity_config ${CMAKE_CURRENT_SOURCE_DIR})

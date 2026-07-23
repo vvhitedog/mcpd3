@@ -562,3 +562,19 @@
   memory-bounded sequential handoff visible without waiting for the aggregate
   DD-round event.
 - The complete MCPD3 suite passes 2/2 in Release mode.
+
+## 2026-07-23 01:18 PDT - Speculative boundary-cycle replay
+
+- Added an opt-in exact boundary-cycle detector and transactional replay probe.
+  Hashes prefilter candidates, but every ordered boundary-copy label must match
+  across at least two nonconstant periods.
+- Replay snapshots and restores all constraint state and complete local solver
+  warm state. Virtual alpha changes are followed by an exact local-solve probe;
+  a lower-bound regression is rejected and fully rolled back.
+- Added branch-complete unit coverage for collisions, plateaus, repetition
+  thresholds, replay indexing, invalid inputs, tolerance decisions, and the
+  distinction between virtual alpha and the last alpha actually solved.
+- Compile-gated expensive BK counters, per-edge flow heat, per-partition solve
+  records, and related storage behind the default-off
+  `MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY` definition.
+- Both default and telemetry-enabled MCPD3 CTest suites pass 2/2.

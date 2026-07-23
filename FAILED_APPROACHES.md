@@ -183,3 +183,18 @@
 - Recover the already-solved labels through bounded worker copies into the
   coordinator's final mapped destination. The recovery API must not trigger a
   different solve or reconstruct local state.
+
+## 2026-07-23 - Advancing exact certification by replaying boundary cycles
+
+- Exact repetition of local boundary labels does not imply that cached
+  disagreement updates form a safe stationary dual orbit. On the controlled
+  1,024 certification cut, a period-4 replay lowered the next exact DD bound by
+  7,022 raw units and increased wall time.
+- A speculative probe must restore complete local residual/search-tree state
+  on rejection. Restoring only alphas leaves the solver inconsistent.
+- Virtual alpha updates must retain the alpha associated with the last real
+  local solve. Advancing `last_alpha` during replay caused the probe to apply
+  only the final delta and could falsely report agreement at a nonzero exact
+  objective gap.
+- Do not use cycle-state hashes as proof. Confirm exact ordered labels and
+  exclude constant plateaus before attempting a speculative probe.

@@ -150,11 +150,20 @@ public:
                    Block<node_id> *changed_list = NULL);
 
   void set_work_telemetry_enabled(bool enabled) {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     work_telemetry_enabled = enabled;
+#else
+    (void)enabled;
+#endif
   }
 
   const WorkTelemetry &last_work_telemetry() const {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     return last_work_telemetry_;
+#else
+    static const WorkTelemetry empty;
+    return empty;
+#endif
   }
 
   // After the maxflow is computed, this function returns to which
@@ -409,8 +418,10 @@ private:
 
   flowtype flow; // total flow
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
   bool work_telemetry_enabled = false;
   WorkTelemetry last_work_telemetry_;
+#endif
 
   // reusing trees & list of changed pixels
   int maxflow_iteration; // counter
