@@ -97,6 +97,20 @@ public:
     std::size_t file_backed_bytes = 0;
   };
 
+  struct SolveWorkTelemetry {
+    bool enabled = false;
+    MaxflowGraph::WorkTelemetry maxflow;
+    std::uint64_t terminal_capacity_changes = 0;
+    std::uint64_t residual_edges_changed = 0;
+    std::uint64_t tree_nodes_changed = 0;
+    std::uint64_t cut_labels_changed = 0;
+    std::uint64_t cut_label_one_count = 0;
+    std::uint64_t cut_label_hash = 0;
+    long maxflow_microseconds = 0;
+    long flow_update_microseconds = 0;
+    long mincut_update_microseconds = 0;
+  };
+
   PrimalDualMinCutSolver(int nnode, int narc, std::vector<int> &&arcs,
                          std::vector<Capacity> arc_capacities,
                          std::vector<Capacity> terminal_capacities,
@@ -194,6 +208,28 @@ public:
       arc_flow_update_counts_.clear();
       arc_flow_update_counts_.shrink_to_fit();
     }
+  }
+
+  void setTrackMaxflowWorkTelemetry(bool enabled) {
+#if !defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    if (enabled) {
+      throw std::runtime_error(
+          "maxflow work telemetry was not enabled at build time");
+    }
+#endif
+    track_maxflow_work_telemetry_ = enabled;
+    maxflow_graph_.set_work_telemetry_enabled(enabled);
+    if (enabled) {
+      recomputeCutLabelFingerprint();
+    } else {
+      last_solve_work_telemetry_ = SolveWorkTelemetry{};
+      cut_label_one_count_ = 0;
+      cut_label_hash_ = 0;
+    }
+  }
+
+  const SolveWorkTelemetry &getLastSolveWorkTelemetry() const {
+    return last_solve_work_telemetry_;
   }
 
   const std::vector<std::uint64_t> &getArcFlowUpdateCounts() const {
@@ -444,6 +480,15 @@ public:
   }
 
   void solve() {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    if (track_maxflow_work_telemetry_) {
+      last_solve_work_telemetry_ = SolveWorkTelemetry{};
+      last_solve_work_telemetry_.enabled = true;
+      last_solve_work_telemetry_.cut_label_one_count =
+          cut_label_one_count_;
+      last_solve_work_telemetry_.cut_label_hash = cut_label_hash_;
+    }
+#endif
     if (is_first_iteration_) {
       auto init_time = time_lambda([&] {
         shrinkToFitDualDecompositionConstraints(); // memory optimization
@@ -461,9 +506,36 @@ public:
                                 // complementary slackness conditions are
                                 // violated and sets source and sink capacities
                                 // accordingly
-    computeMaxflow();           // compute maxflow
-    updateFlow();               // get updated flow
-    updateMinCut();             // get updated min cut solution
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    if (track_maxflow_work_telemetry_) {
+      const auto maxflow_time = time_lambda([&] { computeMaxflow(); });
+      last_solve_work_telemetry_.maxflow_microseconds = maxflow_time.count();
+      last_solve_work_telemetry_.maxflow =
+          maxflow_graph_.last_work_telemetry();
+      last_solve_work_telemetry_.residual_edges_changed =
+          incremental_arcs_.size();
+      last_solve_work_telemetry_.tree_nodes_changed =
+          incremental_mincut_nodes_.size();
+
+      const auto flow_update_time = time_lambda([&] { updateFlow(); });
+      last_solve_work_telemetry_.flow_update_microseconds =
+          flow_update_time.count();
+      const auto mincut_update_time = time_lambda([&] { updateMinCut(); });
+      last_solve_work_telemetry_.mincut_update_microseconds =
+          mincut_update_time.count();
+      last_solve_work_telemetry_.cut_label_one_count =
+          cut_label_one_count_;
+      last_solve_work_telemetry_.cut_label_hash = cut_label_hash_;
+    } else {
+      computeMaxflow(); // compute maxflow
+      updateFlow();     // get updated flow
+      updateMinCut();   // get updated min cut solution
+    }
+#else
+    computeMaxflow(); // compute maxflow
+    updateFlow();     // get updated flow
+    updateMinCut();   // get updated min cut solution
+#endif
     has_solution_ = true;
 
     // set flag indicating that incremental methods should be used hereafter
@@ -688,6 +760,9 @@ public:
     v_flow_.replace(state.v_flow);
     d_flow_.replace(state.d_flow);
     x_.replace(state.x);
+    if (track_maxflow_work_telemetry_) {
+      recomputeCutLabelFingerprint();
+    }
     has_solution_ = true;
   }
 
@@ -878,6 +953,9 @@ public:
     v_flow_.replace(state.v_flow);
     d_flow_.replace(state.d_flow);
     x_.replace(state.x);
+    if (track_maxflow_work_telemetry_) {
+      recomputeCutLabelFingerprint();
+    }
     is_first_iteration_ = state.is_first_iteration;
     is_first_iteration_of_new_scale_ = state.is_first_iteration_of_new_scale;
     has_solution_ = state.has_solution;
@@ -905,6 +983,38 @@ public:
   }
 
 private:
+
+  static std::uint64_t cutLabelHashToken(std::size_t index) {
+    std::uint64_t value =
+        static_cast<std::uint64_t>(index) + 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+  }
+
+  void updateCutLabelFingerprint(int index, int old_label, int new_label) {
+    if (!track_maxflow_work_telemetry_ || old_label == new_label) {
+      return;
+    }
+    cut_label_hash_ ^= cutLabelHashToken(static_cast<std::size_t>(index));
+    if (new_label != 0) {
+      ++cut_label_one_count_;
+    } else {
+      --cut_label_one_count_;
+    }
+  }
+
+  void recomputeCutLabelFingerprint() {
+    cut_label_one_count_ = 0;
+    cut_label_hash_ = 0;
+    for (int index = 0; index < nnode_; ++index) {
+      if (x_[index] != 0) {
+        ++cut_label_one_count_;
+        cut_label_hash_ ^=
+            cutLabelHashToken(static_cast<std::size_t>(index));
+      }
+    }
+  }
 
   void resetRegularizationDiagnostics() {
     last_regularization_budget_ = 0;
@@ -1105,20 +1215,40 @@ private:
                         "terminal residual capacity overflow");
       if (!is_first_iteration_) {
         if (existing_pos != pos) {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+          if (track_maxflow_work_telemetry_) {
+            ++last_solve_work_telemetry_.terminal_capacity_changes;
+          }
+#endif
           maxflow_graph_.set_trcap(i, pos);
           maxflow_graph_.mark_node(i);
         }
       } else if (is_first_iteration_) {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+        if (track_maxflow_work_telemetry_ && pos != 0) {
+          ++last_solve_work_telemetry_.terminal_capacity_changes;
+        }
+#endif
         maxflow_graph_.set_trcap(i, pos);
       }
     } else {
       if (!is_first_iteration_) {
         auto stored_pos = maxflow_graph_.get_trcap(i);
         if (stored_pos != pos) {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+          if (track_maxflow_work_telemetry_) {
+            ++last_solve_work_telemetry_.terminal_capacity_changes;
+          }
+#endif
           maxflow_graph_.set_trcap(i, pos);
           maxflow_graph_.mark_node(i);
         }
       } else if (is_first_iteration_) {
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+        if (track_maxflow_work_telemetry_ && pos != 0) {
+          ++last_solve_work_telemetry_.terminal_capacity_changes;
+        }
+#endif
         maxflow_graph_.set_trcap(i, pos);
       }
     }
@@ -1207,6 +1337,11 @@ private:
       }
     } else {
       updateMinCutIncremental();
+    }
+    if (track_maxflow_work_telemetry_ &&
+        (check_reference ||
+         canonical_cut_selection_ != CanonicalCutSelection::SOLVER_DEFAULT)) {
+      recomputeCutLabelFingerprint();
     }
     updateRegularizationContribution();
   }
@@ -1471,7 +1606,15 @@ private:
 
   void updateMinCutInitial() {
     for (int i = 0; i < nnode_; ++i) {
-      x_[i] = maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      const int new_label =
+          maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+      if (track_maxflow_work_telemetry_ && new_label != x_[i]) {
+        ++last_solve_work_telemetry_.cut_labels_changed;
+      }
+      updateCutLabelFingerprint(i, x_[i], new_label);
+#endif
+      x_[i] = new_label;
     }
   }
 
@@ -1515,6 +1658,12 @@ private:
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
       if (x_i_new != x_[i]) {
         incremental_changed_node_flags_[static_cast<size_t>(i)] = 1;
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+        if (track_maxflow_work_telemetry_) {
+          ++last_solve_work_telemetry_.cut_labels_changed;
+        }
+        updateCutLabelFingerprint(i, x_[i], x_i_new);
+#endif
       }
     }
 
@@ -1745,6 +1894,10 @@ private:
   SolverArray<Capacity> v_flow_; // flow on the arcs
   std::vector<std::uint64_t> arc_flow_update_counts_;
   bool track_arc_flow_updates_ = false;
+  bool track_maxflow_work_telemetry_ = false;
+  SolveWorkTelemetry last_solve_work_telemetry_;
+  std::uint64_t cut_label_one_count_ = 0;
+  std::uint64_t cut_label_hash_ = 0;
   SolverArray<NodeFlow> d_flow_; // flow balance on the nodes
   SolverArray<int> x_;      // mincut solution
   SolverArray<unsigned char> incremental_changed_node_flags_;

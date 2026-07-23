@@ -86,6 +86,13 @@ inline void dualdecomp_progress_message(const std::string &message) {
   std::fflush(stderr);
 }
 
+struct DualDecompositionPartitionSolveRecord {
+  size_t partition_index = 0;
+  Objective local_lower_bound_raw = 0;
+  long solve_microseconds = 0;
+  PrimalDualMinCutSolver::SolveWorkTelemetry work;
+};
+
 struct DualDecompositionIterationRecord {
   long total_iteration = 0;
   int scale_iteration = 0;
@@ -109,6 +116,7 @@ struct DualDecompositionIterationRecord {
   Objective regularization_contribution = 0;
   long solve_loop_microseconds = 0;
   long lagrange_update_microseconds = 0;
+  std::vector<DualDecompositionPartitionSolveRecord> partition_solves;
 };
 
 enum class DualDecompositionStepPolicy {
@@ -207,6 +215,7 @@ struct DualDecompositionOptions {
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
   bool track_arc_flow_updates = false;
+  bool track_maxflow_work_telemetry = false;
   int halo_depth = 1;
   std::vector<std::uint64_t> partition_edge_weights;
   std::vector<int> partition_labels;
@@ -1191,6 +1200,11 @@ public:
       std::vector<Objective> regularization_contribution_terms(solvers_.size(), 0);
       std::vector<long> regularization_anchor_count_terms(solvers_.size(), 0);
       std::vector<long> regularization_active_count_terms(solvers_.size(), 0);
+      std::vector<DualDecompositionPartitionSolveRecord>
+          partition_solve_records;
+      if (options_.track_maxflow_work_telemetry) {
+        partition_solve_records.resize(solvers_.size());
+      }
       const long round_objective_scale = scale_;
       const long round_total_iteration = total_optimization_iterations_;
       const size_t round_partition_count = solvers_.size();
@@ -1207,11 +1221,16 @@ public:
               &regularization_anchor_count_terms[solver_index];
           auto *regularization_active_count_result =
               &regularization_active_count_terms[solver_index];
+          auto *partition_solve_record =
+              options_.track_maxflow_work_telemetry
+                  ? &partition_solve_records[solver_index]
+                  : nullptr;
           thread_pool_.push([solver, lower_result,
                              regularization_budget_result,
                              regularization_contribution_result,
                              regularization_anchor_count_result,
                              regularization_active_count_result,
+                             partition_solve_record,
                              report_progress, round_objective_scale,
                              step_size, i, round_total_iteration,
                              solver_index, round_partition_count] {
@@ -1238,6 +1257,17 @@ public:
                 solver->getLastRegularizationAnchorSinkCount();
             *regularization_active_count_result =
                 solver->getLastRegularizationActiveSinkCount();
+            if (partition_solve_record != nullptr) {
+              partition_solve_record->partition_index = solver_index;
+              partition_solve_record->local_lower_bound_raw = *lower_result;
+              partition_solve_record->solve_microseconds =
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() -
+                      partition_solve_start)
+                      .count();
+              partition_solve_record->work =
+                  solver->getLastSolveWorkTelemetry();
+            }
             if (report_progress) {
               const double elapsed = std::chrono::duration<double>(
                                          std::chrono::steady_clock::now() -
@@ -1487,7 +1517,8 @@ public:
             last_regularization_budget_,
             last_regularization_contribution_,
             solve_loop_time.count(),
-            lagrange_update_time.count()});
+            lagrange_update_time.count(),
+            std::move(partition_solve_records)});
       }
 
       if (!has_scale_max_lower_bound || lower_bound > max_lower_bound) {
@@ -2631,6 +2662,8 @@ private:
             std::move(min_cut_sub_graph.graph.terminal_capacities),
             options_.solver_storage);
         solver->setTrackArcFlowUpdates(options_.track_arc_flow_updates);
+        solver->setTrackMaxflowWorkTelemetry(
+            options_.track_maxflow_work_telemetry);
         solver->setCanonicalCutSelection(options_.canonical_cut_selection);
         if (!options_.reference_cut_labels.empty()) {
           std::vector<int> local_reference;

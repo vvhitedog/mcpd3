@@ -10,6 +10,17 @@
 #define TERMINAL ((arc *)1) /* to terminal */
 #define ORPHAN ((arc *)2)   /* orphan */
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+#define MCPD3_MAXFLOW_TELEMETRY(statement)                                     \
+  do {                                                                         \
+    if (work_telemetry_enabled) {                                              \
+      statement;                                                               \
+    }                                                                          \
+  } while (false)
+#else
+#define MCPD3_MAXFLOW_TELEMETRY(statement) do { } while (false)
+#endif
+
 #define INFINITE_D                                                             \
   ((int)(((unsigned)-1) / 2)) /* infinite distance to the terminal */
 
@@ -31,6 +42,7 @@
 template <typename captype, typename tcaptype, typename flowtype>
 inline void Graph<captype, tcaptype, flowtype>::set_active(node *i) {
   if (!i->next) {
+    MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.active_node_insertions);
     /* it's not in the list yet */
     if (queue_last[1])
       queue_last[1]->next = i;
@@ -69,8 +81,10 @@ Graph<captype, tcaptype, flowtype>::next_active() {
     i->next = NULL;
 
     /* a node in the list is active iff it has a parent */
-    if (i->parent)
+    if (i->parent) {
+      MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.active_node_pops);
       return i;
+    }
   }
 }
 
@@ -108,6 +122,7 @@ inline void Graph<captype, tcaptype, flowtype>::add_to_changed_list(node *i) {
     node_id *ptr = changed_list->New();
     *ptr = (node_id)(i - nodes);
     i->is_in_changed_list = true;
+    MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.changed_tree_nodes);
   }
 }
 
@@ -129,12 +144,14 @@ void Graph<captype, tcaptype, flowtype>::maxflow_init() {
     i->is_in_changed_list = 0;
     i->TS = TIME;
     if (i->tr_cap > 0) {
+      MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.initial_terminal_roots);
       /* i is connected to the source */
       i->is_sink = 0;
       i->parent = TERMINAL;
       set_active(i);
       i->DIST = 1;
     } else if (i->tr_cap < 0) {
+      MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.initial_terminal_roots);
       /* i is connected to the sink */
       i->is_sink = 1;
       i->parent = TERMINAL;
@@ -161,6 +178,7 @@ void Graph<captype, tcaptype, flowtype>::maxflow_reuse_trees_init() {
   TIME++;
 
   while ((i = queue)) {
+    MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.reuse_marked_nodes);
     queue = i->next;
     if (queue == i)
       queue = NULL;
@@ -235,6 +253,10 @@ void Graph<captype, tcaptype, flowtype>::augment(
   arc *a;
   tcaptype bottleneck;
 
+  MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.augmentations);
+  MCPD3_MAXFLOW_TELEMETRY(
+      ++last_work_telemetry_.augmentation_path_arc_count);
+
   /* 1. Finding bottleneck capacity */
   /* 1a - the source tree */
   bottleneck = middle_arc->r_cap;
@@ -242,6 +264,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
     a = i->parent;
     if (a == TERMINAL)
       break;
+    MCPD3_MAXFLOW_TELEMETRY(
+        ++last_work_telemetry_.augmentation_path_arc_count);
     if (bottleneck > a->sister->r_cap)
       bottleneck = a->sister->r_cap;
   }
@@ -252,6 +276,8 @@ void Graph<captype, tcaptype, flowtype>::augment(
     a = i->parent;
     if (a == TERMINAL)
       break;
+    MCPD3_MAXFLOW_TELEMETRY(
+        ++last_work_telemetry_.augmentation_path_arc_count);
     if (bottleneck > a->r_cap)
       bottleneck = a->r_cap;
   }
@@ -316,14 +342,19 @@ void Graph<captype, tcaptype, flowtype>::process_source_orphan(node *i) {
   arc *a0, *a0_min = NULL, *a;
   int d, d_min = INFINITE_D;
 
+  MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_nodes_processed);
+
   /* trying to find a new parent */
-  for (a0 = i->first; a0; a0 = a0->next)
+  for (a0 = i->first; a0; a0 = a0->next) {
+    MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_arc_scans);
     if (a0->sister->r_cap) {
       j = a0->head;
       if (!j->is_sink && (a = j->parent)) {
         /* checking the origin of j */
         d = 0;
         while (1) {
+          MCPD3_MAXFLOW_TELEMETRY(
+              ++last_work_telemetry_.orphan_parent_path_arc_scans);
           if (j->TS == TIME) {
             d += j->DIST;
             break;
@@ -355,6 +386,7 @@ void Graph<captype, tcaptype, flowtype>::process_source_orphan(node *i) {
         }
       }
     }
+  }
 
   if (i->parent = a0_min) {
     i->TS = TIME;
@@ -365,6 +397,7 @@ void Graph<captype, tcaptype, flowtype>::process_source_orphan(node *i) {
 
     /* process neighbors */
     for (a0 = i->first; a0; a0 = a0->next) {
+      MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_arc_scans);
       j = a0->head;
       if (!j->is_sink && (a = j->parent)) {
         if (a0->sister->r_cap)
@@ -383,14 +416,19 @@ void Graph<captype, tcaptype, flowtype>::process_sink_orphan(node *i) {
   arc *a0, *a0_min = NULL, *a;
   int d, d_min = INFINITE_D;
 
+  MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_nodes_processed);
+
   /* trying to find a new parent */
-  for (a0 = i->first; a0; a0 = a0->next)
+  for (a0 = i->first; a0; a0 = a0->next) {
+    MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_arc_scans);
     if (a0->r_cap) {
       j = a0->head;
       if (j->is_sink && (a = j->parent)) {
         /* checking the origin of j */
         d = 0;
         while (1) {
+          MCPD3_MAXFLOW_TELEMETRY(
+              ++last_work_telemetry_.orphan_parent_path_arc_scans);
           if (j->TS == TIME) {
             d += j->DIST;
             break;
@@ -422,6 +460,7 @@ void Graph<captype, tcaptype, flowtype>::process_sink_orphan(node *i) {
         }
       }
     }
+  }
 
   if (i->parent = a0_min) {
     i->TS = TIME;
@@ -432,6 +471,7 @@ void Graph<captype, tcaptype, flowtype>::process_sink_orphan(node *i) {
 
     /* process neighbors */
     for (a0 = i->first; a0; a0 = a0->next) {
+      MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.orphan_arc_scans);
       j = a0->head;
       if (j->is_sink && (a = j->parent)) {
         if (a0->r_cap)
@@ -506,6 +546,13 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
   arc *a;
   nodeptr *np, *np_next;
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+  if (work_telemetry_enabled) {
+    last_work_telemetry_ = WorkTelemetry{};
+    last_work_telemetry_.reused_trees = reuse_trees;
+  }
+#endif
+
   if (!nodeptr_block) {
     nodeptr_block = new DBlock<nodeptr>(NODEPTR_BLOCK_SIZE, error_function);
   }
@@ -545,7 +592,8 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
     /* growth */
     if (!i->is_sink) {
       /* grow source tree */
-      for (a = i->first; a; a = a->next)
+      for (a = i->first; a; a = a->next) {
+        MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.growth_arc_scans);
         if (a->r_cap) {
           j = a->head;
           if (!j->parent) {
@@ -565,9 +613,11 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
             j->DIST = i->DIST + 1;
           }
         }
+      }
     } else {
       /* grow sink tree */
-      for (a = i->first; a; a = a->next)
+      for (a = i->first; a; a = a->next) {
+        MCPD3_MAXFLOW_TELEMETRY(++last_work_telemetry_.growth_arc_scans);
         if (a->sister->r_cap) {
           j = a->head;
           if (!j->parent) {
@@ -588,6 +638,7 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
             j->DIST = i->DIST + 1;
           }
         }
+      }
     }
 
     TIME++;
@@ -635,6 +686,8 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
 }
 
 /***********************************************************************/
+
+#undef MCPD3_MAXFLOW_TELEMETRY
 
 template <typename captype, typename tcaptype, typename flowtype>
 void Graph<captype, tcaptype, flowtype>::test_consistency(node *current_node) {

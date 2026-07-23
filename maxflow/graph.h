@@ -61,6 +61,7 @@ Vision (ICCV), 2005
 #include "block.h"
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string.h>
 #include <type_traits>
@@ -81,6 +82,21 @@ template <typename captype, typename tcaptype, typename flowtype> class Graph {
 public:
   typedef enum { SOURCE = 0, SINK = 1 } termtype; // terminals
   typedef int node_id;
+
+  struct WorkTelemetry {
+    bool reused_trees = false;
+    std::uint64_t initial_terminal_roots = 0;
+    std::uint64_t reuse_marked_nodes = 0;
+    std::uint64_t active_node_pops = 0;
+    std::uint64_t active_node_insertions = 0;
+    std::uint64_t growth_arc_scans = 0;
+    std::uint64_t augmentations = 0;
+    std::uint64_t augmentation_path_arc_count = 0;
+    std::uint64_t orphan_nodes_processed = 0;
+    std::uint64_t orphan_arc_scans = 0;
+    std::uint64_t orphan_parent_path_arc_scans = 0;
+    std::uint64_t changed_tree_nodes = 0;
+  };
 
   /////////////////////////////////////////////////////////////////////////
   //                     BASIC INTERFACE FUNCTIONS                       //
@@ -132,6 +148,14 @@ public:
   // FOR DESCRIPTION OF changed_list, SEE remove_from_changed_list().
   flowtype maxflow(bool reuse_trees = false,
                    Block<node_id> *changed_list = NULL);
+
+  void set_work_telemetry_enabled(bool enabled) {
+    work_telemetry_enabled = enabled;
+  }
+
+  const WorkTelemetry &last_work_telemetry() const {
+    return last_work_telemetry_;
+  }
 
   // After the maxflow is computed, this function returns to which
   // segment the node 'i' belongs (Graph<captype,tcaptype,flowtype>::SOURCE or
@@ -384,6 +408,9 @@ private:
                      // (or exit(1) is called if it's NULL)
 
   flowtype flow; // total flow
+
+  bool work_telemetry_enabled = false;
+  WorkTelemetry last_work_telemetry_;
 
   // reusing trees & list of changed pixels
   int maxflow_iteration; // counter

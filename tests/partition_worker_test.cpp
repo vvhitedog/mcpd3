@@ -3066,6 +3066,64 @@ void dualDecompositionPolyakStepUsesPrimalDualGap() {
           "Polyak fixture should reduce the scheduled alpha step");
 }
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+void dualDecompositionReportsPerPartitionMaxflowWork() {
+  setenv("MCPD3_PARTITIONER", "basic", /*overwrite=*/1);
+
+  mcpd3::DualDecompositionOptions options;
+  options.track_primal_upper_bound = false;
+  options.verbose = false;
+  options.thread_count = 2;
+  options.max_iteration_count = 10;
+  options.max_total_iteration_count = 1;
+  options.num_optimization_scales = 1;
+  options.initial_step_size = 10;
+  options.patience = 9;
+  options.enable_group_stopping = false;
+  options.use_momentum = false;
+  options.regularization_scheme =
+      mcpd3::DualDecompositionRegularizationScheme::NONE;
+  options.track_maxflow_work_telemetry = true;
+
+  std::vector<mcpd3::DualDecompositionIterationRecord> records;
+  options.iteration_callback =
+      [&](const mcpd3::DualDecompositionIterationRecord &record) {
+        records.push_back(record);
+      };
+
+  mcpd3::DualDecomposition dual_decomp(
+      /*npartition=*/4, makeParityFixtureGraph(), options);
+  dual_decomp.solve();
+
+  require(records.size() == 1,
+          "work telemetry probe should report one DD round");
+  const auto &record = records.front();
+  require(record.partition_solves.size() == 4,
+          "work telemetry must report every local partition solve");
+  mcpd3::Objective local_lower_bound_sum = 0;
+  for (size_t index = 0; index < record.partition_solves.size(); ++index) {
+    const auto &partition = record.partition_solves[index];
+    require(partition.partition_index == index,
+            "partition work telemetry must retain stable partition order");
+    require(partition.work.enabled,
+            "partition work telemetry must identify instrumented solves");
+    require(!partition.work.maxflow.reused_trees,
+            "the first local partition solve must be cold");
+    require(partition.solve_microseconds >=
+                partition.work.maxflow_microseconds,
+            "partition wall must include its maxflow work");
+    require(partition.work.tree_nodes_changed ==
+                partition.work.maxflow.changed_tree_nodes,
+            "solver and BK changed-tree counts must agree");
+    local_lower_bound_sum = mcpd3::checked_add(
+        local_lower_bound_sum, partition.local_lower_bound_raw,
+        "test local lower-bound sum overflow");
+  }
+  require(local_lower_bound_sum == record.regularized_objective_raw,
+          "per-partition objectives must sum to the DD round objective");
+}
+#endif
+
 void coherentBoundaryDirectionRequiresDominantPartitionMode() {
   require(mcpd3::coherent_boundary_direction(
               /*positive_count=*/80, /*negative_count=*/0,
@@ -6964,6 +7022,9 @@ int main() {
     dualDecompositionRandomizesExportedInitialAlphas();
     dualDecompositionObjectiveScaleIsIndependentOfStepSize();
     dualDecompositionPolyakStepUsesPrimalDualGap();
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    dualDecompositionReportsPerPartitionMaxflowWork();
+#endif
     coherentBoundaryDirectionRequiresDominantPartitionMode();
     disagreementTransitionClassificationCoversEveryStateChange();
     dualDecompositionProbeHonorsTotalIterationBudget();

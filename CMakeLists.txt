@@ -48,8 +48,16 @@ option(METIS_ENABLED "Use the metis library for graph partitioning (highly recom
 option(MCPD_LEGACY_32BIT_DD_REPLAY
   "Replay historical narrow 32-bit DD arithmetic with defined wrapping. Benchmark compatibility only."
   OFF)
+option(MCPD3_MAXFLOW_WORK_TELEMETRY
+  "Instrument BK operation counts for experimental per-partition analysis."
+  OFF)
 include(cmake/McpdCapacity.cmake)
 mcpd_configure_capacity(mcpd3_capacity_config ${CMAKE_CURRENT_SOURCE_DIR})
+
+if (MCPD3_MAXFLOW_WORK_TELEMETRY)
+  target_compile_definitions(mcpd3_capacity_config INTERFACE
+    MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY=1)
+endif ()
 
 if (MCPD_LEGACY_32BIT_DD_REPLAY)
   if (NOT MCPD_CAPACITY_MODE STREQUAL "32")

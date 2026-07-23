@@ -319,6 +319,82 @@ void mixedWidthMaxflowKeepsCompactArcResiduals() {
           "mixed-width augmentation must update compact arc residuals");
 }
 
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+void maxflowWorkTelemetryDistinguishesInitialReuseAndRepair() {
+  using TestGraph = Graph<int, long, long>;
+  TestGraph graph(/*node_num_max=*/2, /*edge_num_max=*/1);
+  graph.set_work_telemetry_enabled(true);
+  graph.add_node(2);
+  graph.add_edge(0, 1, 7, 0);
+  graph.add_tweights(0, 7, 0);
+  graph.add_tweights(1, 0, 7);
+
+  require(graph.maxflow() == 7, "instrumented initial maxflow must be exact");
+  const auto initial = graph.last_work_telemetry();
+  require(!initial.reused_trees,
+          "initial maxflow telemetry must identify a cold solve");
+  require(initial.initial_terminal_roots == 2,
+          "initial maxflow must discover both terminal roots");
+  require(initial.active_node_pops > 0,
+          "initial maxflow must process active nodes");
+  require(initial.growth_arc_scans > 0,
+          "initial maxflow must scan growth arcs");
+  require(initial.augmentations == 1,
+          "single-edge graph must use one augmentation");
+  require(initial.augmentation_path_arc_count == 1,
+          "single-edge augmentation path must contain one graph arc");
+
+  require(graph.maxflow(true) == 7,
+          "unchanged incremental maxflow must preserve the optimum");
+  const auto unchanged = graph.last_work_telemetry();
+  require(unchanged.reused_trees,
+          "incremental maxflow telemetry must identify tree reuse");
+  require(unchanged.reuse_marked_nodes == 0,
+          "unchanged incremental solve must not repair marked nodes");
+  require(unchanged.active_node_pops == 0,
+          "unchanged incremental solve must do no growth work");
+  require(unchanged.augmentations == 0,
+          "unchanged incremental solve must not augment");
+  require(unchanged.orphan_nodes_processed == 0,
+          "unchanged incremental solve must not process orphans");
+
+  graph.set_trcap(0, -1);
+  graph.mark_node(0);
+  (void)graph.maxflow(true);
+  const auto repaired = graph.last_work_telemetry();
+  require(repaired.reused_trees,
+          "modified incremental maxflow must still reuse trees");
+  require(repaired.reuse_marked_nodes == 1,
+          "modified terminal must enter reuse-tree repair exactly once");
+  require(repaired.active_node_pops > 0 ||
+              repaired.orphan_nodes_processed > 0,
+          "modified terminal must trigger measurable BK repair work");
+}
+
+void primalDualWorkTelemetryFingerprintsTheLocalCut() {
+  mcpd3::PrimalDualMinCutSolver solver(
+      /*nnode=*/2, /*narc=*/1, std::vector<int>{0, 1},
+      std::vector<mcpd3::Capacity>{7, 0},
+      std::vector<mcpd3::Capacity>{10, -10});
+  solver.setTrackMaxflowWorkTelemetry(true);
+  solver.solve();
+  const auto initial = solver.getLastSolveWorkTelemetry();
+  require(initial.cut_label_one_count == 1,
+          "one vertex must occupy the sink side of the path cut");
+  require(initial.cut_label_hash != 0,
+          "a nonempty sink-side cut must have a fingerprint");
+
+  solver.solve();
+  const auto unchanged = solver.getLastSolveWorkTelemetry();
+  require(unchanged.cut_labels_changed == 0,
+          "an unchanged local cut must report no label changes");
+  require(unchanged.cut_label_one_count == initial.cut_label_one_count,
+          "an unchanged local cut must preserve its sink-side size");
+  require(unchanged.cut_label_hash == initial.cut_label_hash,
+          "an unchanged local cut must preserve its fingerprint");
+}
+#endif
+
 void maximalCapacityParsesFromDimacs() {
   const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
   const auto path = std::filesystem::temp_directory_path() /
@@ -390,6 +466,10 @@ int main() {
     aggregateNodeBalanceExceedsCapacityStorage();
     lagrangeMultiplierExceedsCapacityStorage();
     mixedWidthMaxflowKeepsCompactArcResiduals();
+#if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
+    maxflowWorkTelemetryDistinguishesInitialReuseAndRepair();
+    primalDualWorkTelemetryFingerprintsTheLocalCut();
+#endif
     maximalCapacityParsesFromDimacs();
     maximalCapacitySurvivesCsrStorage();
     std::cout << "capacity_precision_test: PASS\n";
