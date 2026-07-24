@@ -2181,9 +2181,8 @@ void requireLocalWarmStatesEqual(
             p + ": regularization active count differs");
     require(a.regularization_weights == e.regularization_weights,
             p + ": regularization weights differ");
-    require(a.maxflow_tree_reinitialize_next ==
-                e.maxflow_tree_reinitialize_next,
-            p + ": next tree-reinitialization decision differs");
+    require(a.mincut_sink_count == e.mincut_sink_count,
+            p + ": mincut sink count differs");
     require(a.last_maxflow_tree_reinitialized ==
                 e.last_maxflow_tree_reinitialized,
             p + ": last tree-reinitialization state differs");
@@ -5965,17 +5964,28 @@ void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
   const std::vector<int> terminal_capacities(8, 0);
 
   std::list<mcpd3::DualDecompositionConstraintArc> adaptive_constraints;
+  std::list<mcpd3::DualDecompositionConstraintArc> gated_constraints;
   std::list<mcpd3::DualDecompositionConstraintArc> full_constraints;
   mcpd3::PrimalDualMinCutSolver adaptive(
+      /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  mcpd3::PrimalDualMinCutSolver gated(
       /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
       terminal_capacities);
   mcpd3::PrimalDualMinCutSolver full(
       /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
       terminal_capacities);
   adaptive.setAdaptiveFullMinCutRecomputeFraction(0.25);
+  adaptive.setAdaptiveFullMinCutRecomputeMinNodeCount(0);
+  gated.setAdaptiveFullMinCutRecomputeFraction(0.25);
+  gated.setAdaptiveMaxflowTreeReinitialization(true);
   full.setForceFullMinCutRecompute(true);
   for (int node = 0; node < 8; ++node) {
     adaptive_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    gated_constraints.emplace_back(
         /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
         /*partition_index_source=*/0, /*partition_index_target=*/1,
         /*local_index_source=*/node, /*local_index_target=*/-1);
@@ -5985,6 +5995,8 @@ void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
         /*local_index_source=*/node, /*local_index_target=*/-1);
     adaptive.addSourceDualDecompositionConstraint(
         std::prev(adaptive_constraints.end()));
+    gated.addSourceDualDecompositionConstraint(
+        std::prev(gated_constraints.end()));
     full.addSourceDualDecompositionConstraint(std::prev(full_constraints.end()));
   }
 
@@ -5995,7 +6007,9 @@ void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
       {-100, 100, -100, 100, -100, 100, -100, 100},
       {-100, -100, -100, -100, 100, 100, 100, 100},
       {100, 100, 100, 100, -100, -100, -100, -100}};
-  for (const auto &alphas : alpha_states) {
+  for (size_t state_index = 0; state_index < alpha_states.size();
+       ++state_index) {
+    const auto &alphas = alpha_states[state_index];
     auto apply_alphas = [&](auto &constraints) {
       size_t node = 0;
       for (auto &constraint : constraints) {
@@ -6004,16 +6018,23 @@ void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
       }
     };
     apply_alphas(adaptive_constraints);
+    apply_alphas(gated_constraints);
     apply_alphas(full_constraints);
 
     adaptive.solve();
+    gated.solve();
     full.solve();
     require(adaptive.getMinCutValue() == full.getMinCutValue(),
             "adaptive cut value differs from full recomputation");
+    require(gated.getMinCutValue() == full.getMinCutValue(),
+            "size-gated cut value differs from full recomputation");
     for (int node = 0; node < 8; ++node) {
       require(adaptive.getMinCutSolution(node) ==
                   full.getMinCutSolution(node),
               "adaptive cut labels differ from full recomputation");
+      require(gated.getMinCutSolution(node) ==
+                  full.getMinCutSolution(node),
+              "size-gated cut labels differ from full recomputation");
     }
   }
   require(adaptive.getAdaptiveFullMinCutRecomputeCount() > 0,
@@ -6021,6 +6042,10 @@ void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
   require(adaptive.getAdaptiveFullMinCutRecomputeCount() <
               static_cast<long>(alpha_states.size()),
           "adaptive trajectory should retain at least one incremental round");
+  require(gated.getAdaptiveFullMinCutRecomputeCount() == 0,
+          "small graphs must remain below the full-recompute size gate");
+  require(gated.getMaxflowTreeReinitializationCount() == 0,
+          "small graphs must remain below the tree-reinitialization size gate");
 }
 
 void reinitializedMaxflowTreesMatchReusedTreeObjectives() {
@@ -6044,6 +6069,7 @@ void reinitializedMaxflowTreesMatchReusedTreeObjectives() {
       terminal_capacities);
   reset.setForceMaxflowTreeReinitialization(true);
   adaptive.setAdaptiveMaxflowTreeReinitialization(true);
+  adaptive.setAdaptiveMaxflowTreeReinitializationMinNodeCount(0);
   for (int node = 0; node < 6; ++node) {
     reused_constraints.emplace_back(
         /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,

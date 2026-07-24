@@ -60,6 +60,7 @@ Vision (ICCV), 2005
 
 #include "block.h"
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <string.h>
@@ -155,6 +156,8 @@ public:
                    Block<node_id> *changed_list = NULL);
   flowtype maxflow(bool reuse_trees, std::vector<int> &changed_arc_indices,
                    Block<node_id> *changed_list = NULL);
+  bool should_reinitialize_marked_trees(
+      double invalidating_fraction) const;
 
   ////////////////////////////
   // 1. Reallocating graph. //

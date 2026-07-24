@@ -319,6 +319,53 @@ void mixedWidthMaxflowKeepsCompactArcResiduals() {
           "mixed-width augmentation must update compact arc residuals");
 }
 
+void adaptiveTreeReinitializationDetectsMarkedSideInvalidation() {
+  using TestGraph = Graph<int, long, long>;
+  TestGraph graph(/*node_num_max=*/4, /*edge_num_max=*/0);
+  graph.add_node(4);
+  graph.add_tweights(0, 7, 0);
+  graph.add_tweights(1, 7, 0);
+  graph.add_tweights(2, 0, 7);
+  graph.add_tweights(3, 0, 7);
+  require(graph.maxflow() == 0,
+          "disconnected terminal roots must have zero maxflow");
+  require(!graph.should_reinitialize_marked_trees(0.5),
+          "an empty marked set must retain the existing trees");
+
+  graph.set_trcap(0, 6);
+  graph.mark_node(0);
+  graph.set_trcap(2, -6);
+  graph.mark_node(2);
+  require(!graph.should_reinitialize_marked_trees(0.5),
+          "same-side terminal changes must retain the existing trees");
+  (void)graph.maxflow(true);
+
+  graph.set_trcap(0, -6);
+  graph.mark_node(0);
+  graph.set_trcap(2, -5);
+  graph.mark_node(2);
+  require(graph.should_reinitialize_marked_trees(0.5),
+          "a threshold fraction of side-invalidating terminals must rebuild");
+  require(!graph.should_reinitialize_marked_trees(1.0),
+          "a side-invalidating minority must remain below a unit threshold");
+  bool rejected = false;
+  try {
+    (void)graph.should_reinitialize_marked_trees(-0.1);
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  require(rejected,
+          "negative tree-reinitialization fraction must be rejected");
+  rejected = false;
+  try {
+    (void)graph.should_reinitialize_marked_trees(1.1);
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  require(rejected,
+          "tree-reinitialization fraction above one must be rejected");
+}
+
 void maximalCapacityParsesFromDimacs() {
   const mcpd3::Capacity capacity = mcpd3::capacity_test_extreme_value();
   const auto path = std::filesystem::temp_directory_path() /
@@ -390,6 +437,7 @@ int main() {
     aggregateNodeBalanceExceedsCapacityStorage();
     lagrangeMultiplierExceedsCapacityStorage();
     mixedWidthMaxflowKeepsCompactArcResiduals();
+    adaptiveTreeReinitializationDetectsMarkedSideInvalidation();
     maximalCapacityParsesFromDimacs();
     maximalCapacitySurvivesCsrStorage();
     std::cout << "capacity_precision_test: PASS\n";

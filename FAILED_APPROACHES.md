@@ -183,3 +183,15 @@
 - Recover the already-solved labels through bounded worker copies into the
   coordinator's final mapped destination. The recovery API must not trigger a
   different solve or reconstruct local state.
+
+## 2026-07-24 - Broad or tree-only certification maintenance
+
+- Do not enable adaptive BK tree rebuilding across every PU cut. It is fast on
+  an isolated alternating zero-cut certificate but can discard useful
+  search-tree warm state on ordinary improving cuts.
+- Restricting both full cut scans and tree rebuilding to the final
+  certification probe is overconservative. Tree rebuilding alone was neutral
+  or slower and lost nearly all of the measured gain.
+- Use exact full cut scans on every sufficiently large local graph, but
+  restrict BK tree rebuilding to the first opposite-direction certification
+  probe and an all-zero local cut.

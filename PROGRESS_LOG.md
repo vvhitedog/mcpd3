@@ -562,3 +562,18 @@
   memory-bounded sequential handoff visible without waiting for the aggregate
   DD-round event.
 - The complete MCPD3 suite passes 2/2 in Release mode.
+
+## 2026-07-24 15:24 PDT - All-cut-safe adaptive maintenance
+
+- Added an exact 50%-changed-node full cut scan and a direct pre-solve test of
+  marked terminal changes against their current BK tree sides.
+- Adaptive cut scans and tree rebuilding require at least 100,000 local nodes.
+  Tree rebuilding additionally requires the preceding local cut to be all zero
+  and can be toggled at runtime without discarding persistent DD state.
+- Fixed no-reuse BK changed-arc bookkeeping so explicit MCPD3 flow remains
+  synchronized when search trees are rebuilt.
+- Full 1,024, 2,048, and 4,096 PU trajectories retained exact objectives and
+  401, 279, and 458 DD rounds. The accepted Phase hybrid reduced exact wall by
+  11.1%, 6.9%, and 10.6%, respectively.
+- The 4,096 resident p2 solve completed with peak RSS 7,761,092 KiB (7.40 GiB)
+  and zero process swaps. MCPD3 passes both Release CTest targets.
