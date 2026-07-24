@@ -141,6 +141,9 @@ struct DualDecompositionOptions {
   CanonicalCutSelection canonical_cut_selection =
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
+  double adaptive_full_mincut_recompute_fraction = 0.0;
+  bool force_maxflow_tree_reinitialization = false;
+  bool adaptive_maxflow_tree_reinitialization = false;
   bool track_arc_flow_updates = false;
   int halo_depth = 1;
   std::vector<std::uint64_t> partition_edge_weights;
@@ -336,6 +339,20 @@ public:
   }
   long getUnitStepNoMomentumRetryCount() const {
     return unit_step_no_momentum_retry_count_;
+  }
+  long getAdaptiveFullMinCutRecomputeCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getAdaptiveFullMinCutRecomputeCount();
+    }
+    return count;
+  }
+  long getMaxflowTreeReinitializationCount() const {
+    long count = 0;
+    for (const auto &solver : solvers_) {
+      count += solver->getMaxflowTreeReinitializationCount();
+    }
+    return count;
   }
   long getHaloObjectiveMultiplier() const {
     return halo_objective_multiplier_;
@@ -2434,6 +2451,12 @@ private:
         }
         solver->setForceFullMinCutRecompute(
             options_.force_full_mincut_recompute);
+        solver->setAdaptiveFullMinCutRecomputeFraction(
+            options_.adaptive_full_mincut_recompute_fraction);
+        solver->setForceMaxflowTreeReinitialization(
+            options_.force_maxflow_tree_reinitialization);
+        solver->setAdaptiveMaxflowTreeReinitialization(
+            options_.adaptive_maxflow_tree_reinitialization);
         solvers_.emplace_back(std::move(solver));
       }
       ++solver_done;
