@@ -210,3 +210,20 @@
 - Changed-arc recording must depend on whether the caller requested an output
   buffer, not on whether search trees are reused. Do not benchmark or expose a
   no-reuse mode without this invariant.
+
+## 2026-07-24 - Broad or tree-only certification maintenance
+
+- Do not enable adaptive BK tree rebuilding across every PU cut. It is fast on
+  an isolated alternating zero-cut certificate but can discard useful
+  search-tree warm state on ordinary improving cuts.
+- Restricting both full cut scans and tree rebuilding to the final
+  certification probe is also not useful. It removes regressions, but tree
+  rebuilding alone was neutral or slower and lost nearly all of the measured
+  gain.
+- The accepted split is asymmetric: exact full cut scans may run on every
+  sufficiently large local graph, while BK tree rebuilding is restricted to
+  the first opposite-direction certification probe and an all-zero local cut.
+- Do not classify a one-run, untriggered per-cut timing change as a regression.
+  Check activation counters and repeated medians. Untriggered 1,024 and 2,048
+  cuts varied by roughly 0.2% in the aggregate while complete trajectories
+  improved materially.

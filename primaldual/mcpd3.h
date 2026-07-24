@@ -47,6 +47,8 @@ enum class ReferenceCutSelection {
   EXACT_REFERENCE_IF_OPTIMAL
 };
 
+inline constexpr std::size_t kAdaptiveLocalMaintenanceMinNodeCount = 100000;
+
 inline bool primaldual_timing_enabled() {
   const char *value = std::getenv("MCPD3_SOLVER_TIMING");
   return value != nullptr && value[0] != '\0' && value[0] != '0';
@@ -93,7 +95,7 @@ public:
     long last_regularization_anchor_sink_count = 0;
     long last_regularization_active_sink_count = 0;
     std::vector<Objective> regularization_weights;
-    bool maxflow_tree_reinitialize_next = false;
+    std::size_t mincut_sink_count = 0;
     bool last_maxflow_tree_reinitialized = false;
     long maxflow_tree_reinitialization_count = 0;
     MaxflowGraph::ReusableState maxflow_graph_state;
@@ -157,12 +159,15 @@ public:
         reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
         force_full_mincut_recompute_(false),
         adaptive_full_mincut_recompute_fraction_(0.0),
+        adaptive_full_mincut_recompute_min_node_count_(
+            kAdaptiveLocalMaintenanceMinNodeCount),
         adaptive_full_mincut_recompute_count_(0),
         force_maxflow_tree_reinitialization_(false),
         adaptive_maxflow_tree_reinitialization_(false),
-        maxflow_tree_reinitialize_next_(false),
+        adaptive_maxflow_tree_reinitialization_min_node_count_(
+            kAdaptiveLocalMaintenanceMinNodeCount),
+        mincut_sink_count_(0),
         last_maxflow_tree_reinitialized_(false),
-        current_cut_labels_changed_(false),
         maxflow_tree_reinitialization_count_(0),
         maxflow_changed_list_(128),
         mincut_value_(0),
@@ -197,12 +202,15 @@ public:
         reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
         force_full_mincut_recompute_(false),
         adaptive_full_mincut_recompute_fraction_(0.0),
+        adaptive_full_mincut_recompute_min_node_count_(
+            kAdaptiveLocalMaintenanceMinNodeCount),
         adaptive_full_mincut_recompute_count_(0),
         force_maxflow_tree_reinitialization_(false),
         adaptive_maxflow_tree_reinitialization_(false),
-        maxflow_tree_reinitialize_next_(false),
+        adaptive_maxflow_tree_reinitialization_min_node_count_(
+            kAdaptiveLocalMaintenanceMinNodeCount),
+        mincut_sink_count_(0),
         last_maxflow_tree_reinitialized_(false),
-        current_cut_labels_changed_(false),
         maxflow_tree_reinitialization_count_(0),
         maxflow_changed_list_(128),
         mincut_value_(0), regularization_str_(0),
@@ -520,6 +528,11 @@ public:
     adaptive_full_mincut_recompute_fraction_ = fraction;
   }
 
+  void setAdaptiveFullMinCutRecomputeMinNodeCount(
+      std::size_t min_node_count) {
+    adaptive_full_mincut_recompute_min_node_count_ = min_node_count;
+  }
+
   long getAdaptiveFullMinCutRecomputeCount() const {
     return adaptive_full_mincut_recompute_count_;
   }
@@ -530,9 +543,11 @@ public:
 
   void setAdaptiveMaxflowTreeReinitialization(bool enabled) {
     adaptive_maxflow_tree_reinitialization_ = enabled;
-    if (!enabled) {
-      maxflow_tree_reinitialize_next_ = false;
-    }
+  }
+
+  void setAdaptiveMaxflowTreeReinitializationMinNodeCount(
+      std::size_t min_node_count) {
+    adaptive_maxflow_tree_reinitialization_min_node_count_ = min_node_count;
   }
 
   long getMaxflowTreeReinitializationCount() const {
@@ -566,7 +581,6 @@ public:
   }
 
   void solve() {
-    current_cut_labels_changed_ = false;
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_) {
       last_solve_work_telemetry_ = SolveWorkTelemetry{};
@@ -624,10 +638,6 @@ public:
     updateMinCut();   // get updated min cut solution
 #endif
     has_solution_ = true;
-    if (adaptive_maxflow_tree_reinitialization_) {
-      maxflow_tree_reinitialize_next_ =
-          is_first_iteration_ || !current_cut_labels_changed_;
-    }
 
     // set flag indicating that incremental methods should be used hereafter
     if (is_first_iteration_ || is_first_iteration_of_new_scale_) {
@@ -1033,8 +1043,7 @@ public:
     state.last_regularization_active_sink_count =
         last_regularization_active_sink_count_;
     state.regularization_weights = regularization_weights_;
-    state.maxflow_tree_reinitialize_next =
-        maxflow_tree_reinitialize_next_;
+    state.mincut_sink_count = mincut_sink_count_;
     state.last_maxflow_tree_reinitialized =
         last_maxflow_tree_reinitialized_;
     state.maxflow_tree_reinitialization_count =
@@ -1073,13 +1082,11 @@ public:
     last_regularization_active_sink_count_ =
         state.last_regularization_active_sink_count;
     regularization_weights_ = state.regularization_weights;
-    maxflow_tree_reinitialize_next_ =
-        state.maxflow_tree_reinitialize_next;
+    mincut_sink_count_ = state.mincut_sink_count;
     last_maxflow_tree_reinitialized_ =
         state.last_maxflow_tree_reinitialized;
     maxflow_tree_reinitialization_count_ =
         state.maxflow_tree_reinitialization_count;
-    current_cut_labels_changed_ = false;
     incremental_mincut_nodes_.clear();
     incremental_arcs_.clear();
     maxflow_changed_list_.Reset();
@@ -1428,6 +1435,7 @@ private:
         } else if (isReferenceCutOptimal()) {
           ++reference_exact_hit_count_;
           x_.replaceFrom(reference_cut_labels_);
+          recomputeMincutSinkCount();
         } else if (reference_cut_selection_ ==
                    ReferenceCutSelection::CLOSEST_EXACT) {
           ++reference_closure_count_;
@@ -1443,6 +1451,8 @@ private:
     } else {
       const bool adaptive_full_recompute =
           !is_first_iteration_ && !force_full_mincut_recompute_ &&
+          static_cast<std::size_t>(nnode_) >=
+              adaptive_full_mincut_recompute_min_node_count_ &&
           shouldFullyRecomputeMincut(
               incremental_mincut_nodes_.size(),
               static_cast<std::size_t>(nnode_),
@@ -1511,6 +1521,7 @@ private:
       }
     }
 
+    mincut_sink_count_ = 0;
     for (int node = 0; node < nnode_; ++node) {
       if (canonical_cut_selection_ == CanonicalCutSelection::MAXIMUM_LABELS) {
         // Source-reachable nodes form the minimum source-side min-cut.
@@ -1519,6 +1530,7 @@ private:
         // Its dual: nodes that can reach the sink must remain sink-side.
         x_[node] = reached[static_cast<size_t>(node)] ? 1 : 0;
       }
+      mincut_sink_count_ += static_cast<std::size_t>(x_[node] != 0);
     }
   }
 
@@ -1703,12 +1715,21 @@ private:
       }
     }
     (void)closure_graph.maxflow();
+    mincut_sink_count_ = 0;
     for (int node = 0; node < nnode_; ++node) {
       x_[node] =
           closure_graph.what_segment(component[static_cast<size_t>(node)]) ==
                   MaxflowGraph::SINK
               ? 1
               : 0;
+      mincut_sink_count_ += static_cast<std::size_t>(x_[node] != 0);
+    }
+  }
+
+  void recomputeMincutSinkCount() {
+    mincut_sink_count_ = 0;
+    for (int node = 0; node < nnode_; ++node) {
+      mincut_sink_count_ += static_cast<std::size_t>(x_[node] != 0);
     }
   }
 
@@ -1730,13 +1751,10 @@ private:
   }
 
   void updateMinCutInitial() {
+    mincut_sink_count_ = 0;
     for (int i = 0; i < nnode_; ++i) {
       const int new_label =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
-      if (adaptive_maxflow_tree_reinitialization_ &&
-          new_label != x_[i]) {
-        current_cut_labels_changed_ = true;
-      }
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
       if (track_maxflow_work_telemetry_ && new_label != x_[i]) {
         ++last_solve_work_telemetry_.cut_labels_changed;
@@ -1744,6 +1762,7 @@ private:
       updateCutLabelFingerprint(i, x_[i], new_label);
 #endif
       x_[i] = new_label;
+      mincut_sink_count_ += static_cast<std::size_t>(new_label != 0);
     }
   }
 
@@ -1786,9 +1805,6 @@ private:
       const int x_i_new =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
       if (x_i_new != x_[i]) {
-        if (adaptive_maxflow_tree_reinitialization_) {
-          current_cut_labels_changed_ = true;
-        }
         incremental_changed_node_flags_[static_cast<size_t>(i)] = 1;
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
         if (track_maxflow_work_telemetry_) {
@@ -1877,8 +1893,14 @@ private:
       if (changed == 0) {
         continue;
       }
-      x_[i] =
+      const int new_label =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      if (x_[i] == 0 && new_label != 0) {
+        ++mincut_sink_count_;
+      } else if (x_[i] != 0 && new_label == 0) {
+        --mincut_sink_count_;
+      }
+      x_[i] = new_label;
       changed = 0;
     }
   }
@@ -1958,7 +1980,10 @@ private:
       maxflow_graph_.maxflow();
     } else if (force_maxflow_tree_reinitialization_ ||
                (adaptive_maxflow_tree_reinitialization_ &&
-                maxflow_tree_reinitialize_next_)) {
+                static_cast<std::size_t>(nnode_) >=
+                    adaptive_maxflow_tree_reinitialization_min_node_count_ &&
+                mincut_sink_count_ == 0 &&
+                maxflow_graph_.should_reinitialize_marked_trees(0.5))) {
       last_maxflow_tree_reinitialized_ = true;
       incremental_mincut_nodes_.clear();
       maxflow_graph_.maxflow(
@@ -2069,12 +2094,13 @@ private:
   long reference_decode_time_us_ = 0;
   bool force_full_mincut_recompute_;
   double adaptive_full_mincut_recompute_fraction_;
+  std::size_t adaptive_full_mincut_recompute_min_node_count_;
   long adaptive_full_mincut_recompute_count_;
   bool force_maxflow_tree_reinitialization_;
   bool adaptive_maxflow_tree_reinitialization_;
-  bool maxflow_tree_reinitialize_next_;
+  std::size_t adaptive_maxflow_tree_reinitialization_min_node_count_;
+  std::size_t mincut_sink_count_;
   bool last_maxflow_tree_reinitialized_;
-  bool current_cut_labels_changed_;
   long maxflow_tree_reinitialization_count_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;

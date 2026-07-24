@@ -594,3 +594,23 @@
   tree decision and counters so speculative rollback remains exact.
 - Randomized alpha trajectories match reused-tree local objectives across 100
   rounds. The complete MCPD3 CTest suite passes 2/2.
+
+## 2026-07-24 15:24 PDT - All-cut-safe adaptive maintenance
+
+- Replaced the broad tree-reset heuristic with a direct pre-solve test of
+  marked terminal changes against their current BK tree sides. Adaptive tree
+  rebuilding now additionally requires the preceding local cut to be all zero.
+- Added a 100,000-local-node gate to adaptive full cut scans and tree
+  rebuilding. Small graphs retain the established incremental path; tests
+  explicitly cover the gated and enabled branches.
+- Added runtime adaptive-maintenance reconfiguration to persistent
+  `DualDecomposition` workspaces so a PU optimizer can restrict tree rebuilding
+  to a certification probe without discarding residual flow, alphas, or
+  momentum.
+- Full 1,024, 2,048, and 4,096 PU trajectories retained exact objectives and
+  401, 279, and 458 DD rounds. The accepted hybrid reduced exact wall by 11.1%,
+  6.9%, and 10.6%, respectively.
+- The 4,096 resident p2 solve completed with peak RSS 7,761,092 KiB (7.40 GiB)
+  and zero process swaps, confirming that it fits on the 15 GiB test system.
+- MCPD3 passes both Release CTest targets after adding default size-gate
+  coverage.

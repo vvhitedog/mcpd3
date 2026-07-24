@@ -164,6 +164,41 @@ void Graph<captype, tcaptype, flowtype>::maxflow_init() {
 }
 
 template <typename captype, typename tcaptype, typename flowtype>
+bool Graph<captype, tcaptype, flowtype>::
+    should_reinitialize_marked_trees(double invalidating_fraction) const {
+  if (!std::isfinite(invalidating_fraction) ||
+      invalidating_fraction < 0.0 || invalidating_fraction > 1.0) {
+    throw std::invalid_argument(
+        "tree-reinitialization fraction must be in [0, 1]");
+  }
+
+  std::size_t marked_count = 0;
+  std::size_t invalidating_count = 0;
+  node *i = queue_first[1];
+  while (i != NULL) {
+    node *next = i->next;
+    if (next == i) {
+      next = NULL;
+    }
+    if (i->is_marked) {
+      ++marked_count;
+      if (i->parent != NULL &&
+          (i->tr_cap == 0 ||
+           (i->tr_cap > 0 && i->is_sink) ||
+           (i->tr_cap < 0 && !i->is_sink))) {
+        ++invalidating_count;
+      }
+    }
+    i = next;
+  }
+  if (marked_count == 0) {
+    return false;
+  }
+  return static_cast<double>(invalidating_count) >=
+         invalidating_fraction * static_cast<double>(marked_count);
+}
+
+template <typename captype, typename tcaptype, typename flowtype>
 void Graph<captype, tcaptype, flowtype>::maxflow_reuse_trees_init() {
   node *i;
   node *j;

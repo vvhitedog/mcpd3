@@ -216,8 +216,12 @@ struct DualDecompositionOptions {
       CanonicalCutSelection::SOLVER_DEFAULT;
   bool force_full_mincut_recompute = false;
   double adaptive_full_mincut_recompute_fraction = 0.0;
+  std::size_t adaptive_full_mincut_recompute_min_node_count =
+      kAdaptiveLocalMaintenanceMinNodeCount;
   bool force_maxflow_tree_reinitialization = false;
   bool adaptive_maxflow_tree_reinitialization = false;
+  std::size_t adaptive_maxflow_tree_reinitialization_min_node_count =
+      kAdaptiveLocalMaintenanceMinNodeCount;
   bool track_arc_flow_updates = false;
   bool track_maxflow_work_telemetry = false;
   int speculative_cycle_replay_iterations = 0;
@@ -700,6 +704,34 @@ public:
       snapshots.push_back(std::move(snapshot));
     }
     return snapshots;
+  }
+
+  void configureAdaptiveLocalMaintenance(
+      double full_mincut_recompute_fraction,
+      std::size_t full_mincut_recompute_min_node_count,
+      bool maxflow_tree_reinitialization,
+      std::size_t maxflow_tree_reinitialization_min_node_count) {
+    (void)shouldFullyRecomputeMincut(
+        /*changed_node_count=*/0, /*node_count=*/0,
+        full_mincut_recompute_fraction);
+    options_.adaptive_full_mincut_recompute_fraction =
+        full_mincut_recompute_fraction;
+    options_.adaptive_full_mincut_recompute_min_node_count =
+        full_mincut_recompute_min_node_count;
+    options_.adaptive_maxflow_tree_reinitialization =
+        maxflow_tree_reinitialization;
+    options_.adaptive_maxflow_tree_reinitialization_min_node_count =
+        maxflow_tree_reinitialization_min_node_count;
+    for (auto &solver : solvers_) {
+      solver->setAdaptiveFullMinCutRecomputeFraction(
+          full_mincut_recompute_fraction);
+      solver->setAdaptiveFullMinCutRecomputeMinNodeCount(
+          full_mincut_recompute_min_node_count);
+      solver->setAdaptiveMaxflowTreeReinitialization(
+          maxflow_tree_reinitialization);
+      solver->setAdaptiveMaxflowTreeReinitializationMinNodeCount(
+          maxflow_tree_reinitialization_min_node_count);
+    }
   }
 
   std::vector<PrimalDualMinCutSolver::StorageDiagnostics>
@@ -3064,10 +3096,14 @@ private:
             options_.force_full_mincut_recompute);
         solver->setAdaptiveFullMinCutRecomputeFraction(
             options_.adaptive_full_mincut_recompute_fraction);
+        solver->setAdaptiveFullMinCutRecomputeMinNodeCount(
+            options_.adaptive_full_mincut_recompute_min_node_count);
         solver->setForceMaxflowTreeReinitialization(
             options_.force_maxflow_tree_reinitialization);
         solver->setAdaptiveMaxflowTreeReinitialization(
             options_.adaptive_maxflow_tree_reinitialization);
+        solver->setAdaptiveMaxflowTreeReinitializationMinNodeCount(
+            options_.adaptive_maxflow_tree_reinitialization_min_node_count);
         solvers_.emplace_back(std::move(solver));
       }
       ++solver_done;
