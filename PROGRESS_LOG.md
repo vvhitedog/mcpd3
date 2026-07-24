@@ -578,3 +578,19 @@
   records, and related storage behind the default-off
   `MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY` definition.
 - Both default and telemetry-enabled MCPD3 CTest suites pass 2/2.
+
+## 2026-07-24 11:51 PDT - Adaptive cut and BK tree maintenance
+
+- Added an exact adaptive cut-maintenance policy that uses a contiguous full
+  node/edge scan when BK reports a changed-node fraction above a configurable
+  threshold. The disabled, boundary, invalid-input, incremental, and full-scan
+  branches are covered.
+- Added BK search-tree reinitialization that preserves residual capacities and
+  flow while requesting changed residual arcs for MCPD3 bookkeeping.
+- Added a parameter-free adaptive tree policy that reinitializes the first
+  post-initial solve and a solve following an unchanged local cut, while
+  retaining tree reuse after a changing cut.
+- Extended warm-state capture, restore, and equality checks with the adaptive
+  tree decision and counters so speculative rollback remains exact.
+- Randomized alpha trajectories match reused-tree local objectives across 100
+  rounds. The complete MCPD3 CTest suite passes 2/2.

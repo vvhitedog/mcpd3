@@ -2184,6 +2184,15 @@ void requireLocalWarmStatesEqual(
             p + ": regularization active count differs");
     require(a.regularization_weights == e.regularization_weights,
             p + ": regularization weights differ");
+    require(a.maxflow_tree_reinitialize_next ==
+                e.maxflow_tree_reinitialize_next,
+            p + ": next tree-reinitialization decision differs");
+    require(a.last_maxflow_tree_reinitialized ==
+                e.last_maxflow_tree_reinitialized,
+            p + ": last tree-reinitialization state differs");
+    require(a.maxflow_tree_reinitialization_count ==
+                e.maxflow_tree_reinitialization_count,
+            p + ": tree-reinitialization count differs");
     const auto &ag = a.maxflow_graph_state;
     const auto &eg = e.maxflow_graph_state;
     require(ag.node_num == eg.node_num && ag.arc_num == eg.arc_num,
@@ -6248,6 +6257,200 @@ void incrementalCutMaintenanceMatchesFullRecomputeAcrossLabelChanges() {
           "test did not exercise incident-edge deduplication");
 }
 
+void adaptiveFullMincutRecomputePolicyCoversThresholdBranches() {
+  require(!mcpd3::shouldFullyRecomputeMincut(
+              /*changed_node_count=*/10, /*node_count=*/10,
+              /*changed_node_fraction=*/0.0),
+          "zero adaptive fraction should disable full recomputation");
+  require(!mcpd3::shouldFullyRecomputeMincut(
+              /*changed_node_count=*/0, /*node_count=*/0,
+              /*changed_node_fraction=*/0.5),
+          "empty graphs should not request full recomputation");
+  require(!mcpd3::shouldFullyRecomputeMincut(
+              /*changed_node_count=*/4, /*node_count=*/10,
+              /*changed_node_fraction=*/0.5),
+          "changed-node count below threshold should remain incremental");
+  require(mcpd3::shouldFullyRecomputeMincut(
+              /*changed_node_count=*/5, /*node_count=*/10,
+              /*changed_node_fraction=*/0.5),
+          "changed-node count at threshold should use full recomputation");
+  require(mcpd3::shouldFullyRecomputeMincut(
+              /*changed_node_count=*/10, /*node_count=*/10,
+              /*changed_node_fraction=*/1.0),
+          "all changed nodes should satisfy a unit threshold");
+  requireThrows(
+      [] {
+        (void)mcpd3::shouldFullyRecomputeMincut(1, 1, -0.1);
+      },
+      "negative adaptive fraction should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::shouldFullyRecomputeMincut(1, 1, 1.1);
+      },
+      "adaptive fraction above one should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::shouldFullyRecomputeMincut(
+            1, 1, std::numeric_limits<double>::quiet_NaN());
+      },
+      "non-finite adaptive fraction should be rejected");
+  requireThrows(
+      [] {
+        (void)mcpd3::shouldFullyRecomputeMincut(2, 1, 0.5);
+      },
+      "changed-node count above graph size should be rejected");
+}
+
+void adaptiveFullMincutRecomputeMatchesExactFullTrajectory() {
+  const std::vector<int> arcs{
+      0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 0,
+      0, 1, 1, 4, 2, 6, 3, 7};
+  const std::vector<int> arc_capacities{
+      3, 5, 4, 2, 6, 1, 2, 7, 5, 3, 1, 4, 7, 2, 3, 6,
+      8, 1, 2, 5, 4, 3, 6, 2};
+  const std::vector<int> terminal_capacities(8, 0);
+
+  std::list<mcpd3::DualDecompositionConstraintArc> adaptive_constraints;
+  std::list<mcpd3::DualDecompositionConstraintArc> full_constraints;
+  mcpd3::PrimalDualMinCutSolver adaptive(
+      /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  mcpd3::PrimalDualMinCutSolver full(
+      /*nnode=*/8, /*narc=*/12, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  adaptive.setAdaptiveFullMinCutRecomputeFraction(0.25);
+  full.setForceFullMinCutRecompute(true);
+  for (int node = 0; node < 8; ++node) {
+    adaptive_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    full_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    adaptive.addSourceDualDecompositionConstraint(
+        std::prev(adaptive_constraints.end()));
+    full.addSourceDualDecompositionConstraint(std::prev(full_constraints.end()));
+  }
+
+  const std::vector<std::vector<int>> alpha_states{
+      {100, 100, 100, 100, 100, 100, 100, 100},
+      {-100, -100, -100, -100, -100, -100, -100, -100},
+      {100, -100, 100, -100, 100, -100, 100, -100},
+      {-100, 100, -100, 100, -100, 100, -100, 100},
+      {-100, -100, -100, -100, 100, 100, 100, 100},
+      {100, 100, 100, 100, -100, -100, -100, -100}};
+  for (const auto &alphas : alpha_states) {
+    auto apply_alphas = [&](auto &constraints) {
+      size_t node = 0;
+      for (auto &constraint : constraints) {
+        constraint.last_alpha = constraint.alpha;
+        constraint.alpha = alphas[node++];
+      }
+    };
+    apply_alphas(adaptive_constraints);
+    apply_alphas(full_constraints);
+
+    adaptive.solve();
+    full.solve();
+    require(adaptive.getMinCutValue() == full.getMinCutValue(),
+            "adaptive cut value differs from full recomputation");
+    for (int node = 0; node < 8; ++node) {
+      require(adaptive.getMinCutSolution(node) ==
+                  full.getMinCutSolution(node),
+              "adaptive cut labels differ from full recomputation");
+    }
+  }
+  require(adaptive.getAdaptiveFullMinCutRecomputeCount() > 0,
+          "adaptive trajectory should exercise full recomputation");
+  require(adaptive.getAdaptiveFullMinCutRecomputeCount() <
+              static_cast<long>(alpha_states.size()),
+          "adaptive trajectory should retain at least one incremental round");
+}
+
+void reinitializedMaxflowTreesMatchReusedTreeObjectives() {
+  const std::vector<int> arcs{
+      0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 0, 0, 3, 1, 4, 2, 5};
+  const std::vector<int> arc_capacities{
+      3, 7, 5, 2, 6, 4, 2, 8, 7, 3, 1, 5, 9, 2, 4, 6, 8, 1};
+  const std::vector<int> terminal_capacities(6, 0);
+
+  std::list<mcpd3::DualDecompositionConstraintArc> reused_constraints;
+  std::list<mcpd3::DualDecompositionConstraintArc> reset_constraints;
+  std::list<mcpd3::DualDecompositionConstraintArc> adaptive_constraints;
+  mcpd3::PrimalDualMinCutSolver reused(
+      /*nnode=*/6, /*narc=*/9, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  mcpd3::PrimalDualMinCutSolver reset(
+      /*nnode=*/6, /*narc=*/9, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  mcpd3::PrimalDualMinCutSolver adaptive(
+      /*nnode=*/6, /*narc=*/9, std::vector<int>(arcs), arc_capacities,
+      terminal_capacities);
+  reset.setForceMaxflowTreeReinitialization(true);
+  adaptive.setAdaptiveMaxflowTreeReinitialization(true);
+  for (int node = 0; node < 6; ++node) {
+    reused_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    reset_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    adaptive_constraints.emplace_back(
+        /*alpha=*/100, /*last_alpha=*/100, /*alpha_momentum=*/0,
+        /*partition_index_source=*/0, /*partition_index_target=*/1,
+        /*local_index_source=*/node, /*local_index_target=*/-1);
+    reused.addSourceDualDecompositionConstraint(
+        std::prev(reused_constraints.end()));
+    reset.addSourceDualDecompositionConstraint(
+        std::prev(reset_constraints.end()));
+    adaptive.addSourceDualDecompositionConstraint(
+        std::prev(adaptive_constraints.end()));
+  }
+
+  std::mt19937 rng(20260724);
+  std::uniform_int_distribution<int> alpha_dist(-200, 200);
+  constexpr int kRoundCount = 100;
+  for (int round = 0; round < kRoundCount; ++round) {
+    std::vector<int> alphas(6);
+    for (int &alpha : alphas) {
+      alpha = alpha_dist(rng);
+    }
+    auto assign_alphas = [&](auto &constraints) {
+      size_t node = 0;
+      for (auto &constraint : constraints) {
+        constraint.last_alpha = constraint.alpha;
+        constraint.alpha = alphas[node++];
+      }
+    };
+    assign_alphas(reused_constraints);
+    assign_alphas(reset_constraints);
+    assign_alphas(adaptive_constraints);
+
+    reused.solve();
+    reset.solve();
+    adaptive.solve();
+    require(reused.getMinCutValue() == reset.getMinCutValue(),
+            "tree reinitialization changed the exact local objective at round " +
+                std::to_string(round) + ": reused=" +
+                mcpd3::integer_to_string(reused.getMinCutValue()) +
+                " reset=" +
+                mcpd3::integer_to_string(reset.getMinCutValue()));
+    require(reused.getMinCutValue() == adaptive.getMinCutValue(),
+            "adaptive tree reinitialization changed the exact objective");
+  }
+  require(reset.getMaxflowTreeReinitializationCount() == kRoundCount - 1,
+          "tree reinitialization count should exclude the initial solve");
+  require(adaptive.getMaxflowTreeReinitializationCount() > 0,
+          "adaptive tree policy should exercise reinitialization");
+  require(adaptive.getMaxflowTreeReinitializationCount() <
+              kRoundCount - 1,
+          "adaptive tree policy should retain some reused-tree rounds");
+}
+
 long binaryCutValue(const std::vector<int> &labels,
                     const std::vector<int> &arcs,
                     const std::vector<int> &arc_capacities,
@@ -7272,6 +7475,9 @@ int main() {
     primalDualCapacityRefreshCanResetFlowState();
     primalDualCapacityRefreshScalesFlowStateByQuantumRatio();
     incrementalCutMaintenanceMatchesFullRecomputeAcrossLabelChanges();
+    adaptiveFullMincutRecomputePolicyCoversThresholdBranches();
+    adaptiveFullMincutRecomputeMatchesExactFullTrajectory();
+    reinitializedMaxflowTreesMatchReusedTreeObjectives();
     canonicalCutSelectionMatchesExhaustiveLatticeExtremes();
     referenceGuidedCutSelectionMatchesClosestExhaustiveOptimum();
     referenceGuidedCutSelectionValidatesLabels();

@@ -198,3 +198,15 @@
   objective gap.
 - Do not use cycle-state hashes as proof. Confirm exact ordered labels and
   exclude constant plateaus before attempting a speculative probe.
+
+## 2026-07-24 - No-reuse BK without changed residual arcs
+
+- BK historically passed its `record_changes` flag directly from
+  `reuse_trees`. Supplying a changed-arc output vector with tree reuse disabled
+  therefore produced an empty vector even when augmentations changed residual
+  capacities.
+- MCPD3 then left explicit arc flow and node balances stale. A randomized
+  alpha-trajectory test found the first objective mismatch at round 6.
+- Changed-arc recording must depend on whether the caller requested an output
+  buffer, not on whether search trees are reused. Do not benchmark or expose a
+  no-reuse mode without this invariant.

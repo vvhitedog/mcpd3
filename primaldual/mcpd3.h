@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -51,6 +52,25 @@ inline bool primaldual_timing_enabled() {
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+inline bool shouldFullyRecomputeMincut(
+    std::size_t changed_node_count, std::size_t node_count,
+    double changed_node_fraction) {
+  if (!std::isfinite(changed_node_fraction) ||
+      changed_node_fraction < 0.0 || changed_node_fraction > 1.0) {
+    throw std::invalid_argument(
+        "adaptive full mincut fraction must be in [0, 1]");
+  }
+  if (changed_node_count > node_count) {
+    throw std::invalid_argument(
+        "changed mincut node count exceeds graph node count");
+  }
+  if (changed_node_fraction == 0.0 || node_count == 0) {
+    return false;
+  }
+  return static_cast<double>(changed_node_count) >=
+         changed_node_fraction * static_cast<double>(node_count);
+}
+
 class PrimalDualMinCutSolver {
 public:
   using MaxflowGraph =
@@ -73,6 +93,9 @@ public:
     long last_regularization_anchor_sink_count = 0;
     long last_regularization_active_sink_count = 0;
     std::vector<Objective> regularization_weights;
+    bool maxflow_tree_reinitialize_next = false;
+    bool last_maxflow_tree_reinitialized = false;
+    long maxflow_tree_reinitialization_count = 0;
     MaxflowGraph::ReusableState maxflow_graph_state;
   };
 
@@ -133,6 +156,14 @@ public:
         canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
         reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
         force_full_mincut_recompute_(false),
+        adaptive_full_mincut_recompute_fraction_(0.0),
+        adaptive_full_mincut_recompute_count_(0),
+        force_maxflow_tree_reinitialization_(false),
+        adaptive_maxflow_tree_reinitialization_(false),
+        maxflow_tree_reinitialize_next_(false),
+        last_maxflow_tree_reinitialized_(false),
+        current_cut_labels_changed_(false),
+        maxflow_tree_reinitialization_count_(0),
         maxflow_changed_list_(128),
         mincut_value_(0),
         regularization_str_(0),
@@ -164,7 +195,16 @@ public:
         has_solution_(false),
         canonical_cut_selection_(CanonicalCutSelection::SOLVER_DEFAULT),
         reference_cut_selection_(ReferenceCutSelection::CLOSEST_EXACT),
-        force_full_mincut_recompute_(false), maxflow_changed_list_(128),
+        force_full_mincut_recompute_(false),
+        adaptive_full_mincut_recompute_fraction_(0.0),
+        adaptive_full_mincut_recompute_count_(0),
+        force_maxflow_tree_reinitialization_(false),
+        adaptive_maxflow_tree_reinitialization_(false),
+        maxflow_tree_reinitialize_next_(false),
+        last_maxflow_tree_reinitialized_(false),
+        current_cut_labels_changed_(false),
+        maxflow_tree_reinitialization_count_(0),
+        maxflow_changed_list_(128),
         mincut_value_(0), regularization_str_(0),
         last_regularization_budget_(0), last_regularization_contribution_(0),
         last_regularization_anchor_sink_count_(0),
@@ -475,6 +515,30 @@ public:
     force_full_mincut_recompute_ = enabled;
   }
 
+  void setAdaptiveFullMinCutRecomputeFraction(double fraction) {
+    (void)shouldFullyRecomputeMincut(0, 0, fraction);
+    adaptive_full_mincut_recompute_fraction_ = fraction;
+  }
+
+  long getAdaptiveFullMinCutRecomputeCount() const {
+    return adaptive_full_mincut_recompute_count_;
+  }
+
+  void setForceMaxflowTreeReinitialization(bool enabled) {
+    force_maxflow_tree_reinitialization_ = enabled;
+  }
+
+  void setAdaptiveMaxflowTreeReinitialization(bool enabled) {
+    adaptive_maxflow_tree_reinitialization_ = enabled;
+    if (!enabled) {
+      maxflow_tree_reinitialize_next_ = false;
+    }
+  }
+
+  long getMaxflowTreeReinitializationCount() const {
+    return maxflow_tree_reinitialization_count_;
+  }
+
   Objective maxflow() {
     MaxflowGraph::arc_id a = maxflow_graph_.get_first_arc();
     for (int i = 0; i < narc_; ++i) {
@@ -502,6 +566,7 @@ public:
   }
 
   void solve() {
+    current_cut_labels_changed_ = false;
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_) {
       last_solve_work_telemetry_ = SolveWorkTelemetry{};
@@ -559,6 +624,10 @@ public:
     updateMinCut();   // get updated min cut solution
 #endif
     has_solution_ = true;
+    if (adaptive_maxflow_tree_reinitialization_) {
+      maxflow_tree_reinitialize_next_ =
+          is_first_iteration_ || !current_cut_labels_changed_;
+    }
 
     // set flag indicating that incremental methods should be used hereafter
     if (is_first_iteration_ || is_first_iteration_of_new_scale_) {
@@ -964,6 +1033,12 @@ public:
     state.last_regularization_active_sink_count =
         last_regularization_active_sink_count_;
     state.regularization_weights = regularization_weights_;
+    state.maxflow_tree_reinitialize_next =
+        maxflow_tree_reinitialize_next_;
+    state.last_maxflow_tree_reinitialized =
+        last_maxflow_tree_reinitialized_;
+    state.maxflow_tree_reinitialization_count =
+        maxflow_tree_reinitialization_count_;
     state.maxflow_graph_state = maxflow_graph_.captureReusableState();
     return state;
   }
@@ -998,6 +1073,13 @@ public:
     last_regularization_active_sink_count_ =
         state.last_regularization_active_sink_count;
     regularization_weights_ = state.regularization_weights;
+    maxflow_tree_reinitialize_next_ =
+        state.maxflow_tree_reinitialize_next;
+    last_maxflow_tree_reinitialized_ =
+        state.last_maxflow_tree_reinitialized;
+    maxflow_tree_reinitialization_count_ =
+        state.maxflow_tree_reinitialization_count;
+    current_cut_labels_changed_ = false;
     incremental_mincut_nodes_.clear();
     incremental_arcs_.clear();
     maxflow_changed_list_.Reset();
@@ -1358,13 +1440,26 @@ private:
                CanonicalCutSelection::SOLVER_DEFAULT) {
       updateCanonicalMinCut();
       computeMinCutValueInitial();
-    } else if (is_first_iteration_ || force_full_mincut_recompute_) {
-      updateMinCutInitial();
-      if (!is_first_iteration_) {
-        computeMinCutValueInitial();
-      }
     } else {
-      updateMinCutIncremental();
+      const bool adaptive_full_recompute =
+          !is_first_iteration_ && !force_full_mincut_recompute_ &&
+          shouldFullyRecomputeMincut(
+              incremental_mincut_nodes_.size(),
+              static_cast<std::size_t>(nnode_),
+              adaptive_full_mincut_recompute_fraction_);
+      if (adaptive_full_recompute) {
+        ++adaptive_full_mincut_recompute_count_;
+      }
+      if (is_first_iteration_ || force_full_mincut_recompute_ ||
+          adaptive_full_recompute ||
+          last_maxflow_tree_reinitialized_) {
+        updateMinCutInitial();
+        if (!is_first_iteration_) {
+          computeMinCutValueInitial();
+        }
+      } else {
+        updateMinCutIncremental();
+      }
     }
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
     if (track_maxflow_work_telemetry_ &&
@@ -1638,6 +1733,10 @@ private:
     for (int i = 0; i < nnode_; ++i) {
       const int new_label =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
+      if (adaptive_maxflow_tree_reinitialization_ &&
+          new_label != x_[i]) {
+        current_cut_labels_changed_ = true;
+      }
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
       if (track_maxflow_work_telemetry_ && new_label != x_[i]) {
         ++last_solve_work_telemetry_.cut_labels_changed;
@@ -1687,6 +1786,9 @@ private:
       const int x_i_new =
           maxflow_graph_.what_segment(i) == MaxflowGraph::SINK ? 1 : 0;
       if (x_i_new != x_[i]) {
+        if (adaptive_maxflow_tree_reinitialization_) {
+          current_cut_labels_changed_ = true;
+        }
         incremental_changed_node_flags_[static_cast<size_t>(i)] = 1;
 #if defined(MCPD3_ENABLE_MAXFLOW_WORK_TELEMETRY)
         if (track_maxflow_work_telemetry_) {
@@ -1852,8 +1954,19 @@ private:
 
   void computeMaxflow() {
     if (is_first_iteration_) {
+      last_maxflow_tree_reinitialized_ = false;
       maxflow_graph_.maxflow();
+    } else if (force_maxflow_tree_reinitialization_ ||
+               (adaptive_maxflow_tree_reinitialization_ &&
+                maxflow_tree_reinitialize_next_)) {
+      last_maxflow_tree_reinitialized_ = true;
+      incremental_mincut_nodes_.clear();
+      maxflow_graph_.maxflow(
+          /*reuse_trees=*/false, incremental_arcs_,
+          /*changed_list=*/nullptr);
+      ++maxflow_tree_reinitialization_count_;
     } else {
+      last_maxflow_tree_reinitialized_ = false;
       incremental_mincut_nodes_.clear();
       maxflow_graph_.maxflow(true, incremental_arcs_, &maxflow_changed_list_);
 
@@ -1955,6 +2068,14 @@ private:
   long reference_closure_count_ = 0;
   long reference_decode_time_us_ = 0;
   bool force_full_mincut_recompute_;
+  double adaptive_full_mincut_recompute_fraction_;
+  long adaptive_full_mincut_recompute_count_;
+  bool force_maxflow_tree_reinitialization_;
+  bool adaptive_maxflow_tree_reinitialization_;
+  bool maxflow_tree_reinitialize_next_;
+  bool last_maxflow_tree_reinitialized_;
+  bool current_cut_labels_changed_;
+  long maxflow_tree_reinitialization_count_;
 
   Block<MaxflowGraph::node_id> maxflow_changed_list_;
   std::vector<int> incremental_mincut_nodes_;

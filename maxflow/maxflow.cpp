@@ -648,7 +648,9 @@ flowtype Graph<captype, tcaptype, flowtype>::maxflow_impl(
       current_node = i;
 
       /* augmentation */
-      augment(a, changed_arcs, changed_arc_indices, reuse_trees);
+      augment(a, changed_arcs, changed_arc_indices,
+              reuse_trees || changed_arcs != nullptr ||
+                  changed_arc_indices != nullptr);
       /* augmentation end */
 
       /* adoption */
